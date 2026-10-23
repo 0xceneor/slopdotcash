@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { OwnerCommitmentInput } from "../backend/payments/owner-review";
+import type { MonthlyCommitmentInput } from "../backend/payments/monthly";
 import { decodeBase58Bytes } from "./lib/base58";
 import { ESCROW_NETWORKS } from "./lib/escrow-policy.mjs";
 import type { VaultConnection } from "./lib/evm-vault-actions";
@@ -31,20 +31,20 @@ type Pending = {
 };
 /** Keep submitted requests reachable even if a later review is held or unavailable. */
 export function recoverOwnerCommitments(projectId: string) {
-  const pending: { cycleId: string; expected: OwnerCommitmentInput }[] = [];
+  const pending: { cycleId: string; expected: MonthlyCommitmentInput }[] = [];
   for (const key of Object.keys(sessionStorage)) {
-    if (!key.startsWith(`slop:award-commitment:v1:${projectId}:`)) continue;
+    if (!key.startsWith(`slop:award-commitment:v2:${projectId}:`)) continue;
     const stored = JSON.parse(sessionStorage.getItem(key) ?? "null") as Pending;
     const plan = stored?.plan;
     if (
       !plan ||
       plan.projectId !== projectId ||
       !/^\d{4}-(?:0[1-9]|1[0-2])$/.test(plan.cycleId) ||
-      ![plan.manifestSha256, plan.proposalSha256, plan.decisionsSha256].every(
-        (value) => /^[a-f0-9]{64}$/.test(value),
+      ![plan.manifestSha256, plan.snapshotSha256].every((value) =>
+        /^[a-f0-9]{64}$/.test(value),
       ) ||
       key !==
-        `slop:award-commitment:v1:${projectId}:${plan.cycleId}:${plan.deployment.network}:${plan.award.githubUserId}`
+        `slop:award-commitment:v2:${projectId}:${plan.cycleId}:${plan.deployment.network}:${plan.award.githubUserId}`
     )
       throw new Error(
         "A saved commitment cannot be read. Check wallet activity before starting another request.",
@@ -55,8 +55,7 @@ export function recoverOwnerCommitments(projectId: string) {
         network: plan.deployment.network,
         githubUserId: plan.award.githubUserId,
         manifestSha256: plan.manifestSha256,
-        proposalSha256: plan.proposalSha256,
-        decisionsSha256: plan.decisionsSha256,
+        snapshotSha256: plan.snapshotSha256,
       },
     });
   }
@@ -70,12 +69,12 @@ export default function OwnerCommitment({
 }: {
   projectId: string;
   cycleId: string;
-  expected: OwnerCommitmentInput;
+  expected: MonthlyCommitmentInput;
 }) {
   const family =
     ESCROW_NETWORKS[expected.network as keyof typeof ESCROW_NETWORKS]?.family;
   const solana = family === "solana";
-  const key = `slop:award-commitment:v1:${projectId}:${cycleId}:${expected.network}:${expected.githubUserId}`;
+  const key = `slop:award-commitment:v2:${projectId}:${cycleId}:${expected.network}:${expected.githubUserId}`;
   const [saved] = useState(() => {
     try {
       const raw = sessionStorage.getItem(key);
@@ -161,7 +160,7 @@ export default function OwnerCommitment({
   const send = () =>
     run(async () => {
       if (!wallet || !review || pending || storageError) return;
-      // Re-run publication, authority, identity and revision checks just before signing.
+      // Re-run authority, snapshot, funding and revision checks just before signing.
       const current = await requestOwnerCommitment(
         projectId,
         cycleId,

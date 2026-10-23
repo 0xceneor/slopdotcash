@@ -29,6 +29,7 @@ import {
   assertLeaderboardSnapshot,
   type LeaderboardSnapshot,
 } from "../src/lib/leaderboard";
+import { assertEscrowDecisions } from "../src/lib/payments/escrow-review";
 import { createProjectView } from "../src/lib/project-view";
 import { findHistoricalProject, type ProjectId } from "../src/lib/projects.mjs";
 import { createRewardCycleProposal } from "../src/lib/reward-cycle";
@@ -40,7 +41,6 @@ import {
   type RewardAllocation,
   type RewardAllocationManifest,
 } from "../src/lib/rewards";
-import { assertEscrowDecisions } from "./escrow-review";
 import { validateEscrowCycle } from "./prepare-escrow-cycle";
 import { loadPriorCycleAccrual } from "./prior-cycle-accrual";
 import {
