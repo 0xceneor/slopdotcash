@@ -1,8 +1,19 @@
 /** In-app inbox contract shared by the API and the page (PRD NOT-01). */
 
+/**
+ * Every inbox kind (migration 0063). Writers live in
+ * backend/notifications/events.ts. `application_approved` and
+ * `application_rejected` come only from the legacy admin admission path and
+ * stay readable as history.
+ */
 export const NOTIFICATION_KINDS = [
   "application_approved",
   "application_rejected",
+  "project_ready",
+  "project_scan_failed",
+  "project_installation_lost",
+  "project_paused_by_flags",
+  "flag_pause_review",
   "project_revision",
   "award_reserved",
   "payment_paid",
@@ -16,6 +27,7 @@ export const NOTIFICATION_KINDS = [
   "reinstatement_review",
   "payout_exception",
   "security_case",
+  "security_report_received",
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
@@ -125,6 +137,16 @@ export function notificationTitle(n: Notification): string {
       return `Your application for ${n.subject} was approved. The project is listed as paused.`;
     case "application_rejected":
       return `Your application for ${n.subject} was not approved.`;
+    case "project_ready":
+      return `The ${n.subject} project is ready and open to contributor work.`;
+    case "project_scan_failed":
+      return `The security scan of ${n.subject} could not finish. Contributor work stays closed until a scan passes.`;
+    case "project_installation_lost":
+      return `Slopbot is no longer installed on a ${n.subject} repository. Install it again so reviews continue.`;
+    case "project_paused_by_flags":
+      return `Two contributors flagged ${n.subject}, so it is paused. A clean fresh scan reinstates it.`;
+    case "flag_pause_review":
+      return `Two contributor flags paused ${n.subject}.`;
     case "project_revision":
       return `The ${n.subject} project manifest changed.`;
     case "award_reserved":
@@ -142,7 +164,7 @@ export function notificationTitle(n: Notification): string {
     case "reinstatement_requested":
       return `A reinstatement request for ${n.subject} is open for independent review.`;
     case "project_reinstated":
-      return `The ${n.subject} project is reinstated. It stays paused until an admin activates it.`;
+      return `The ${n.subject} project is reinstated.`;
     case "reinstatement_denied":
       return `The reinstatement request for ${n.subject} was denied.`;
     case "reinstatement_review":
@@ -151,6 +173,8 @@ export function notificationTitle(n: Notification): string {
       return `A payout from ${n.subject} is held and needs attention.`;
     case "security_case":
       return `Private security case ${n.subject} changed.`;
+    case "security_report_received":
+      return `Your private report ${n.subject} was received.`;
   }
 }
 
@@ -168,8 +192,15 @@ export function notificationAction(n: Notification): string {
     case "payout_exception":
       return "Open project";
     case "reinstatement_review":
+    case "flag_pause_review":
       return "Open admin";
+    case "project_ready":
+    case "project_scan_failed":
+    case "project_installation_lost":
+    case "project_paused_by_flags":
+      return "Open project";
     case "security_case":
+    case "security_report_received":
       return "Open security cases";
     case "application_rejected":
       return "Apply again";

@@ -1,8 +1,33 @@
 # Slop notify Worker
 
-`slop-notify` sends one plain-text email to each Slop admin when a person
-submits a new project application. It exists because Pages Functions cannot use
-`send_email` bindings.
+`slop-notify` delivers the private and optional email for Slop inbox notices
+and the internal Slopbot cost notices. It exists because Pages Functions
+cannot use `send_email` bindings. It also still sends one plain-text email to
+each Slop admin when a person submits a project application; that route
+belongs to the legacy admin admission path and goes away with it, because
+self-service setup (PRD section 4) needs no routine admin review.
+
+## Inbox events (NOT-01)
+
+Inbox rows are written in the same D1 batch as their source change by
+`backend/notifications/events.ts`; one source transition is one event per
+recipient. Notices report outcomes and exceptions, not routine admission:
+
+| Kind | Writer | Recipients |
+| --- | --- | --- |
+| `project_ready` | `notifyProjectRevision` on a revision that makes the project active | owners, never the publisher |
+| `project_scan_failed` | `notifyProjectScanFailed` for an `incomplete` assessment | owners |
+| `project_installation_lost` | `notifySlopbotInstallationLost` when an installation is suspended or removed | owners of each affected project |
+| `project_paused_by_flags`, `flag_pause_review` | `notifyProjectFlagPause` for the flag-caused `quarantine` record | owners; listed moderators |
+| `payout_held`, `payout_exception` | payout dispatch | contributor; project steward |
+| `security_report_received` | `notifySecurityReportReceived` once a report is verified | reporter |
+| `security_case` | private case events | current case role holders |
+
+Only `security_case` notices ask for an acknowledgment, and only they
+escalate when one is missed. A report receipt uses the `security-receipt-v1`
+private template: it is mailed generically, escalates only on failed
+delivery, and never waits for an acknowledgment. Ordinary notices have read
+state only. The application kinds remain readable history.
 
 ## Project-application route
 
