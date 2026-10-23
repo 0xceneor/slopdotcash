@@ -49,7 +49,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     const vetting = new CloudflareVettingPersistence(
       db,
       async (assessment) =>
-        assessment.result !== null && evidence.complete(assessment.result),
+        assessment.result !== null && evidence.retained(assessment.result),
     );
     const github = {
       fetch: (url: string, init: RequestInit) => fetch(url, init),

@@ -25,6 +25,11 @@ import {
   verifyParts,
 } from "./evidence-chunks";
 import type { VettingResult } from "./result";
+import {
+  isScanResult,
+  type RecordedVettingResult,
+  type VettingScanResult,
+} from "./scan-result";
 
 // Whole objects stay within the run ceiling; each read/upload part stays bounded.
 export const MAX_EVIDENCE_OBJECT_BYTES = EVIDENCE_RUN_BYTES;
@@ -761,6 +766,58 @@ export class VettingEvidence {
     } catch {
       return false;
     }
+  }
+  /**
+   * A bounded scan's retained evidence: the private report, the exact
+   * inventory it read, the dependency locks and every named artifact,
+   * registered under the scan run and still readable with their digests.
+   * A reused scan points at the original run of the cached assessment.
+   */
+  async scanRetained(
+    result: VettingScanResult,
+    assessmentId = result.assessmentId,
+  ) {
+    const runId = result.scan.runId;
+    try {
+      const run = await this.run(assessmentId, runId);
+      if (run.trace_sha256 !== result.scan.reportSha256) return false;
+      const objects =
+        (
+          await this.deps.db
+            .prepare(
+              "SELECT * FROM vetting_evidence_objects WHERE assessment_id=? AND run_id=?",
+            )
+            .bind(assessmentId, runId)
+            .all<ObjectRow>()
+        ).results ?? [];
+      const bySha = new Map(objects.map((object) => [object.sha256, object]));
+      const required = new Set([
+        result.scan.reportSha256,
+        result.assessed.inputManifestSha256,
+        ...result.assessed.dependencyLocks.map((lock) => lock.sha256),
+        ...result.artifacts.flatMap((artifact) => [
+          artifact.sha256,
+          ...(artifact.parentSha256 ? [artifact.parentSha256] : []),
+        ]),
+      ]);
+      for (const sha of required) {
+        const row = bySha.get(sha);
+        if (!row) return false;
+        await this.verify(row, run);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  /** Retained evidence for either recorded schema; v1 keeps its closure rule. */
+  async retained(result: RecordedVettingResult) {
+    return isScanResult(result)
+      ? this.scanRetained(
+          result,
+          result.reusedAssessmentId ?? result.assessmentId,
+        )
+      : this.complete(result);
   }
   async register(request: Request, assessment: string, runId: string) {
     const { policy } = this.configuration();

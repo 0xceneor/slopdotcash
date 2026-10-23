@@ -1,104 +1,149 @@
-# Isolated artifact inventory
+# Project security vetting worker
 
-PRD VET-04 and MVP-12 require recursive artifact inspection before execution.
-The result API stores supplied records but does not inspect artifact bytes.
-`artifacts.py` adds that inspection step. It never executes or releases input.
+PRD section 8 requires a scan of submitted project code for malicious
+behavior before contributors install or run it: wallet drainers, password
+and credential theft, secret exfiltration, harmful installation scripts and
+agent prompt injection. The result binds the checked revision. A scan is not
+a guarantee of safety, and an incomplete scan never establishes clearance.
+Issues #909 and #911; audit findings 8 and 9.
 
-Run on an unprivileged, dedicated Linux analysis host with Python 3.12 or later
-and Bubblewrap 0.9 or later:
+## Bounded malicious-code scan
+
+`bounded-scan.ts` implements the ordinary scan. It produces a
+`slop-vetting-result-v2` result (`backend/vetting/scan-result.ts`). "Scan
+passed" (`clean`) means exactly that these defined checks passed on every
+defined surface of the exact assessed commit and skill template. It does not
+mean the code is free of all malware.
+
+| Surface | What it reads |
+| --- | --- |
+| `source` | Code and configuration files of the executable inventory |
+| `manifests` | `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod` and similar |
+| `dependencies` | Lockfiles; each lock digest is recorded |
+| `installScripts` | Package lifecycle hooks, `setup.py`, `build.rs`, Makefiles, `.husky`, `.devcontainer`, `.vscode` tasks, install and bootstrap scripts |
+| `downloads` | URLs that install-time content downloads, and committed binaries or archives |
+| `agentInstructions` | `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, README, `SKILL.md`, Cursor, Claude, Copilot and similar rule files |
+
+Each surface is checked for the five threats: `wallet-drainer`,
+`credential-theft`, `secret-exfiltration`, `unsafe-execution` and
+`prompt-injection`. The deterministic rules in `bounded-scan.ts` are
+indicators, never confirmations. A match marks the check `flagged`.
+
+The flow for one queued assessment:
+
+1. `acquire.ts` and `queue.ts` fetch the exact queued commit and template
+   inputs without execution. `readAcquiredSource` rereads every stored object
+   by its SHA-256 and carries acquisition gaps (submodules, links, LFS) into
+   the scan.
+2. `inspectRepository` sorts files into surfaces and runs the checks. It is
+   pure and deterministic. It builds one evidence bundle of at most 1 MiB and
+   1,024 items. Content that does not fit, does not decode, exceeds 256 KiB or
+   was not acquired is a visibility gap, never a silent skip.
+3. `reviewScan` (`scanners.ts`, prompt `slop-scan-review-1`) runs one primary
+   model review of that bundle. Its risk is read from the review itself: any
+   suspected malice or high finding is `high`; any other finding or partial
+   coverage is `ambiguous`; otherwise `low`. No score threshold is used.
+4. A second model or specialist review runs only when the result is
+   ambiguous or high risk: a non-low primary review, a flagged check, a
+   medium or worse finding, or an unreleased binary or download.
+   `composeScanResult` reports `needsSpecialist`.
+5. `composeScanResult` derives the disposition. A separate trusted reviewer's
+   confirmation makes it `malicious`; a model label never does. Otherwise it
+   is `clean` only if the intake rules accept clean, and `incomplete` in every
+   other case.
+6. Retain the private report, inventory, dependency locks and every named
+   artifact under the scan run in the restricted evidence store
+   ([EVIDENCE.md](../../backend/vetting/EVIDENCE.md)), then publish once with
+   `publishResult` ([PUBLICATION.md](PUBLICATION.md)).
+
+### Cache and rescans
+
+The inventory digest covers executable content only. Documentation that is
+not an agent instruction file does not change it. A later commit whose
+executable inventory, skill template and scan policy are byte-identical to a
+clean scan reuses that result with `reuseCleanScan`; the intake checks that
+the cited original is a clean, non-reused scan of the same repository,
+inventory, template, policy, run and report. Any change to executable
+content produces a new digest and a new scan.
+
+The signed service calls `POST /api/v1/vetting/refresh` before reading the
+queue. Slop then queues, for the project steward, a scan of every listed
+project whose current content or live pin has no scan, and one fresh scan per
+live pin for a project that contributor flags alone paused. Banned and
+moderator-restricted projects wait for a moderator. An admin can still queue a
+scan by hand.
+
+### Isolated execution
+
+Ordinary source needs no execution. When an install hook or download cannot
+be judged from its bytes, an operator may retrieve it or run it in an isolated
+runner and pass the retrieved bytes to `inspectRepository`, recording the run
+in the result's `execution` field. The contract has no way to say that a
+secret was provided: `secretsProvided` must be `false` and egress
+`default-deny`. An unretrieved download keeps `downloads` partial, and an
+unanalyzed binary stays quarantined, so the result stays incomplete until a
+specialist or the isolated analysis releases it.
+
+## Evidence
+
+```sh
+bun test scripts/vetting-bounded-scan.test.ts scripts/vetting-scan-flags.test.ts
+```
+
+The worker tests use harmless fixtures and a real local HTTP server that
+answers in the Anthropic Messages format. They check surface coverage, threat
+flags, gap handling, cache-digest stability, reuse refusal for changed
+content, specialist escalation and composition into an accepted result. The
+API workflow runs on the real migrations and handlers with an ephemeral
+Ed25519 key and local workerd R2. It proves that a clean supported scan lets
+activation proceed, reuse and automatic rescans, refusal without retained
+evidence, and that incomplete results stay quarantined.
+
+These tests do not prove a real provider review, the deployed scanner
+service, an approved isolated runner or live acceptance. No real provider
+call, key or project is used.
+
+## Other components
+
+These earlier components remain available. They are no longer a prerequisite
+for an ordinary clean result:
+
+- [Isolated artifact inventory](#isolated-artifact-inventory) (`artifacts.py`)
+  for recursive archive inspection.
+- [Offline VM evidence](VM.md), [assembly](ASSEMBLY.md),
+  [dependencies](DEPENDENCIES.md), [provenance](PROVENANCE.md) and
+  [events](EVENTS.md) for advanced detonation of risky artifacts.
+- `slop-vetting-result-v1` secure-VM results keep their parser and rules.
+  Old incomplete scans stay incomplete; nothing reinterprets them as clean.
+
+### Isolated artifact inventory
+
+`artifacts.py` inspects one supplied file recursively. It never executes or
+releases input. Run it on an unprivileged, dedicated Linux analysis host with
+Python 3.12 or later and Bubblewrap 0.9 or later:
 
 ```sh
 python3 workers/vetting/artifacts.py /private/quarantine/object
 python3 workers/vetting/artifacts_workflow_test.py
 ```
 
-Treat stdout as private evidence. Paths and hashes can identify private source.
-Do not publish it. The caller must store the input and result under the approved
-private retention and access policy. No network request or assessment update
-occurs. A missing sandbox cannot consume a pending assessment.
+Treat stdout as private evidence. The launcher copies at most 32 MiB from a
+regular file without following its final symlink, into separate user,
+process, mount and network namespaces with no home mount, host network,
+inherited environment or device passthrough. The parser reads ZIP and TAR
+members in memory, rejects links, special files, encrypted members, duplicate
+paths and traversal, and limits depth to 6, records to 1,024 and expanded
+bytes to 64 MiB. Failure returns an `incomplete` result with no partial
+inventory; every record stays `quarantined`. A host that blocks namespace
+creation fails closed. A namespace isolates this parser; it is not a hardware
+VM.
 
-The launcher copies at most 32 MiB from a regular file without following its
-final symlink. The parser receives only that copy, its own source, and the
-read-only system runtime. It runs in separate user, process, mount and network
-namespaces. It has no home mount, host network, inherited environment, device
-passthrough or additional user namespace. Its input is read-only. The host must
-keep credentials and private files out of `/usr` and `/lib`.
+## Remaining work and operator decisions
 
-The parser hashes each file and records its parent hash and member path. It
-reads ZIP and TAR members in memory; it never extracts them to disk. It rejects
-links, special files, encrypted ZIP members, duplicate paths and path traversal.
-It limits recursive depth to 6, records to 1,024 and total expanded bytes to
-64 MiB. The parser has a 256 MiB address limit, 10 CPU seconds and no output-file
-allowance. The launcher limits wall time to 15 seconds and output to 2 MiB.
-Failure returns an `incomplete` result and a nonzero exit, with no partial
-inventory. Archive problems appear in `visibilityGaps`; all records remain
-`quarantined`, including ordinary text and recognized native, script and WASM
-files. Unknown formats cannot receive automatic approval.
-
-Use the distribution's maintained Bubblewrap/AppArmor policy. Ubuntu 24.04
-provides `bwrap-userns-restrict` in the `apparmor-profiles` package. A host that
-blocks namespace creation fails closed. Do not disable its global security
-controls to make a scan pass. The operational host needs a reviewed sandbox
-policy and patched runtime. A namespace isolates this parser; it does not meet
-the separate hardware VM execution requirement in VET-02.
-
-## Workflow evidence
-
-The test invokes the real CLI and real Bubblewrap process. It uses harmless
-nested archives with a shell payload that would create a sentinel if executed,
-and a WASM header. It checks the exact hashes and parent links, and that the
-sentinel is absent. Other inputs exercise archive traversal, symbolic links,
-expansion and recursion limits. A separate probe in the same namespace setup
-attempts to read a synthetic host secret, overwrite the input and contact a
-real listener outside the namespace. All three attempts must fail. A missing
-sandbox must return incomplete without records.
-
-These are component tests. They do not prove interception of package hooks,
-native loading or a second-stage download inside a project VM.
-
-## Work still required for issue 909
-
-The source now includes signed queue acquisition, immutable Git and template
-inputs, this isolated analyzer, an offline VM fixture, and private evidence
-assembly. These components do not establish a
-ready vetting service. General project execution, complete pre-execution and
-guest/host/proxy observation, artifact release decisions, actual configured
-provider acceptance, trusted publication and operational access still need
-their own evidence. Check service readiness before starting a queued scan.
-Do not consume a pending assessment merely because some components can run.
-
-The remaining work is not only configuration:
-
-| Requirement | Remaining source or acceptance work | Required operator decision |
-| --- | --- | --- |
-| VET-02 host | The Linux KVM adapter needs actual acceptance on the intended isolated host. Darwin evidence covers harmless fixtures only. | Designate a patched, dedicated Linux host, unprivileged account, reviewed executable/image pins, resource limits and private retention location. |
-| VET-02 project commands | General install, build, test and skill execution is disabled. The present profile runs a fixed harmless command. | Approve the immutable command/runtime profile and adequate resource and coverage limits for each assessed revision. Repository instructions cannot grant that approval. |
-| VET-03 observation | Complete structured event collection, loss/tamper detection, independent host/proxy evidence, controlled runtime DNS/HTTP/TLS routing, complete filesystem differences beyond the bounded workspace capture, environment/wallet canaries and full captured-evidence integration remain source gaps. | Select the reviewed Linux collector, network, storage, operator-access and retention contracts. A dependency prefetch is not a runtime proxy. |
-| VET-04 artifact review | Format-aware static analysis, provenance/upstream comparison, full artifact lineage and durable release decisions remain source gaps. Existing inspection and denial do not release an artifact. | Name the release authority and exact-digest baseline/review policy. A model label cannot supply authority. |
-| VET-04 runtime coverage | The materialized-file gate does not establish complete native, interpreter, bytecode, WASM, JIT or memory-only interception. | Approve supported runtime coverage and the policy for unsupported behavior. Missing coverage must stay incomplete; do not enable arbitrary source on that basis. |
-
-The [restricted store and console](../../backend/vetting/EVIDENCE.md) verify
-bounded retained objects. They do not prove complete assembly retention or
-external deletion, legal-hold and backup controls. Configuration and live
-acceptance remain required.
-
-QEMU was considered for the execution adapter. Its [security
-contract](https://www.qemu.org/docs/master/system/security.html) requires a
-hardware accelerator and a supported machine. It also requires host privilege
-and resource confinement. Software emulation cannot establish guest isolation.
-The bounded [offline VM component](VM.md) records actual private boot and
-timeout evidence. Its optional profile executes only a privately approved,
-content-bound harmless acquired fixture. Its materialized-file gate is not
-complete interpreter, JIT or memory interception, and it does not claim VET-02
-acceptance on Darwin.
-
-The [assembler](ASSEMBLY.md) can bind that guest receipt to the same signed queue,
-source inventory, approved command profile, collector, VM and serial bytes. It
-supplies decoded syscall and output bytes once, while retaining the complete raw
-serial digest. It keeps trusted coverage gaps even if guest JSON claims success.
-It neither invokes providers nor publishes a decision.
-
-The [Bubblewrap project](https://github.com/containers/bubblewrap) explains that
-its security depends on the caller's namespace and filesystem configuration.
-This component uses separate namespaces and grants only the parser's runtime
-and one input file. It must remain separate from signing keys and model clients.
+| Item | Status |
+| --- | --- |
+| Scanner service deployment | Not deployed by this source. It needs its Ed25519 key, the public key in `VETTING_RESULT_PUBLIC_KEYS`, a provider profile and the evidence store policy. |
+| Provider and model | The operator selects and pins the primary and specialist models; no default exists. |
+| Isolated runner | PRD section 9 accepts a lighter isolated runner than Linux/KVM. Its selection and acceptance remain open. |
+| Specialist authority | Who may supply a malicious `confirmation` is an operator trust boundary; a model label cannot. |
+| Live acceptance | Clean, incomplete, malicious, flag and reinstatement paths on staging with the real services. |
