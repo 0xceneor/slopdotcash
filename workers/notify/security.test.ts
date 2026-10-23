@@ -1,6 +1,7 @@
 /** Actual case transitions and migrated SQLite D1, with only the mail transport substituted. */
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
+import { notifySecurityReportReceived } from "../../backend/notifications/events";
 import {
   handleNotificationsApi,
   type NotificationsDependencies,
@@ -26,9 +27,13 @@ const origin = "https://slop.test";
 async function setup(beforeMailMigration = false) {
   const { db: source, sqlite } = sqliteD1(
     readdirSync("migrations")
+      // The pre-pilot database lacks 0030 and 0063, which rebuilds the inbox
+      // table around 0030's trigger; the rollout test applies both later.
       .filter(
         (p) =>
-          p.endsWith(".sql") && (!beforeMailMigration || !p.startsWith("0030")),
+          p.endsWith(".sql") &&
+          (!beforeMailMigration ||
+            !(p.startsWith("0030") || p.startsWith("0063"))),
       )
       .sort(),
   );
@@ -207,6 +212,42 @@ test("a case change queues once, sends generic per-role mail once, and needs exp
   h.sqlite.close();
 });
 
+test("a report receipt is mailed generically and never escalates for a missing acknowledgment", async () => {
+  const h = await setup();
+  await dispatchSecurityMail(h.deps);
+  expect(h.sent).toHaveLength(2);
+  h.sqlite
+    .query(
+      "UPDATE security_cases SET submission_state = 'verified', received_at = ?, verified_at = ?, verified_by_github_id = ? WHERE id = ?",
+    )
+    .run(at, at, owner.githubId, h.caseId);
+  for (let replay = 0; replay < 2; replay++)
+    await h.db.batch([notifySecurityReportReceived(h.db, h.caseId)]);
+  const receipt = h
+    .rows()
+    .find((r) => r.event_key === `security-receipt:${h.caseId}`);
+  if (!receipt) throw new Error("Receipt notice missing");
+  expect(receipt.recipient_github_id).toBe(reporter.githubId);
+  await dispatchSecurityMail(h.deps);
+  expect(h.sent).toHaveLength(3);
+  const mail = h.sent[2];
+  expect(mail.to).toBe("reporter@example.com");
+  expect(mail.mime).toContain("Your private Slop inbox has a new notice.");
+  expect(mail.mime).not.toContain("Acknowledge");
+  expect(mail.mime).not.toContain(h.caseId);
+  // Past the program's one-hour acknowledgment target, the unacknowledged
+  // case notices escalate to their backups; the receipt does not.
+  h.advance(2 * 3600_000);
+  await dispatchSecurityMail(h.deps);
+  const escalated = h
+    .rows()
+    .map((r) => r.escalation_of)
+    .filter((id) => id !== null);
+  expect(escalated).toHaveLength(2);
+  expect(escalated).not.toContain(receipt.id);
+  h.sqlite.close();
+});
+
 test("ambiguous transport never resends until independent non-acceptance evidence; failures reach only an authorized backup", async () => {
   const h = await setup();
   h.deps.sendEmail = async () => {
@@ -339,6 +380,14 @@ test("pre-pilot inbox history is not mailed and does not expose a dead acknowled
   const h = await setup(true);
   h.sqlite.exec(
     readFileSync("migrations/0030_security_notification_outbox.sql", "utf8"),
+  );
+  expect(h.rows()).toEqual([]);
+  // Rebuilding the inbox table copies history back before its triggers exist.
+  h.sqlite.exec(
+    readFileSync(
+      "migrations/0063_account_closure_notification_events.sql",
+      "utf8",
+    ),
   );
   expect(h.rows()).toEqual([]);
   const response = await handleNotificationsApi(
