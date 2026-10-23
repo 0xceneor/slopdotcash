@@ -1,6 +1,14 @@
 # Independent model review transports
 
-PRD VET-05 and MVP-12 require two independent reviews of the exact evidence.
+The bounded malicious-code scan uses `reviewScan`: one primary review with the
+pinned `slop-scan-review-1` prompt, whose coverage areas are the scan's five
+threat checks, and a second model or specialist review only for an ambiguous
+or high-risk result ([worker](README.md)). It shares the transports, limits,
+identity checks and private records described below, and never retries, picks
+a fallback provider, clears or bans.
+
+The historical secure-VM contract (`slop-vetting-result-v1`) required two
+independent reviews of the exact evidence.
 `reviewIndependently` implements the OpenAI Responses and Anthropic Messages
 transports. It makes one call per configured reviewer. It does not choose a
 model, replace a failed provider, retry an uncertain request, or make a project

@@ -1,0 +1,722 @@
+/**
+ * The bounded malicious-code scan (PRD section 8; audit finding 8). It reads
+ * the acquired bytes of one exact revision without executing them, sorts
+ * them into the defined surfaces, runs deterministic checks for the defined
+ * threats and prepares one evidence bundle for the model review. It then
+ * composes a `slop-vetting-result-v2` result whose disposition follows the
+ * intake rules exactly.
+ *
+ * "Clean" means these defined checks passed on every defined surface. It is
+ * not a guarantee that the code contains no malware. Unread, oversized or
+ * undecodable content, an unretrieved install-time download and an
+ * unanalyzed binary keep the result incomplete. Execution is never needed
+ * for ordinary source; an operator runs an install hook or download in an
+ * isolated runner only when its bytes cannot be judged statically, and that
+ * runner never receives secrets.
+ */
+import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import type { VettingArtifact } from "../../backend/vetting/result";
+import {
+  SCAN_SURFACES,
+  SCAN_THREATS,
+  type ScanReview,
+  type ScanSurface,
+  type ScanThreat,
+  scanProblems,
+  specialistRequired,
+  VETTING_SCAN_SCHEMA,
+  type VettingScanResult,
+} from "../../backend/vetting/scan-result";
+import { SCAN_REVIEW_AREAS, type ScannerEvidence } from "./scanners";
+
+export const INVENTORY_SCHEMA = "slop-scan-inventory-v1";
+/** The evidence bundle the model reads; never silently shortened. */
+export const MAX_INVENTORY_BYTES = 1024 * 1024;
+export const MAX_INVENTORY_ITEMS = 1024;
+/** A single text file larger than this is a visibility gap, not a skip. */
+export const MAX_TEXT_FILE_BYTES = 256 * 1024;
+
+const sha256 = (bytes: string | Uint8Array) =>
+  createHash("sha256").update(bytes).digest("hex");
+
+export type ScanInputFile = { path: string; bytes: Uint8Array };
+/** An install-time download an operator retrieved by its exact URL. */
+export type RetrievedDownload = { url: string; bytes: Uint8Array };
+
+export type ScanFinding = VettingScanResult["findings"][number] & {
+  path: string;
+};
+
+const LOCKFILES = new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "bun.lock",
+  "bun.lockb",
+  "cargo.lock",
+  "poetry.lock",
+  "pipfile.lock",
+  "uv.lock",
+  "go.sum",
+  "gemfile.lock",
+  "composer.lock",
+  "flake.lock",
+]);
+const MANIFESTS = new Set([
+  "package.json",
+  "pyproject.toml",
+  "setup.cfg",
+  "pipfile",
+  "cargo.toml",
+  "go.mod",
+  "gemfile",
+  "composer.json",
+  "build.gradle",
+  "build.gradle.kts",
+  "pom.xml",
+  "deno.json",
+  "flake.nix",
+]);
+const AGENT_INSTRUCTIONS = new Set([
+  "agents.md",
+  "claude.md",
+  "gemini.md",
+  "contributing.md",
+  "readme.md",
+  "skill.md",
+  ".cursorrules",
+  ".windsurfrules",
+  ".clinerules",
+  "copilot-instructions.md",
+]);
+const INSTALL_FILES = new Set([
+  "setup.py",
+  "build.rs",
+  "makefile",
+  "justfile",
+  "install.sh",
+  "postinstall.js",
+  "preinstall.js",
+  ".envrc",
+  "tasks.json",
+  "devcontainer.json",
+]);
+const SOURCE_EXTENSIONS =
+  /\.(?:[cm]?[jt]sx?|py|rb|go|rs|java|kt|kts|swift|c|cc|cpp|h|hpp|cs|php|sh|bash|zsh|ps1|psm1|bat|cmd|lua|pl|r|scala|sol|move|vue|svelte|astro|toml|ya?ml|json|gradle|nix|mk)$/iu;
+const EXECUTABLE_BINARIES =
+  /\.(?:node|wasm|so|dylib|dll|exe|jar|pyc|class|bin|a|o)$/iu;
+const ARCHIVES = /\.(?:zip|tar|tgz|gz|bz2|xz|7z|rar|whl|gem|crate)$/iu;
+/** Lifecycle hooks package managers run on install, without being asked. */
+const INSTALL_HOOKS = [
+  "preinstall",
+  "install",
+  "postinstall",
+  "prepare",
+  "prepublish",
+];
+
+function basename(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1).toLowerCase();
+}
+
+/** The surfaces one path belongs to; empty for non-executable content. */
+export function surfacesOf(path: string): ScanSurface[] {
+  const lower = path.toLowerCase();
+  const name = basename(path);
+  const surfaces = new Set<ScanSurface>();
+  if (LOCKFILES.has(name) || /^requirements[^/]*\.txt$/u.test(name))
+    surfaces.add("dependencies");
+  if (MANIFESTS.has(name) || name.endsWith(".gemspec"))
+    surfaces.add("manifests");
+  if (
+    AGENT_INSTRUCTIONS.has(name) ||
+    lower.startsWith(".cursor/") ||
+    lower.startsWith(".claude/") ||
+    lower.startsWith(".github/instructions/") ||
+    lower.includes("/.cursor/rules/")
+  )
+    surfaces.add("agentInstructions");
+  if (
+    INSTALL_FILES.has(name) ||
+    lower.startsWith(".husky/") ||
+    lower.startsWith(".devcontainer/") ||
+    lower.startsWith(".vscode/") ||
+    /(?:^|\/)(?:install|setup|bootstrap)[^/]*\.(?:sh|ps1|bat|cmd|py|js|mjs)$/u.test(
+      lower,
+    )
+  )
+    surfaces.add("installScripts");
+  if (SOURCE_EXTENSIONS.test(name) || surfaces.size > 0) surfaces.add("source");
+  return [...surfaces];
+}
+
+type Rule = {
+  threat: ScanThreat;
+  severity: "medium" | "high";
+  pattern: RegExp;
+  summary: string;
+  /** Applies only to these surfaces; every surface when absent. */
+  surfaces?: ScanSurface[];
+};
+
+/**
+ * Deterministic indicators. A match is a reason to look closer, never a
+ * confirmation: it escalates the result to a specialist review.
+ */
+const RULES: Rule[] = [
+  {
+    threat: "wallet-drainer",
+    severity: "high",
+    pattern:
+      /\.config\/solana\/id\.json|wallet\.dat|nkbihfbeogaeaoehlefnkodbefgpgknn|bfnaelmomeimhlpmgjnjophhpkkoljpa|Local Extension Settings|\.ethereum\/keystore/iu,
+    summary: "Reads a wallet key file or browser wallet extension store",
+  },
+  {
+    threat: "wallet-drainer",
+    severity: "medium",
+    pattern:
+      /\b(?:mnemonic|seed[ _-]?phrase|private[ _-]?key)\b[^\n]{0,120}\b(?:fetch|axios|https?:\/\/|XMLHttpRequest|sendTransaction|transfer)\b/iu,
+    summary: "Handles a seed phrase or private key next to a network send",
+  },
+  {
+    threat: "credential-theft",
+    severity: "high",
+    pattern:
+      /~\/\.ssh\/|\bid_(?:rsa|ed25519|ecdsa)\b|\.aws\/credentials|\.git-credentials|\.netrc\b|\.config\/gh\/hosts\.yml|\bLogin Data\b|security find-(?:generic|internet)-password|\bgh auth token\b/iu,
+    summary: "Reads a stored credential, key or password store",
+  },
+  {
+    threat: "credential-theft",
+    severity: "medium",
+    pattern: /~\/\.npmrc|\.pypirc|\.docker\/config\.json|\.kube\/config/iu,
+    summary: "Reads a package-registry or cluster credential file",
+  },
+  {
+    threat: "secret-exfiltration",
+    severity: "high",
+    pattern:
+      /discord(?:app)?\.com\/api\/webhooks|api\.telegram\.org\/bot|webhook\.site|requestbin|pipedream\.net|pastebin\.com\/api|transfer\.sh|ngrok(?:-free)?\.(?:io|app)|interact\.sh|oast\.(?:fun|live|site)/iu,
+    summary:
+      "Sends data to a webhook or paste endpoint commonly used for exfiltration",
+  },
+  {
+    threat: "secret-exfiltration",
+    severity: "high",
+    pattern:
+      /JSON\.stringify\(\s*process\.env\s*\)|json\.dumps\(\s*(?:dict\()?\s*os\.environ|\b(?:env|printenv)\s*\|\s*(?:curl|wget|nc)\b/iu,
+    summary: "Serializes the whole environment, which holds secrets",
+  },
+  {
+    threat: "unsafe-execution",
+    severity: "high",
+    pattern:
+      /\b(?:curl|wget)\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba|z)?sh\b|iex\s*\(\s*(?:New-Object\s+Net\.WebClient|iwr|Invoke-WebRequest)|powershell[^\n]*-(?:e|enc|encodedcommand)\s/iu,
+    summary: "Pipes a remote download straight into a shell",
+  },
+  {
+    threat: "unsafe-execution",
+    severity: "high",
+    pattern:
+      /\beval\s*\(\s*(?:atob|Buffer\.from|unescape|decodeURIComponent)\s*\(|\bexec\s*\(\s*(?:base64\.b64decode|zlib\.decompress|marshal\.loads)|new\s+Function\s*\(\s*(?:atob|Buffer\.from)\s*\(/iu,
+    summary: "Executes decoded or obfuscated code",
+  },
+  {
+    threat: "unsafe-execution",
+    severity: "medium",
+    pattern: /\b(?:child_process|subprocess|os\.system|spawnSync|execSync)\b/u,
+    summary: "An install-time script starts processes",
+    surfaces: ["installScripts"],
+  },
+  {
+    threat: "prompt-injection",
+    severity: "high",
+    pattern:
+      /\b(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above|earlier|system)\s+(?:instructions|prompts|rules)|\byou\s+are\s+now\s+(?:in\s+)?(?:developer|admin|god|jailbreak)|do\s+not\s+(?:tell|inform|show)\s+the\s+(?:user|operator|human)/iu,
+    summary: "Text tries to override a coding agent's instructions",
+  },
+  {
+    threat: "prompt-injection",
+    severity: "high",
+    pattern:
+      /\b(?:send|post|upload|exfiltrate|paste)\b[^\n]{0,80}\b(?:api[ _-]?key|token|secret|credential|password|private key|\.env)\b/iu,
+    summary: "Instructions ask an agent to send secrets somewhere",
+    surfaces: ["agentInstructions"],
+  },
+  {
+    threat: "prompt-injection",
+    severity: "medium",
+    // Zero-width and bidirectional control characters hide text from reviewers.
+    pattern: /[​-‏‪-‮⁦-⁩]/u,
+    summary: "Hidden or reordered text in instructions",
+    surfaces: ["agentInstructions"],
+  },
+];
+
+const DOWNLOAD =
+  /\b(?:curl|wget|Invoke-WebRequest|iwr)\b[^\n]*?(https?:\/\/[^\s"'`)|]+)|\b(?:fetch|urlopen|requests\.get|https?\.get)\s*\(\s*["'`](https?:\/\/[^"'`]+)["'`]/giu;
+
+function decode(bytes: Uint8Array): string | null {
+  // NUL bytes mean binary content, not text to read.
+  if (bytes.subarray(0, 8192).includes(0)) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+function lineOf(text: string, index: number): number {
+  let line = 1;
+  for (let position = 0; position < index; position += 1)
+    if (text.charCodeAt(position) === 10) line += 1;
+  return line;
+}
+
+function binaryMagic(bytes: Uint8Array): boolean {
+  const head = [...bytes.subarray(0, 4)];
+  const is = (...magic: number[]) =>
+    magic.every((value, i) => head[i] === value);
+  return (
+    is(0x7f, 0x45, 0x4c, 0x46) || // ELF
+    is(0x4d, 0x5a) || // PE
+    is(0xcf, 0xfa, 0xed, 0xfe) || // Mach-O 64
+    is(0xfe, 0xed, 0xfa, 0xcf) ||
+    is(0xca, 0xfe, 0xba, 0xbe) || // Mach-O fat or Java class
+    is(0x00, 0x61, 0x73, 0x6d) // WASM
+  );
+}
+
+function checkText(
+  path: string,
+  text: string,
+  surfaces: ScanSurface[],
+): ScanFinding[] {
+  const findings: ScanFinding[] = [];
+  for (const rule of RULES) {
+    if (rule.surfaces && !rule.surfaces.some((s) => surfaces.includes(s)))
+      continue;
+    const match = rule.pattern.exec(text);
+    if (match === null) continue;
+    findings.push({
+      severity: rule.severity,
+      category: rule.threat,
+      summary: rule.summary,
+      evidence: `${path}:${lineOf(text, match.index)}`.slice(0, 300),
+      path,
+    });
+  }
+  return findings;
+}
+
+function installHookCommands(path: string, text: string): string[] {
+  if (basename(path) !== "package.json") return [];
+  try {
+    const scripts = (JSON.parse(text) as { scripts?: Record<string, unknown> })
+      .scripts;
+    return INSTALL_HOOKS.flatMap((hook) =>
+      typeof scripts?.[hook] === "string" ? [scripts[hook] as string] : [],
+    );
+  } catch {
+    return [];
+  }
+}
+
+export type RepositoryInspection = {
+  /** Exact bytes of the evidence bundle the model reads. */
+  inventory: Uint8Array;
+  inventorySha256: string;
+  coverage: VettingScanResult["coverage"];
+  checks: VettingScanResult["checks"];
+  findings: ScanFinding[];
+  artifacts: VettingArtifact[];
+  dependencyLocks: { path: string; sha256: string }[];
+  visibilityGaps: string[];
+  /** Download URLs install-time content references. */
+  downloads: string[];
+};
+
+/**
+ * Inspects one revision's acquired files. Pure and deterministic: the same
+ * bytes produce the same inventory digest, which keys the scan cache, so an
+ * unchanged executable inventory reuses its clean result and any change to
+ * executable content is scanned again.
+ */
+export function inspectRepository(input: {
+  files: ScanInputFile[];
+  /** Source the acquisition could not read; each keeps the scan incomplete. */
+  acquisitionGaps?: string[];
+  /** Install-time downloads an operator retrieved, by exact URL. */
+  retrievedDownloads?: RetrievedDownload[];
+}): RepositoryInspection {
+  const files = [...input.files].sort((a, b) =>
+    a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+  );
+  const counts = Object.fromEntries(
+    SCAN_SURFACES.map((surface) => [surface, 0]),
+  ) as Record<ScanSurface, number>;
+  const partial = new Set<ScanSurface>();
+  const gaps: string[] = [...(input.acquisitionGaps ?? [])];
+  if (gaps.length > 0) partial.add("source");
+  const findings: ScanFinding[] = [];
+  const artifacts: VettingArtifact[] = [];
+  const dependencyLocks: { path: string; sha256: string }[] = [];
+  const items: { id: string; text: string; sha256: string }[] = [];
+  const downloads = new Set<string>();
+  let inventoryBytes = 0;
+  const addItem = (id: string, text: string, surfaces: ScanSurface[]) => {
+    const size = Buffer.byteLength(text) + id.length + 160;
+    if (
+      items.length >= MAX_INVENTORY_ITEMS ||
+      inventoryBytes + size > MAX_INVENTORY_BYTES
+    ) {
+      for (const surface of surfaces) partial.add(surface);
+      gaps.push(`Review inventory budget exceeded at ${id}`);
+      return;
+    }
+    inventoryBytes += size;
+    items.push({ id, text, sha256: sha256(text) });
+  };
+  for (const file of files) {
+    const surfaces = surfacesOf(file.path);
+    const digest = sha256(file.bytes);
+    if (
+      EXECUTABLE_BINARIES.test(file.path) ||
+      ARCHIVES.test(file.path) ||
+      binaryMagic(file.bytes)
+    ) {
+      // A committed binary or archive cannot be judged from text. It stays
+      // quarantined until a specialist or isolated analysis releases it.
+      artifacts.push({
+        sha256: digest,
+        parentSha256: null,
+        origin: "repository",
+        path: file.path.slice(0, 500),
+        type: ARCHIVES.test(file.path)
+          ? "archive"
+          : file.path.toLowerCase().endsWith(".wasm")
+            ? "wasm"
+            : file.path.toLowerCase().endsWith(".node")
+              ? "native-module"
+              : "binary",
+        state: "quarantined",
+        analysis: "pending",
+        requestedExecution: false,
+      });
+      counts.downloads += 1;
+      continue;
+    }
+    if (surfaces.length === 0) continue;
+    for (const surface of surfaces) counts[surface] += 1;
+    if (surfaces.includes("dependencies"))
+      dependencyLocks.push({ path: file.path.slice(0, 500), sha256: digest });
+    const text = decode(file.bytes);
+    if (text === null || file.bytes.byteLength > MAX_TEXT_FILE_BYTES) {
+      for (const surface of surfaces) partial.add(surface);
+      gaps.push(
+        text === null
+          ? `Undecodable executable content at ${file.path}`
+          : `Oversized executable content at ${file.path}`,
+      );
+      continue;
+    }
+    findings.push(...checkText(file.path, text, surfaces));
+    const hooks = installHookCommands(file.path, text);
+    if (hooks.length > 0) {
+      counts.installScripts += 1;
+      for (const command of hooks)
+        findings.push(
+          ...checkText(`${file.path}#scripts`, command, ["installScripts"]),
+        );
+    }
+    if (surfaces.includes("installScripts") || hooks.length > 0)
+      for (const match of [text, ...hooks].join("\n").matchAll(DOWNLOAD))
+        downloads.add((match[1] ?? match[2]).slice(0, 500));
+    addItem(file.path, text, surfaces);
+  }
+  const retrieved = new Map(
+    (input.retrievedDownloads ?? []).map((download) => [
+      download.url,
+      download.bytes,
+    ]),
+  );
+  for (const url of [...downloads].sort()) {
+    counts.downloads += 1;
+    const bytes = retrieved.get(url);
+    if (bytes === undefined) {
+      partial.add("downloads");
+      gaps.push(`Install-time download not retrieved: ${url}`);
+      continue;
+    }
+    const text = decode(bytes);
+    const artifactFindings =
+      text === null ? [] : checkText(url, text, ["installScripts"]);
+    findings.push(...artifactFindings);
+    artifacts.push({
+      sha256: sha256(bytes),
+      parentSha256: null,
+      origin: url,
+      path: url,
+      type: "second-stage",
+      // Readable text with no indicator is statically clean; anything else
+      // waits for a specialist.
+      state:
+        text !== null && artifactFindings.length === 0
+          ? "released"
+          : "quarantined",
+      analysis:
+        text === null
+          ? "pending"
+          : artifactFindings.length === 0
+            ? "static-clean"
+            : "suspicious",
+      requestedExecution: true,
+    });
+    if (text !== null) addItem(`download:${url}`, text, ["downloads"]);
+  }
+  const inventory = new TextEncoder().encode(
+    JSON.stringify({
+      schemaVersion: INVENTORY_SCHEMA,
+      items,
+      visibilityGaps: gaps,
+    }),
+  );
+  return {
+    inventory,
+    inventorySha256: sha256(inventory),
+    coverage: Object.fromEntries(
+      SCAN_SURFACES.map((surface) => [
+        surface,
+        {
+          state: partial.has(surface) ? "partial" : "complete",
+          items: counts[surface],
+        },
+      ]),
+    ) as VettingScanResult["coverage"],
+    checks: Object.fromEntries(
+      SCAN_THREATS.map((threat) => [
+        threat,
+        findings.some((finding) => finding.category === threat)
+          ? "flagged"
+          : "passed",
+      ]),
+    ) as VettingScanResult["checks"],
+    findings,
+    artifacts,
+    dependencyLocks,
+    visibilityGaps: gaps,
+    downloads: [...downloads].sort(),
+  };
+}
+
+/**
+ * The intake form of one model review. Its risk is read from the review
+ * itself, with no score threshold: any suspected malice or high finding is
+ * high risk, any other finding or incomplete coverage is ambiguous.
+ */
+export function scanReview(evidence: ScannerEvidence): ScanReview {
+  const completed = evidence.review.status === "completed";
+  const risk = !completed
+    ? null
+    : evidence.review.verdict === "malicious-suspected" ||
+        evidence.findings.some((finding) =>
+          ["high", "critical"].includes(finding.severity),
+        )
+      ? "high"
+      : evidence.review.verdict === "findings" ||
+          evidence.coverage === null ||
+          SCAN_REVIEW_AREAS.some(
+            (area) => evidence.coverage?.[area] !== "complete",
+          )
+        ? "ambiguous"
+        : "low";
+  return {
+    provider: evidence.review.provider,
+    model: evidence.review.model,
+    promptPolicyRevision: evidence.review.promptPolicyRevision,
+    inputManifestSha256: evidence.review.inputManifestSha256,
+    runId: evidence.review.runId,
+    status: evidence.review.status,
+    verdict: completed ? evidence.review.verdict : null,
+    risk,
+    findingCount: evidence.review.findingCount,
+  };
+}
+
+/** The queue assignment a scan answers, exactly as the signed queue sent it. */
+export type QueuedScan = {
+  assessmentId: string;
+  projectId: string;
+  revision: number;
+  manifestSha256: string;
+  repository: string;
+  commitSha: string;
+  templateSha256: string;
+};
+
+/**
+ * Composes the signed-intake result and its private report. The disposition
+ * is derived, never supplied: a trusted confirmation makes it malicious,
+ * otherwise it is clean only when the intake's own rules accept clean, and
+ * incomplete in every other case. A primary review is always required; a
+ * specialist review is needed only when `needsSpecialist` says so.
+ */
+export function composeScanResult(input: {
+  queued: QueuedScan;
+  inspection: RepositoryInspection;
+  policyVersion: string;
+  runId: string;
+  startedAt: string;
+  completedAt: string;
+  primary: ScannerEvidence;
+  specialist?: ScannerEvidence | null;
+  execution?: VettingScanResult["execution"];
+  /** A separate trusted reviewer, never a model response or repository text. */
+  confirmation?: NonNullable<VettingScanResult["confirmation"]>;
+}) {
+  const { inspection } = input;
+  for (const scanner of [input.primary, input.specialist ?? null])
+    if (
+      scanner &&
+      scanner.review.inputManifestSha256 !== inspection.inventorySha256
+    )
+      throw new Error("A review read another inventory");
+  const report = new TextEncoder().encode(
+    JSON.stringify({
+      schemaVersion: "slop-scan-report-v1",
+      assessmentId: input.queued.assessmentId,
+      inventorySha256: inspection.inventorySha256,
+      findings: inspection.findings,
+      downloads: inspection.downloads,
+      visibilityGaps: inspection.visibilityGaps,
+      reviews: [input.primary, ...(input.specialist ? [input.specialist] : [])],
+    }),
+  );
+  const result: VettingScanResult = {
+    schemaVersion: VETTING_SCAN_SCHEMA,
+    assessmentId: input.queued.assessmentId,
+    projectId: input.queued.projectId,
+    revision: input.queued.revision,
+    manifestSha256: input.queued.manifestSha256,
+    disposition: "incomplete",
+    policyVersion: input.policyVersion,
+    assessed: {
+      repository: input.queued.repository,
+      commitSha: input.queued.commitSha,
+      templateSha256: input.queued.templateSha256,
+      inputManifestSha256: inspection.inventorySha256,
+      dependencyLocks: inspection.dependencyLocks.slice(0, 200),
+    },
+    scan: {
+      runId: input.runId,
+      startedAt: input.startedAt,
+      completedAt: input.completedAt,
+      reportSha256: sha256(report),
+    },
+    coverage: inspection.coverage,
+    checks: inspection.checks,
+    visibilityGaps: [
+      ...new Set([
+        ...inspection.visibilityGaps,
+        ...input.primary.visibilityGaps,
+        ...(input.specialist?.visibilityGaps ?? []),
+      ]),
+    ].slice(0, 50),
+    execution: input.execution ?? null,
+    reusedAssessmentId: null,
+    primaryReview: scanReview(input.primary),
+    specialistReview: input.specialist ? scanReview(input.specialist) : null,
+    artifacts: inspection.artifacts.slice(0, 500),
+    findings: inspection.findings
+      .slice(0, 200)
+      .map(({ path: _path, ...finding }) => finding),
+    confirmation: null,
+  };
+  if (inspection.dependencyLocks.length > 200)
+    result.visibilityGaps.push("More than 200 dependency locks");
+  if (input.confirmation) {
+    result.disposition = "malicious";
+    result.confirmation = input.confirmation;
+  } else {
+    result.disposition = "clean";
+    if (scanProblems(result).length > 0) result.disposition = "incomplete";
+  }
+  return {
+    result,
+    report,
+    /** True when only a second model or specialist can finish this scan. */
+    needsSpecialist:
+      result.disposition !== "malicious" &&
+      !input.specialist &&
+      specialistRequired(result),
+  };
+}
+
+/**
+ * A cached clean result for byte-identical executable content, restated for
+ * a new queue assignment. The intake checks the cited original.
+ */
+export function reuseCleanScan(input: {
+  queued: QueuedScan;
+  original: VettingScanResult;
+  originalAssessmentId: string;
+  inventorySha256: string;
+}): VettingScanResult {
+  const { original } = input;
+  if (
+    original.disposition !== "clean" ||
+    original.reusedAssessmentId !== null ||
+    original.assessed.inputManifestSha256 !== input.inventorySha256 ||
+    original.assessed.templateSha256 !== input.queued.templateSha256 ||
+    original.assessed.repository.toLowerCase() !==
+      input.queued.repository.toLowerCase()
+  )
+    throw new Error("The cached scan does not cover this executable content");
+  return {
+    ...original,
+    assessmentId: input.queued.assessmentId,
+    projectId: input.queued.projectId,
+    revision: input.queued.revision,
+    manifestSha256: input.queued.manifestSha256,
+    assessed: {
+      ...original.assessed,
+      commitSha: input.queued.commitSha,
+    },
+    reusedAssessmentId: input.originalAssessmentId,
+  };
+}
+
+/**
+ * Reads the immutable source a verified acquisition stored (`acquire.ts`):
+ * every inventory record's bytes, rechecked against their SHA-256. Its
+ * visibility gaps (submodules, links, LFS objects) carry into the scan.
+ */
+export async function readAcquiredSource(directory: string): Promise<{
+  files: ScanInputFile[];
+  acquisitionGaps: string[];
+}> {
+  const inventory = JSON.parse(
+    await readFile(join(directory, "inventory.json"), "utf8"),
+  ) as {
+    schema: string;
+    records: { path: string; sha256: string | null }[];
+    visibilityGaps: string[];
+  };
+  if (inventory.schema !== "slop-source-inventory-v1")
+    throw new Error("Unknown source inventory");
+  const files: ScanInputFile[] = [];
+  for (const record of inventory.records) {
+    if (record.sha256 === null) continue;
+    if (!/^[0-9a-f]{64}$/u.test(record.sha256))
+      throw new Error("Invalid source object digest");
+    const bytes = new Uint8Array(
+      await readFile(join(directory, "objects", record.sha256)),
+    );
+    if (sha256(bytes) !== record.sha256)
+      throw new Error("Acquired source bytes changed");
+    files.push({ path: record.path, bytes });
+  }
+  return { files, acquisitionGaps: [...inventory.visibilityGaps] };
+}

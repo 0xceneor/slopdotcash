@@ -74,7 +74,7 @@ beforeEach(async () => {
   retained = await localVettingEvidence(db, () => NOW);
   vetting = new CloudflareVettingPersistence(
     db,
-    async (a) => a.result !== null && retained.evidence.complete(a.result),
+    async (a) => a.result !== null && retained.evidence.retained(a.result),
   );
   keys = await vettingKeyPair();
   configuredKeys = keys.publicKey;
