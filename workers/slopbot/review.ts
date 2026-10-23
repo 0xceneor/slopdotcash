@@ -3,6 +3,12 @@
 // after independent state checks.
 import { activeBudgetBlock, recordBudgetBlock } from "./budget-blocks";
 import {
+  type ClosureEligibility,
+  closureEligibility,
+  hasVerifiedSkillRun,
+  isMember,
+} from "./closure-eligibility";
+import {
   AUTHOR_DAILY_CAP,
   type Category,
   CLOSE_CONFIDENCE,
@@ -12,6 +18,7 @@ import {
   NEVER_CLOSE,
   parseRepositoryConfig,
   REOPEN_BREAKER_RATIO,
+  SECURITY_CATEGORIES,
   SHADOW_DAYS,
   SHADOW_MIN_REVIEWS,
   UNIVERSAL_CATEGORIES,
@@ -39,7 +46,14 @@ import {
   type QualityEvidence,
   type QualityTrust,
 } from "./quality";
-import { registeredRepository, requireRegisteredRepository } from "./registry";
+import {
+  type ReviewScope,
+  registeredRepository,
+  requireRegisteredRepository,
+  requireScope,
+  reviewRegistration,
+  scopeAllowed,
+} from "./registry";
 import { route } from "./routing";
 
 export type ReviewEnv = ModelEnv &
@@ -216,6 +230,7 @@ type Context = {
   diffTruncated: boolean;
   baseSha: string;
   quality: QualityEvidence[];
+  registration: { scope: ReviewScope; projectId: string };
 };
 
 async function publicRepository(
@@ -229,6 +244,7 @@ async function publicRepository(
 async function loadContext(
   env: ReviewEnv,
   job: Extract<Job, { kind: "review" }>,
+  registration: Context["registration"],
 ): Promise<Context | null> {
   const github = await GitHubClient.forInstallation(
     env.SLOPBOT_APP_ID,
@@ -318,6 +334,7 @@ async function loadContext(
     policy,
     policyDigest,
     diffTruncated: truncated,
+    registration,
   };
 }
 
@@ -494,7 +511,10 @@ async function closureState(
   if (!context.config.config.closure)
     return { allowed: false, why: "maintainer has not enabled closure" };
   if (!mayClose)
-    return { allowed: false, why: "author is exempt or membership is unknown" };
+    return {
+      allowed: false,
+      why: "author is not eligible for automatic closure",
+    };
   const install = await store.installation(db, job.installationId);
   const ageDays =
     install === null
@@ -530,6 +550,38 @@ async function closureState(
   if (closesToday >= context.config.config.dailyCloseCap)
     return { allowed: false, why: "daily closure cap reached" };
   return { allowed: true, why: "closure permitted" };
+}
+
+/** The explicit closure-eligibility check. Run at routing and again
+ * immediately before every closure, from fresh GitHub and D1 state.
+ */
+async function closureEligibilityFor(
+  db: store.D1Database,
+  job: Extract<Job, { kind: "review" }>,
+  context: Context,
+  exemption: Exemption,
+  member?: boolean,
+): Promise<ClosureEligibility> {
+  const evidence = {
+    itemKind: job.itemKind,
+    exemption,
+    member: true,
+    verifiedSkillRun: true,
+  };
+  const structural = closureEligibility(evidence);
+  if (!structural.eligible) return structural;
+  evidence.member = member ?? (await isMember(db, context.issue.user.id));
+  evidence.verifiedSkillRun =
+    evidence.member &&
+    (await hasVerifiedSkillRun(db, {
+      authorId: context.issue.user.id,
+      projectId: context.registration.projectId,
+      owner: job.owner,
+      repo: job.repo,
+      number: job.number,
+      nodeId: context.issue.node_id,
+    }));
+  return closureEligibility(evidence);
 }
 
 function disclosure(call: CallRecord | null): string {
@@ -604,7 +656,7 @@ async function addLabels(
   github: GitHubClient,
   labels: string[],
 ): Promise<void> {
-  await requireRegisteredRepository(env.SLOPBOT_DB, job);
+  await requireScope(env.SLOPBOT_DB, job, "security");
   const result = await github.request<{ name: string }[]>(
     "POST",
     `/repos/${job.owner}/${job.repo}/issues/${job.number}/labels`,
@@ -629,8 +681,9 @@ async function upsertComment(
   claim: store.ReviewClaim,
 ) {
   const db = env.SLOPBOT_DB;
+  const scope = context.registration.scope;
   await store.assertReviewClaim(db, claim);
-  await requireRegisteredRepository(db, job);
+  await requireScope(db, job, scope);
   let existing = await store.commentId(db, context.issue.node_id);
   for (let attempt = 0; attempt < 2; attempt++) {
     if (existing === null) {
@@ -650,7 +703,7 @@ async function upsertComment(
       );
     }
     await store.assertReviewClaim(db, claim);
-    await requireRegisteredRepository(db, job);
+    await requireScope(db, job, scope);
     const updated = await context.github.request<{ id: number }>(
       "PATCH",
       `/repos/${job.owner}/${job.repo}/issues/comments/${existing}`,
@@ -669,7 +722,7 @@ async function upsertComment(
       throw new Error("GitHub review comment changed during recovery");
   }
   await store.assertReviewClaim(db, claim);
-  await requireRegisteredRepository(db, job);
+  await requireScope(db, job, scope);
   const created = await context.github.request<{ id: number }>(
     "POST",
     `/repos/${job.owner}/${job.repo}/issues/${job.number}/comments`,
@@ -698,15 +751,16 @@ export async function reviewItem(
   job: Extract<Job, { kind: "review" }>,
 ): Promise<string> {
   const db = env.SLOPBOT_DB;
-  if (!(await registeredRepository(db, job)))
-    return "repository is not active in the Slop registry";
+  const registration = await reviewRegistration(db, job);
+  if (registration === null)
+    return "repository is not registered in the Slop registry";
   const install = await store.installation(db, job.installationId);
   const installationActive =
     install !== null &&
     install.removed_at === null &&
     install.suspended_at === null;
   if (!installationActive) return "installation removed or suspended";
-  const context = await loadContext(env, job);
+  const context = await loadContext(env, job, registration);
   if (context === null) return "item or repository not readable";
   const { issue, pull, repo, config } = context;
   const reviewKey = await sha256Hex(
@@ -717,6 +771,8 @@ export async function reviewItem(
       await sha256Hex(context.itemText),
       env.SLOPBOT_QUALITY_VERIFIER_KEY ?? "",
       ...context.quality.map((q) => q.id).sort(),
+      // A security-only review is distinct; contributor keys stay unchanged.
+      ...(registration.scope === "security" ? ["security-review"] : []),
     ].join("|"),
   );
   if (await store.reviewExists(db, reviewKey))
@@ -750,6 +806,7 @@ export async function reviewItem(
     );
     authorCapReached = (history?.total_count ?? 0) === 0;
   }
+  const participant = await isMember(db, issue.user.id);
   const routing = route({
     config: config.config,
     installationActive,
@@ -760,9 +817,14 @@ export async function reviewItem(
     merged: pull?.merged ?? false,
     authorType: issue.user.type,
     authorIsSelf: String(issue.user.id) === env.SLOPBOT_APP_USER_ID,
+    scope: registration.scope,
     exemption,
     markerPresent: (issue.body ?? "").includes(MARKER),
-    participant: await store.isParticipant(db, issue.user.id),
+    participant,
+    closure:
+      registration.scope === "contributor"
+        ? await closureEligibilityFor(db, job, context, exemption, participant)
+        : { eligible: false, why: "security review only" },
     humanReopenedThisRevision: humanReopened > 0,
     authorCapReached,
   });
@@ -815,9 +877,10 @@ async function runReview(
 ): Promise<string> {
   const db = env.SLOPBOT_DB;
   const { issue, config } = context;
+  const scope = context.registration.scope;
   const claim = { reviewKey, token: claimToken };
   await store.assertReviewClaim(db, claim);
-  await requireRegisteredRepository(db, job);
+  await requireScope(db, job, scope);
   if (!routing.review) {
     await store.finishReview(db, reviewKey, claimToken, "skipped", {
       skipReason: routing.reason,
@@ -831,13 +894,13 @@ async function runReview(
   let triage: CallRecord | null = null;
   if (verdict === null) {
     await store.assertReviewClaim(db, claim);
-    await requireRegisteredRepository(db, job);
+    await requireScope(db, job, scope);
     const result = await runRoute(
       env,
       TRIAGE_ROUTE,
       buildPrompt(context, job.itemKind),
       "medium",
-      () => registeredRepository(db, job),
+      () => scopeAllowed(db, job, scope),
     );
     await store.recordCalls(
       db,
@@ -862,6 +925,15 @@ async function runReview(
   }
 
   const category: Category = verdict.category;
+  // Contributor work is stopped on a paused, flagged or removed project; only
+  // a security finding is published there (PRD section 5).
+  if (scope === "security" && !SECURITY_CATEGORIES.has(category)) {
+    await store.finishReview(db, reviewKey, claimToken, "completed", {
+      verdict,
+      action: "none",
+    });
+    return `no action (${category}; security review only)`;
+  }
   const mode = category === "none" ? "off" : config.config.categories[category];
   if (mode === "off") {
     await store.finishReview(db, reviewKey, claimToken, "completed", {
@@ -874,7 +946,9 @@ async function runReview(
   let blockedClose: string | null = null;
   let confirm: CallRecord | null = null;
   let close = false;
-  if (
+  if (scope === "security") {
+    if (mode === "close") blockedClose = routing.reason;
+  } else if (
     (mode === "close" || category === "low_quality") &&
     !NEVER_CLOSE.has(category)
   ) {
@@ -890,13 +964,13 @@ async function runReview(
     else if (deterministic) close = true;
     else {
       await store.assertReviewClaim(db, claim);
-      await requireRegisteredRepository(db, job);
+      await requireScope(db, job, scope);
       const second = await runRoute(
         env,
         CONFIRM_ROUTE,
         buildPrompt(context, job.itemKind),
         "high",
-        () => registeredRepository(db, job),
+        () => scopeAllowed(db, job, scope),
       );
       await store.recordCalls(
         db,
@@ -953,7 +1027,7 @@ async function runReview(
 
   // A queued review has no authority to post after the repository, source,
   // policy or installation changes. Apply this to advisory actions too.
-  const fresh = await loadContext(env, job);
+  const fresh = await loadContext(env, job, context.registration);
   const freshInstall = await store.installation(db, job.installationId);
   if (
     fresh === null ||
@@ -993,18 +1067,21 @@ async function runReview(
       "SELECT COUNT(*) AS n FROM slopbot_actions WHERE review_key = ?",
       `reopen:${issue.node_id}:${context.revision}`,
     );
+    const eligibility = await closureEligibilityFor(db, job, fresh, exemption);
     const currentClosure = await closureState(
       env,
       job,
       fresh,
-      exemption === "not-exempt" && reopened === 0,
+      eligibility.eligible && reopened === 0,
     );
     if (!currentClosure.allowed) {
       close = false;
       blockedClose =
         reopened > 0
           ? "a human reopened this revision; maintainer decision stands"
-          : currentClosure.why;
+          : eligibility.eligible
+            ? currentClosure.why
+            : eligibility.why;
     }
   }
 
@@ -1033,7 +1110,7 @@ async function runReview(
     category,
   );
   await store.assertReviewClaim(db, claim);
-  await requireRegisteredRepository(db, job);
+  await requireScope(db, job, scope);
   const label = `slopbot: ${category.replaceAll("_", " ")}`;
   const labeled = await context.github.request<{ name: string }[]>(
     "POST",
@@ -1201,8 +1278,13 @@ async function stillMayClose(
   verdict: Verdict,
   forClosure = true,
 ) {
-  if (!(await registeredRepository(env.SLOPBOT_DB, job))) return false;
-  const fresh = await loadContext(env, job);
+  // Closure is contributor work: a paused project is never closed.
+  if (
+    original.registration.scope !== "contributor" ||
+    !(await registeredRepository(env.SLOPBOT_DB, job))
+  )
+    return false;
+  const fresh = await loadContext(env, job, original.registration);
   const install = await store.installation(env.SLOPBOT_DB, job.installationId);
   if (
     fresh === null ||
@@ -1231,7 +1313,8 @@ async function stillMayClose(
     fresh.issue.user,
   );
   if (
-    exempt !== "not-exempt" ||
+    !(await closureEligibilityFor(env.SLOPBOT_DB, job, fresh, exempt))
+      .eligible ||
     (await store.count(
       env.SLOPBOT_DB,
       "SELECT COUNT(*) AS n FROM slopbot_actions WHERE review_key = ?",
@@ -1283,8 +1366,10 @@ export async function recordHumanSignal(
   job: Extract<Job, { kind: "appeal" | "human_reopen" }>,
 ) {
   const db = env.SLOPBOT_DB;
-  if (!(await registeredRepository(db, job)))
-    return "repository is not active in the Slop registry";
+  // Appeals and maintainer reopen decisions are preserved on any registered
+  // repository, including a paused one.
+  if ((await reviewRegistration(db, job)) === null)
+    return "repository is not registered in the Slop registry";
   const install = await store.installation(db, job.installationId);
   if (
     install === null ||

@@ -8,23 +8,37 @@ disabled by `SLOPBOT_CLOSURE_ENABLED = "false"`.
 
 1. `POST /github/webhook` verifies `X-Hub-Signature-256`, records the delivery
    ID once, updates installation state, and enqueues identifiers only.
-2. Intake and the queue consumer check the live D1 project registry. Only active,
-   listed, unrestricted repositories proceed. `registry.ts` uses the existing
-   project repository index, validates the current manifest, and checks current
-   enforcement records. Missing registry rows skip; database errors retry.
-   Registry checks repeat before inference and GitHub writes. The queue consumer
+2. Intake and the queue consumer check the live D1 project registry.
+   `registry.ts` uses the existing project repository index, validates the
+   current manifest and immutable repository ID, and checks current enforcement
+   records. It derives capabilities with the shared evaluator in
+   `src/lib/project-capabilities.mjs`. An active, listed, unrestricted project
+   gets the full contributor review. A registered project that is paused,
+   flagged, quarantined, banned or retired gets a security-only review: only a
+   `scam` finding is labeled and commented, nothing is closed, and no value
+   assessment runs (PRD section 5). Unregistered repositories and replaced
+   repository IDs skip; database errors retry. Registry checks repeat for the
+   same scope before inference and GitHub writes. The queue consumer
    then gets an installation token and re-reads the
    repository, the item, `.github/slopbot.json`, and `AGENTS.md`,
    `CONTRIBUTING.md` and `README.md` from the default branch at its current
    SHA.
 3. `routing.ts` applies the published precedence: installation, private
    repository, type switch, open/draft, bot author, human reopen, exemption,
-   audience, author cap, budget.
+   audience, author cap, budget. Advisory review stays broad; closure needs the
+   separate eligibility check below.
 4. Deterministic pre-filters (empty, same-author duplicate) run without a model.
 5. `models.ts` runs triage: Surplus `claude-opus-5.5`, then Surplus
    `gpt-6.1-sol` as fallback (owner decision, 9 October 2026). Every call is written to
-   `slopbot_costs` with cost and billed amount (cost + 10%).
+   `slopbot_costs` with its internal provider cost and a zero billed amount.
 6. A close needs all of the following:
+   - closure eligibility (`closure-eligibility.ts`): a pull request whose
+     author is not a maintainer, is a slop.cash member matched by immutable
+     GitHub ID, and recorded an authenticated Slop skill run for this project
+     whose `pull_request_opened` event names this pull request. The
+     `Made via @slopdotcash` marker is never evidence. Issues are never closed.
+     The check runs at routing and again, from fresh state, immediately before
+     the close;
    - the category set to `close`;
    - verified evidence;
    - for guidance categories, a rule quoted verbatim from the named file;
@@ -90,9 +104,12 @@ fallback. The queue retains its retry time. Internal budgets, queue limits,
 and the $500 operational alerts remain separate from customer billing.
 No project vault service charge is required or authorized for free Slopbot.
 
-`GET /api/v1/payments/slopbot/installations/<id>/invoices/<YYYY-MM>` retains
-historical cost statements. New calls increase the call count but never the
-billed total. A statement does not authorize or request payment.
+Slopbot has no customer statement, invoice, credit balance, fee offset or
+markup. The former installation invoice route and the public summary's billed
+total are removed. The `slopbot_credits` table and historical `billed_micro_usdc`
+values stay in D1, unchanged, as historical records only. When provider
+budget runs out, an item waits in the queue and resumes; nothing asks a
+project to fund Slopbot.
 
 ## Setup checklist (owner)
 

@@ -43,7 +43,6 @@ import {
   verifyEvmBindingSignature,
   verifyPaymentWalletSignature,
 } from "./possession";
-import { slopbotInvoice } from "./slopbot-billing";
 import { projectVaultSnapshots } from "./vault-snapshots";
 import { registerPaymentWallet } from "./wallet-registration";
 
@@ -351,21 +350,6 @@ export async function handlePaymentsApi(
           .reduce((sum, t) => sum + BigInt(t.amountMicro), 0n)
           .toString(),
       });
-    }
-    const invoiceRoute =
-      /^\/slopbot\/installations\/([1-9]\d{0,14})\/invoices\/(\d{4}-(?:0[1-9]|1[0-2]))$/.exec(
-        path,
-      );
-    if (invoiceRoute && request.method === "GET") {
-      const invoice = await slopbotInvoice(
-        deps.db,
-        Number(invoiceRoute[1]),
-        invoiceRoute[2],
-        now,
-      );
-      return invoice
-        ? json(200, invoice)
-        : json(404, { error: "installation_not_found" });
     }
     const token = (request.headers.get("cookie") ?? "")
       .split(";")
