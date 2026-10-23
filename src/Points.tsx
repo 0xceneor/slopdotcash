@@ -977,7 +977,7 @@ function AccountClosure({
               ? "The username does not match this account."
               : caught instanceof PointsRequestError && caught.status === 401
                 ? "Your session ended. Sign in again to close your account."
-                : "Could not close your account. Nothing changed; please retry.",
+                : "Could not confirm whether your account closed. Reload this page to check your sign-in state before trying again.",
           );
         } finally {
           setBusy(false);
