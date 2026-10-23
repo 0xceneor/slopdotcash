@@ -114,7 +114,7 @@ function bountyTerms(
   };
 }
 
-/** Applies through the real API, the way /projects/new does, then approves. */
+/** Creates a paused project through its verified repository owner. */
 async function listProject(
   request: APIRequestContext,
   applicantToken: string,
@@ -146,23 +146,12 @@ async function listProject(
     },
     ...overrides,
   });
-  const applied = await api(
-    request,
-    "POST",
-    "project-applications",
-    applicantToken,
-    { manifest },
-  );
+  const applied = await api(request, "POST", "projects", applicantToken, {
+    manifest,
+  });
   expect(applied.status, JSON.stringify(applied.body)).toBe(201);
-  const application = applied.body.application as { id: string };
-  const approved = await api(
-    request,
-    "POST",
-    `admin/project-applications/${application.id}/approve`,
-    ADMIN_TOKEN,
-    {},
-  );
-  expect(approved.status).toBe(200);
+  expect(applied.body.project).toMatchObject({ id, status: "paused" });
+  expect(applied.body.setup).toMatchObject({ projectId: id });
 }
 
 async function adminProject(request: APIRequestContext, id: string) {
@@ -340,11 +329,11 @@ test("private security bounty programs keep cases restricted from intake to awar
   const suffix = test.info().project.name.replace(/-chromium$/u, "");
   const a = {
     id: `bounty-a-${suffix}`,
-    repository: `e2e-owner/bounty-a-${suffix}`,
+    repository: `e2e-security/bounty-a-${suffix}`,
   };
   const b = {
     id: `bounty-b-${suffix}`,
-    repository: `example/bounty-b-${suffix}`,
+    repository: `e2e-security-b/bounty-b-${suffix}`,
   };
 
   await test.step("program setup: opt in during setup, admins open by revision", async () => {
@@ -1491,7 +1480,7 @@ test("private settlement requires visibility consent and produces an unsigned re
   test.setTimeout(180_000);
   const suffix = test.info().project.name.replace(/-chromium$/u, "");
   const id = `private-pay-${suffix}`;
-  const repository = `e2e-owner/${id}`;
+  const repository = `e2e-security/${id}`;
   const deployment = {
     network: "base-sepolia",
     vault: "0x1000000000000000000000000000000000000001",

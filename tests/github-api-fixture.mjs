@@ -30,17 +30,29 @@ export const E2E_SECURITY_ACCOUNTS = Object.freeze({
   "security-b": "900000017",
 });
 
+// Security test projects are owned by their corresponding seeded accounts.
+const repositoryOwners = new Map([
+  [E2E_OWNER.login, E2E_OWNER.githubId],
+  ...Object.entries(E2E_SECURITY_ACCOUNTS).map(([role, id]) => [
+    `e2e-${role}`,
+    id,
+  ]),
+]);
+
 /** Deterministic public facts for a fixture repository. */
 export function fixtureRepository(fullName) {
   const [ownerLogin, name] = fullName.split("/");
-  const owner =
-    ownerLogin === E2E_OWNER.login
-      ? { login: E2E_OWNER.login, id: Number(E2E_OWNER.githubId), type: "User" }
-      : {
-          login: E2E_ORGANIZATION.login,
-          id: Number(E2E_ORGANIZATION.githubId),
-          type: "Organization",
-        };
+  const owner = repositoryOwners.has(ownerLogin)
+    ? {
+        login: ownerLogin,
+        id: Number(repositoryOwners.get(ownerLogin)),
+        type: "User",
+      }
+    : {
+        login: E2E_ORGANIZATION.login,
+        id: Number(E2E_ORGANIZATION.githubId),
+        type: "Organization",
+      };
   let hash = 0;
   for (const character of fullName)
     hash = (hash * 31 + character.charCodeAt(0)) % 100_000;
@@ -353,7 +365,7 @@ export function startGitHubApiFixture(port) {
         return;
       }
       const [owner] = repository[1].split("/");
-      if (owner === E2E_OWNER.login || owner === E2E_ORGANIZATION.login) {
+      if (repositoryOwners.has(owner) || owner === E2E_ORGANIZATION.login) {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify(fixtureRepository(repository[1])));
         return;

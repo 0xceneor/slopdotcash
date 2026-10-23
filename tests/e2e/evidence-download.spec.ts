@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
-import { fixtureRepository } from "../github-api-fixture.mjs";
+import { E2E_OWNER, fixtureRepository } from "../github-api-fixture.mjs";
 import { applicationManifest } from "../project-application-manifest";
 import { signedVettingHeaders } from "../vetting-fixtures";
 
@@ -31,20 +31,24 @@ test("large private evidence downloads with a single-use browser grant @registry
     request.post(`/api/v1/${path}`, {
       headers: {
         origin,
-        cookie: `__Host-slop_points=${process.env[admin ? "SLOP_E2E_ADMIN_TOKEN" : "SLOP_E2E_APPLICANT_TOKEN"]}`,
+        cookie: `__Host-slop_points=${process.env[admin ? "SLOP_E2E_ADMIN_TOKEN" : "SLOP_E2E_OWNER_TOKEN"]}`,
       },
       data: body,
     });
-  const repository = `example/large-evidence-${suffix}`;
+  const repository = `${E2E_OWNER.login}/large-evidence-${suffix}`;
   const facts = fixtureRepository(repository);
   const projectManifest = applicationManifest(project, repository);
   const steward = projectManifest.steward as Record<string, unknown>;
   projectManifest.steward = {
     ...steward,
+    kind: "individual",
     github: {
       ...(steward.github as Record<string, unknown>),
       actorId: String(facts.owner.id),
       nodeId: facts.owner.node_id,
+      login: facts.owner.login,
+      type: facts.owner.type,
+      profileUrl: `https://github.com/${facts.owner.login}`,
     },
   };
   projectManifest.authority = {
@@ -52,31 +56,25 @@ test("large private evidence downloads with a single-use browser grant @registry
     repositoryId: String(facts.id),
     repositoryNodeId: facts.node_id,
   };
-  const submitted = await api("project-applications", {
-    manifest: projectManifest,
-  });
+  const submitted = await api("projects", { manifest: projectManifest });
   expect(submitted.status()).toBe(201);
-  const application = (await submitted.json()).application;
-  expect(
-    (
-      await api(
-        `admin/project-applications/${application.id}/approve`,
-        {},
-        true,
-      )
-    ).status(),
-  ).toBe(200);
-  const queued = await api(
-    "admin/vetting/assessments",
-    {
-      projectId: project,
-      revision: 1,
-      reason: "Inspect large retained synthetic evidence",
+  const created = await submitted.json();
+  expect(created.project).toMatchObject({ id: project, status: "paused" });
+  expect(created.setup.checks.scan.state).toBe("queued");
+  // Creation queues the scan. Inspect that exact assessment, without creating
+  // a duplicate through the operator route.
+  const queued = await request.get("/api/v1/admin/vetting", {
+    headers: {
+      cookie: `__Host-slop_points=${process.env.SLOP_E2E_ADMIN_TOKEN}`,
     },
-    true,
+  });
+  expect(queued.status()).toBe(200);
+  const assessments = (await queued.json()).assessments.filter(
+    (entry: { projectId: string; revision: number }) =>
+      entry.projectId === project && entry.revision === 1,
   );
-  expect(queued.status()).toBe(201);
-  const assessment = (await queued.json()).assessment.id,
+  expect(assessments).toHaveLength(1);
+  const assessment = assessments[0].id,
     runId = "large-evidence";
   const bytes = process.env.SLOP_VETTING_OVERLAY_PATH
     ? await readFile(process.env.SLOP_VETTING_OVERLAY_PATH)
