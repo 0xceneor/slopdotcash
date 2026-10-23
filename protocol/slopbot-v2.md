@@ -9,8 +9,8 @@ v2 keeps every v1 rule except the ones listed under "Changes from v1".
 ## Changes from v1
 
 1. **Hosted operator.** Slop operates the hosted Slopbot GitHub App. Slop is
-   the disclosed operator for each installation. The project pays the cost
-   (see "Cost").
+   the disclosed operator for each installation. The service is free (see
+   "Cost").
 2. **Delegated closure.** Slopbot may close an issue or pull request only under
    a category the repository has set to `close`, as defined in PRD BOT-06. It
    still never merges, approves payouts, requests changes, bans, excludes, or
@@ -19,8 +19,10 @@ v2 keeps every v1 rule except the ones listed under "Changes from v1".
 3. **Permissions.** Read: Contents, Metadata, Organization members.
    Write: Issues and Pull requests, used only to comment, label and close.
    No other write permission.
-4. **Audience.** "Participants only" or "Protection" (PRD BOT-02). Exempt
-   actors are never closed.
+4. **Audience.** "Participants only" or "Protection" (PRD BOT-02) selects
+   advisory review. Exempt actors are never closed. Closure is limited to
+   verified slop.cash members using the Slop skill (PRD section 5); a
+   copied attribution marker is not evidence.
 
 ## Decision boundary
 
@@ -45,11 +47,11 @@ successful appeal reverses it.
 
 ## Cost
 
-Each review is billed at its actual model cost plus 10%, in integer
-micro-USDC, per PRD BOT-07 and BOT-10. Charges are per review, never per
-closure. The cost is never taken from contributor principal, a reserved
-award, a review line, or donor-class funds. Slopbot holds no funds and no
-payment key.
+Superseded by the canonical PRD section 5: Slopbot is always free and does
+not charge project vaults. The former cost-plus-10% billing no longer applies
+to new reviews; historical charge records stay unchanged. Slop records
+provider cost internally for budgets and queue limits only. Slopbot holds no
+funds and no payment key.
 
 ## Recognition
 
@@ -73,8 +75,11 @@ Bot activity itself receives no contributor credit.
 
 Owner decision, 21 October 2026: the hosted rollout operates only on public
 repositories of active D1 projects. This restriction also applies before v2's
-effective date. App installation alone grants no review authority. Paused,
-retired, quarantined, banned and unregistered projects are outside the rollout.
+effective date. App installation alone grants no review authority.
+Unregistered repositories are outside the rollout. The canonical PRD section 5
+(23 October 2026) lets authorized security review continue on paused, flagged
+or removed projects: those registered repositories get a security-only review
+that never closes, scores or penalizes.
 Read the live registry before queue intake, job execution, inference and each
 GitHub write. A read failure stops that action. A stale installation or queued
 job cannot override the registry. Protection-only operation is superseded for

@@ -7,7 +7,7 @@ import type { Job } from "./contracts";
 import { verifyWebhookSignature } from "./github";
 import * as store from "./persistence";
 import { QUALITY_MARKER } from "./quality";
-import { registeredRepository } from "./registry";
+import { registeredRepository, reviewRegistration } from "./registry";
 import { recordHumanSignal, reviewItem } from "./review";
 import { dispatchSpendAlert } from "./spend-alerts";
 import {
@@ -345,11 +345,13 @@ export default {
       }
       const job = jobFor(event, deliveryId, payload, env.SLOPBOT_APP_USER_ID);
       if (job !== null) {
-        if (!(await registeredRepository(env.SLOPBOT_DB, job))) {
+        // Paused projects stay registered: their review is security-only.
+        if ((await reviewRegistration(env.SLOPBOT_DB, job)) === null) {
           await store.completeDelivery(env.SLOPBOT_DB, deliveryId);
-          return new Response("repository is not active in the Slop registry", {
-            status: 202,
-          });
+          return new Response(
+            "repository is not registered in the Slop registry",
+            { status: 202 },
+          );
         }
         await env.SLOPBOT_QUEUE.send(job);
       }

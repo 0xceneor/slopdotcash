@@ -29,6 +29,10 @@ export const NEVER_CLOSE: ReadonlySet<Category> = new Set([
   "missing_evidence",
 ]);
 
+// The only categories a security-only review acts on, while contributor work
+// on a paused, flagged or removed project is stopped (PRD section 5).
+export const SECURITY_CATEGORIES: ReadonlySet<Category> = new Set(["scam"]);
+
 export type CategoryMode = "off" | "label" | "close";
 export type Audience = "protection" | "participants";
 
@@ -320,14 +324,12 @@ export function priceUsage(key: string, usage: Usage) {
     0n,
   );
   const cost = (micro + 999_999n) / 1_000_000n;
-  const billed = (cost * 11n + 9n) / 10n;
-  if (billed > BigInt(Number.MAX_SAFE_INTEGER))
+  if (cost > BigInt(Number.MAX_SAFE_INTEGER))
     throw new Error("Model price exceeds the supported integer range");
+  // Internal provider cost for budgets and alerts. Slopbot is free (PRD
+  // section 5): no markup or customer charge is derived from it.
   return {
     costMicroUsd: Number(cost),
-    // A standalone estimate. The cost journal applies this rounding to the
-    // accumulated billable cost of the entire review, not to each call.
-    billedMicroUsdc: Number(billed),
     reconciliation: entry.reconciliation,
   };
 }

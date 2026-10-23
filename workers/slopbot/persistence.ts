@@ -181,17 +181,6 @@ export async function installation(db: D1Database, installationId: number) {
     }>();
 }
 
-export async function isParticipant(
-  db: D1Database,
-  githubId: number,
-): Promise<boolean> {
-  const row = await db
-    .prepare("SELECT 1 AS ok FROM points_members WHERE github_id = ?")
-    .bind(String(githubId))
-    .first();
-  return row !== null;
-}
-
 export async function count(
   db: D1Database,
   sql: string,
