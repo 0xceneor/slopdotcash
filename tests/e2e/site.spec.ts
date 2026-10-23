@@ -691,7 +691,7 @@ test("makes the public project draft boundary unmistakable", async ({
   ).toHaveAttribute("href", /\/login\?next=%2Fprojects%2Feliza%2Fmanage$/u);
   await page.getByLabel("Short description").fill("Eliza-only draft");
   await page
-    .getByLabel("Note")
+    .getByLabel("Revision note")
     .fill("Clarify the project focus for contributors.");
   const changes = page.getByRole("region", { name: "Changes" });
   await expect(changes).toContainText("Eliza-only draft");
@@ -818,7 +818,7 @@ test("publishes criteria changes directly and stops a stale maintainer draft", a
     "Fix reproducible defects and provide the affected workflow evidence.";
   await page.getByLabel("Acceptance criteria").fill(scope);
   await page
-    .getByLabel("Note")
+    .getByLabel("Revision note")
     .fill("Clarify acceptance evidence for maintainers.");
   await expect(page.getByRole("region", { name: "Changes" })).toContainText(
     scope,

@@ -725,7 +725,7 @@ test("a signed-in maintainer picks an owned repository and gets suggested text",
   await page.getByRole("button", { name: "Next: Contribution rules" }).click();
   await expect(page.getByLabel("Project name")).toHaveValue("Open Protein");
   await page.getByRole("button", { name: "Next: Rewards" }).click();
-  await expect(page.getByLabel("Payout network")).toBeVisible();
+  await expect(page.getByLabel("No monthly funding")).toBeChecked();
   expect(
     (
       await new AxeBuilder({ page })
