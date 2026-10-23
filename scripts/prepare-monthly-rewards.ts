@@ -1,45 +1,38 @@
 /**
- * Freezes the previous closed UTC month for every active project and creates
- * review proposals at canonical Git-backed paths. Existing complete cycles are
- * left untouched; partial cycles fail closed for maintainer repair.
+ * Proposes the private monthly allocation of the last closed UTC month for
+ * every funded monthly project and writes it as idempotent D1 SQL. The
+ * trusted monthly workflow applies the file to the project's private
+ * database; nothing is committed, published or opened as a review PR.
+ *
+ * A month's proposal is written once: a later run with a different ledger
+ * leaves the stored proposal and its rows unchanged. The owner then changes
+ * amounts privately, and the payments coordinator freezes the current
+ * allocations at the configured cutoff (backend/payments/monthly.ts). This
+ * script reads no chain and authorizes, reserves or pays nothing.
  */
 
-import { lstat } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { PROJECTS, type ProjectDefinition } from "../src/lib/projects.mjs";
-import { prepareEscrowCycle } from "./prepare-escrow-cycle";
-import { syncCycleIndex } from "./sync-cycle-index";
+import { githubUserIdFromNodeId } from "../src/lib/github-actor";
+import { assertPublishableLeaderboardSnapshot } from "../src/lib/leaderboard";
+import { buildEscrowCycle } from "../src/lib/payments/escrow-cycle";
+import type { MonthlyBase } from "../src/lib/payments/monthly-allocation";
+import { createPaymentProjectView } from "../src/lib/project-view";
+import type { ProjectDefinition } from "../src/lib/projects.mjs";
+import { sha256Hex } from "../src/lib/sha256";
+import { currentProjectPolicies } from "./project-revision-policy.mjs";
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const CYCLES_ROOT = resolve(REPOSITORY_ROOT, "cycles");
 const DEFAULT_SNAPSHOT_PATH = resolve(
   REPOSITORY_ROOT,
   "public/data/leaderboard.json",
 );
 
-type ExistingPath = "file" | "missing";
-
-export interface MonthlyRewardResult {
-  cycleId: string;
-  prepared: string[];
-  skippedExisting: string[];
-  skippedPrelaunch: string[];
-}
-
-export interface PrepareMonthlyCycleArguments {
-  cycleId: string;
-  generatedAt: string;
-  githubToken?: string;
-  projectId: string;
-  snapshotPath: string;
-}
-
-interface MonthlyDependencies {
-  inspectPath: (path: string) => Promise<ExistingPath>;
-  prepare: (arguments_: PrepareMonthlyCycleArguments) => Promise<unknown>;
-  projects: readonly ProjectDefinition[];
-  validateCycles: () => Promise<unknown>;
+export interface MonthlyBasesResult {
+  period: string;
+  bases: (MonthlyBase & { manifest: string })[];
+  skipped: string[];
 }
 
 function exactDate(value: Date, field: string): Date {
@@ -49,11 +42,11 @@ function exactDate(value: Date, field: string): Date {
   return value;
 }
 
-function cycleEnd(cycleId: string): number {
-  if (!/^\d{4}-(?:0[1-9]|1[0-2])$/u.test(cycleId)) {
+function periodEndTime(period: string): number {
+  if (!/^\d{4}-(?:0[1-9]|1[0-2])$/u.test(period)) {
     throw new TypeError("cycle must be YYYY-MM");
   }
-  const [yearText, monthText] = cycleId.split("-");
+  const [yearText, monthText] = period.split("-");
   return Date.UTC(Number(yearText), Number(monthText), 1);
 }
 
@@ -66,138 +59,207 @@ export function previousUtcCycleId(now = new Date()): string {
   return `${previous.getUTCFullYear()}-${String(previous.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-async function inspectRegularPath(path: string): Promise<ExistingPath> {
-  const stats = await lstat(path).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
-  if (!stats) return "missing";
-  if (!stats.isFile() || stats.isSymbolicLink()) {
-    throw new TypeError(`${path} must be a regular file`);
-  }
-  return "file";
+/**
+ * Only an active, verified monthly-pool project with an escrow policy
+ * effective for the month has an automatic monthly allocation, and only when
+ * its monthly amount is positive. Unfunded projects and private bounty
+ * programs never do.
+ */
+export function hasMonthlyAllocation(
+  project: ProjectDefinition,
+  period: string,
+): boolean {
+  return (
+    project.status === "active" &&
+    project.authority.state === "verified" &&
+    project.terms.receiptPolicy.state === "active" &&
+    project.reward.kind === "monthly-pool" &&
+    Date.parse(project.reward.rewardStartAt) < periodEndTime(period) &&
+    project.escrow !== undefined &&
+    period >= project.escrow.effectiveCycle
+  );
 }
 
-const DEFAULT_DEPENDENCIES: MonthlyDependencies = {
-  inspectPath: inspectRegularPath,
-  prepare: (arguments_) => prepareEscrowCycle(arguments_),
-  projects: PROJECTS,
-  validateCycles: () => syncCycleIndex(),
-};
+/** The proposal of one month from the complete ledger and the exact D1 revision bytes. */
+export function buildMonthlyBase(
+  input: { projectId: string; period: string; generatedAt: string },
+  snapshotBytes: Uint8Array,
+  policyBytes: Uint8Array,
+  project: ProjectDefinition,
+): MonthlyBase {
+  const snapshot = JSON.parse(new TextDecoder().decode(snapshotBytes));
+  const view = createPaymentProjectView(
+    snapshot,
+    project.id,
+    input.period,
+    undefined,
+    project,
+  );
+  // Numeric actor IDs come from the immutable node IDs; no lookup is needed.
+  const identities = view.leaders.map((leader) => {
+    const githubUserId = githubUserIdFromNodeId(leader.actor.id);
+    if (!githubUserId)
+      throw new Error(`No numeric GitHub identity for ${leader.actor.login}`);
+    return { nodeId: leader.actor.id, githubUserId, login: leader.actor.login };
+  });
+  const proposal = buildEscrowCycle(
+    {
+      projectId: input.projectId,
+      cycleId: input.period,
+      generatedAt: input.generatedAt,
+    },
+    snapshotBytes,
+    new TextEncoder().encode(JSON.stringify(identities)),
+    policyBytes,
+  );
+  return {
+    projectId: proposal.projectId,
+    period: proposal.cycleId,
+    manifestSha256: sha256Hex(policyBytes),
+    sourceSnapshotSha256: proposal.sourceSnapshotSha256,
+    capBase: proposal.grossCapMicro,
+    rows: proposal.awards.map((award) => ({
+      githubUserId: award.githubUserId,
+      login: award.login,
+      grossBase: award.grossMicro,
+      sourceDigest: award.sourceDigest,
+    })),
+  };
+}
 
-export async function prepareMonthlyRewards(
-  options: {
-    cycleId?: string;
-    generatedAt?: string;
-    githubToken?: string;
-    snapshotPath?: string;
-  } = {},
-  dependencies: MonthlyDependencies = DEFAULT_DEPENDENCIES,
-): Promise<MonthlyRewardResult> {
+export async function prepareMonthlyBases(options: {
+  period?: string;
+  generatedAt?: string;
+  snapshotPath?: string;
+  root?: string;
+}): Promise<MonthlyBasesResult> {
   const generatedAt = options.generatedAt ?? new Date().toISOString();
-  const generatedTime = Date.parse(generatedAt);
   if (
     !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(generatedAt) ||
-    !Number.isFinite(generatedTime)
-  ) {
+    !Number.isFinite(Date.parse(generatedAt))
+  )
     throw new TypeError("generatedAt must be an exact UTC timestamp");
-  }
-  const cycleId = options.cycleId ?? previousUtcCycleId(new Date(generatedAt));
-  const end = cycleEnd(cycleId);
-  if (generatedTime < end) {
-    throw new RangeError(`Cycle ${cycleId} has not closed`);
-  }
-
-  const result: MonthlyRewardResult = {
-    cycleId,
-    prepared: [],
-    skippedExisting: [],
-    skippedPrelaunch: [],
-  };
-  for (const project of dependencies.projects) {
-    // Escrow is the only funding mode. A project without an escrow policy
-    // effective for this cycle has no payable monthly cycle to prepare.
-    if (
-      project.status !== "active" ||
-      project.authority.state !== "verified" ||
-      project.terms.receiptPolicy.state !== "active" ||
-      Date.parse(project.reward.rewardStartAt) >= end ||
-      !project.escrow ||
-      cycleId < project.escrow.effectiveCycle
-    ) {
-      result.skippedPrelaunch.push(project.id);
+  const period = options.period ?? previousUtcCycleId(new Date(generatedAt));
+  if (Date.parse(generatedAt) < periodEndTime(period))
+    throw new RangeError(`Cycle ${period} has not closed`);
+  const snapshotBytes = await readFile(
+    options.snapshotPath
+      ? resolve(options.snapshotPath)
+      : DEFAULT_SNAPSHOT_PATH,
+  );
+  assertPublishableLeaderboardSnapshot(
+    JSON.parse(snapshotBytes.toString("utf8")),
+  );
+  const result: MonthlyBasesResult = { period, bases: [], skipped: [] };
+  for (const policy of await currentProjectPolicies(
+    options.root ?? REPOSITORY_ROOT,
+  )) {
+    if (!hasMonthlyAllocation(policy.project, period)) {
+      result.skipped.push(policy.project.id);
       continue;
     }
-    const directory = resolve(CYCLES_ROOT, project.id, cycleId, "escrow-v2");
-    const [proposalState, snapshotState] = await Promise.all([
-      dependencies.inspectPath(resolve(directory, "proposal.json")),
-      dependencies.inspectPath(resolve(directory, "source-snapshot.json")),
-    ]);
-    if (proposalState !== snapshotState) {
-      throw new Error(
-        `Cycle ${project.id}/${cycleId} is partial; proposal and source snapshot must exist together`,
-      );
-    }
-    if (proposalState === "file") {
-      result.skippedExisting.push(project.id);
+    const base = buildMonthlyBase(
+      { projectId: policy.project.id, period, generatedAt },
+      snapshotBytes,
+      policy.bytes,
+      policy.project,
+    );
+    if (BigInt(base.capBase) === 0n) {
+      result.skipped.push(policy.project.id);
       continue;
     }
-    await dependencies.prepare({
-      cycleId,
-      generatedAt,
-      githubToken: options.githubToken,
-      projectId: project.id,
-      snapshotPath: options.snapshotPath
-        ? resolve(options.snapshotPath)
-        : DEFAULT_SNAPSHOT_PATH,
-    });
-    result.prepared.push(project.id);
+    result.bases.push({ ...base, manifest: policy.bytes.toString("utf8") });
   }
-  await dependencies.validateCycles();
   return result;
 }
 
-function parseArguments(values: string[]): {
-  cycleId?: string;
-  snapshotPath?: string;
-} {
-  let cycleId: string | undefined;
-  let snapshotPath: string | undefined;
-  const seen = new Set<string>();
-  for (let index = 0; index < values.length; index += 1) {
-    const flag = values[index];
-    if (seen.has(flag)) {
-      throw new TypeError(`Repeated monthly reward argument: ${flag}`);
-    }
-    seen.add(flag);
-    const next = values[index + 1];
-    if (flag === "--cycle" || flag === "--snapshot") {
-      if (!next || next.startsWith("--")) {
-        throw new TypeError(`${flag} requires a value`);
-      }
-      if (flag === "--cycle") cycleId = next;
-      else snapshotPath = next;
-      index += 1;
-    } else {
-      throw new TypeError(`Unknown monthly reward argument: ${flag}`);
-    }
+const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+
+/**
+ * Idempotent SQL: the proposal row is inserted once per project month, and
+ * each recipient row only next to the exact proposal digest already stored.
+ * A file is applied as one D1 import, which rolls back on failure.
+ */
+export function monthlyBasesSql(
+  result: MonthlyBasesResult,
+  createdAt: string,
+): string {
+  const statements: string[] = [];
+  for (const base of result.bases) {
+    statements.push(
+      `INSERT INTO monthly_reward_bases(project_id,period,manifest,manifest_sha256,source_snapshot_sha256,cap_base,recipient_count,created_at) VALUES(${[
+        base.projectId,
+        base.period,
+        base.manifest,
+        base.manifestSha256,
+        base.sourceSnapshotSha256,
+        base.capBase,
+      ]
+        .map(quote)
+        .join(
+          ",",
+        )},${base.rows.length},${quote(createdAt)}) ON CONFLICT(project_id,period) DO NOTHING;`,
+    );
+    for (const row of base.rows)
+      statements.push(
+        `INSERT INTO monthly_reward_base_rows(project_id,period,github_user_id,github_login,gross_base,source_digest) SELECT ${[
+          base.projectId,
+          base.period,
+          row.githubUserId,
+          row.login,
+          row.grossBase,
+          row.sourceDigest,
+        ]
+          .map(quote)
+          .join(
+            ",",
+          )} WHERE EXISTS(SELECT 1 FROM monthly_reward_bases WHERE project_id=${quote(base.projectId)} AND period=${quote(base.period)} AND source_snapshot_sha256=${quote(base.sourceSnapshotSha256)} AND manifest_sha256=${quote(base.manifestSha256)}) ON CONFLICT(project_id,period,github_user_id) DO NOTHING;`,
+      );
   }
-  return { cycleId, snapshotPath };
+  return statements.length ? `${statements.join("\n")}\n` : "";
+}
+
+function parseArguments(values: string[]): {
+  period?: string;
+  snapshotPath?: string;
+  sqlPath: string;
+} {
+  const parsed: { period?: string; snapshotPath?: string; sqlPath?: string } =
+    {};
+  const seen = new Set<string>();
+  for (let index = 0; index < values.length; index += 2) {
+    const flag = values[index];
+    const next = values[index + 1];
+    if (seen.has(flag))
+      throw new TypeError(`Repeated monthly reward argument: ${flag}`);
+    seen.add(flag);
+    if (!next || next.startsWith("--"))
+      throw new TypeError(`${flag} requires a value`);
+    if (flag === "--cycle") parsed.period = next;
+    else if (flag === "--snapshot") parsed.snapshotPath = next;
+    else if (flag === "--sql") parsed.sqlPath = next;
+    else throw new TypeError(`Unknown monthly reward argument: ${flag}`);
+  }
+  if (!parsed.sqlPath) throw new TypeError("--sql is required");
+  return { ...parsed, sqlPath: parsed.sqlPath };
 }
 
 if (import.meta.main) {
   try {
-    const result = await prepareMonthlyRewards({
-      ...parseArguments(process.argv.slice(2)),
-      githubToken: process.env.GH_TOKEN ?? process.env.GITHUB_TOKEN,
+    const { sqlPath, ...options } = parseArguments(process.argv.slice(2));
+    const createdAt = new Date().toISOString();
+    const result = await prepareMonthlyBases({
+      ...options,
+      generatedAt: createdAt,
     });
+    await writeFile(sqlPath, monthlyBasesSql(result, createdAt));
     process.stdout.write(
-      `[Slop] closed ${result.cycleId}: prepared ${result.prepared.join(", ") || "none"}; already present ${result.skippedExisting.join(", ") || "none"}\n`,
+      `[Slop] proposed ${result.period} allocations: ${result.bases.map((base) => base.projectId).join(", ") || "none"}\n`,
     );
   } catch (error) {
     // error-policy:J1 command boundary exposes a non-zero, actionable failure.
     process.stderr.write(
-      `[Slop] monthly close refused: ${error instanceof Error ? error.message : "unknown error"}\n`,
+      `[Slop] monthly allocation proposal refused: ${error instanceof Error ? error.message : "unknown error"}\n`,
     );
     process.exitCode = 1;
   }

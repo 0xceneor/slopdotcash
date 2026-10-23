@@ -1,8 +1,8 @@
 import { encodeFunctionData, parseAbi } from "viem";
 import type {
-  OwnerCommitmentInput,
-  prepareOwnerCommitment,
-} from "../../backend/payments/owner-review";
+  MonthlyCommitmentInput,
+  MonthlyCommitmentPlan,
+} from "../../backend/payments/monthly";
 import {
   buildCommitAwardCalldata,
   EVM_ESCROW_EVENT_TOPICS,
@@ -20,16 +20,14 @@ import {
   walletVaultConfig,
 } from "./evm-vault-actions";
 
-export type OwnerCommitmentPlan = Awaited<
-  ReturnType<typeof prepareOwnerCommitment>
->;
+export type OwnerCommitmentPlan = MonthlyCommitmentPlan;
 export async function requestOwnerCommitment(
   projectId: string,
   cycleId: string,
-  expected: OwnerCommitmentInput,
+  expected: MonthlyCommitmentInput,
 ) {
   const response = await fetch(
-    `/api/v1/payments/projects/${encodeURIComponent(projectId)}/awards/${encodeURIComponent(cycleId)}/commitment`,
+    `/api/v1/payments/projects/${encodeURIComponent(projectId)}/monthly/${encodeURIComponent(cycleId)}/commitment`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -44,21 +42,20 @@ export async function requestOwnerCommitment(
   )) as OwnerCommitmentPlan & { message?: string };
   if (!response.ok)
     throw new Error(
-      value.message ?? "The award could not be reverified. Reload its review.",
+      value.message ?? "The award could not be reverified. Reload the awards.",
     );
   if (
-    value.schemaVersion !== "1" ||
+    value.schemaVersion !== "2" ||
     value.projectId !== projectId ||
     value.cycleId !== cycleId ||
     value.manifestSha256 !== expected.manifestSha256 ||
-    value.proposalSha256 !== expected.proposalSha256 ||
-    value.decisionsSha256 !== expected.decisionsSha256 ||
+    value.snapshotSha256 !== expected.snapshotSha256 ||
     value.deployment?.network !== expected.network ||
     value.award?.githubUserId !== expected.githubUserId ||
     !/^[a-f0-9]{64}$/.test(value.award.sourceDigest) ||
     !/^[1-9][0-9]{0,19}$/.test(value.award.gross)
   )
-    throw new Error("The prepared award differs from the reviewed decision.");
+    throw new Error("The prepared award differs from the finalized awards.");
   const gross = BigInt(value.award.gross);
   if (
     gross > (1n << 64n) - 1n ||

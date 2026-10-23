@@ -16,10 +16,9 @@ import {
   type PaymentsDependencies,
 } from "../../../backend/payments/handler";
 import {
-  OwnerAwardReviewError,
-  prepareOwnerCommitment,
-  reviewOwnerAwards,
-} from "../../../backend/payments/owner-review";
+  monthlyOwnerService,
+  verifyProjectAuthority,
+} from "../../../backend/payments/monthly";
 import {
   handlePointsApi,
   sessionGithubActor,
@@ -73,6 +72,7 @@ import { CloudflareVettingPersistence } from "../../../backend/vetting/persisten
 import type { SolanaEscrowConfig } from "../../../contracts/solana/adapter";
 import { deploymentTier } from "../../../src/lib/deployment";
 import { ESCROW_NETWORKS } from "../../../src/lib/escrow-policy.mjs";
+import { parseMonthlySchedule } from "../../../src/lib/payments/monthly-allocation";
 import type { ProjectDefinition } from "../../../src/lib/projects.mjs";
 import {
   loadRegistryPaymentDeployments,
@@ -92,6 +92,8 @@ type Env = {
    * every binding closed.
    */
   PAYMENT_NETWORKS?: string;
+  /** Owner-decided automatic monthly cutoff; unset keeps the automatic process off. */
+  MONTHLY_PAYMENT_SCHEDULE?: string;
   SOLANA_IDENTITY_ATTESTER?: { fetch(request: Request): Promise<Response> };
   SECURITY_SOLANA_IDENTITY_ATTESTER?: {
     fetch(request: Request): Promise<Response>;
@@ -704,76 +706,40 @@ export async function onRequest(context: PagesContext): Promise<Response> {
         db: securityPaymentDatabase(context.env.SLOP_DB),
         solanaAttester: context.env.SECURITY_SOLANA_IDENTITY_ATTESTER,
       },
-      ownerCommitment: async (projectId, cycleId, actor, expected) => {
-        const generation = await projectPersistence.enforcementGeneration();
-        const project = await projectPersistence.getProject(projectId);
-        if (!project)
-          throw new OwnerAwardReviewError(404, "Project not found.");
-        if (
+      monthly: monthlyOwnerService({
+        db: context.env.SLOP_DB,
+        getProject: (id) => projectPersistence.getProject(id),
+        restricted: async (project) =>
           publicRestrictionOf(
             project,
             await projectPersistence.listEnforcements(),
-          ).state !== "clear"
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "This project is restricted. New award commitments are unavailable.",
-          );
-        if (
-          !parsePaymentNetworks(context.env.PAYMENT_NETWORKS).some(
-            (network) => network === expected.network,
-          )
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "Award processing is not configured for this network.",
-          );
-        const result = await prepareOwnerCommitment(
-          {
-            project,
-            cycleId,
+          ).state !== "clear",
+        // Unset or invalid networks serve no vault, so nothing is finalized
+        // or reserved here.
+        networks: () => {
+          try {
+            return parsePaymentNetworks(context.env.PAYMENT_NETWORKS);
+          } catch {
+            return [];
+          }
+        },
+        verifyAuthority: (project, actor) =>
+          verifyProjectAuthority(
+            project.manifest,
             actor,
-            token: context.env.SLOP_GITHUB_READ_TOKEN,
-            now: new Date(),
-          },
-          expected,
-        );
-        const current = await projectPersistence.getProject(projectId);
-        if (
-          !current ||
-          current.revision !== project.revision ||
-          current.manifestSha256 !== project.manifestSha256 ||
-          (await projectPersistence.enforcementGeneration()) !== generation
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "The project changed during review. Reload its current awards.",
-          );
-        return result;
-      },
-      ownerAwardReview: async (projectId, cycleId, actor) => {
-        const project = await projectPersistence.getProject(projectId);
-        if (!project)
-          throw new OwnerAwardReviewError(404, "Project not found.");
-        const result = await reviewOwnerAwards({
-          project,
-          cycleId,
-          actor,
-          token: context.env.SLOP_GITHUB_READ_TOKEN,
-          now: new Date(),
-        });
-        const current = await projectPersistence.getProject(projectId);
-        if (
-          !current ||
-          current.revision !== project.revision ||
-          current.manifestSha256 !== project.manifestSha256
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "The project changed during review. Reload its current awards.",
-          );
-        return result;
-      },
+            context.env.SLOP_GITHUB_READ_TOKEN,
+          ),
+        // Display only; the payments Worker applies the cutoff and fails
+        // loudly on a malformed value.
+        schedule: () => {
+          try {
+            return parseMonthlySchedule(context.env.MONTHLY_PAYMENT_SCHEDULE);
+          } catch {
+            return null;
+          }
+        },
+        now: () => new Date(),
+      }),
       solanaFundingConfig: async (projectId, network, vault) => {
         const networks = parsePaymentNetworks(context.env.PAYMENT_NETWORKS);
         const selected = networks.find((name) => name === network);
