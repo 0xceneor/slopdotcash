@@ -2195,7 +2195,14 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
         choice.mode === "monthly" && amount.valid
           ? { monthlyCapMinor: amount.minor, monthlyCapDisplay: amount.display }
           : { monthlyCapMinor: "0", monthlyCapDisplay: "$0" };
-      if (assetFixed || choice.mode === "none") {
+      // The asset and vault change only when the owner chose a new one.
+      const assetTouched =
+        draft !== null &&
+        (["network", "assetKind", "tokenAddress", "tokenSymbol"] as const).some(
+          (field) =>
+            draft[field] !== undefined && draft[field] !== initial[field],
+        );
+      if (assetFixed || choice.mode === "none" || !assetTouched) {
         // The asset, network and vault stay; only the amount changes.
         fundingFields = { reward: { ...source.reward, ...cap } };
       } else {
@@ -2420,7 +2427,7 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
         <TextField
           error={shown("note")}
           hint="Optional. Public in the revision history."
-          label="Note"
+          label="Revision note"
           multiline
           name="note"
           onChange={set("note")}
