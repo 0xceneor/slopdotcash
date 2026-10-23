@@ -6,6 +6,7 @@ import type {
   D1Statement,
   D1TransactionalDatabase,
 } from "../../backend/d1";
+import { notifySlopbotInstallationLost } from "../../backend/notifications/events";
 import { PRICE_VERSION, priceUsage } from "./contracts";
 import type { CallRecord } from "./models";
 
@@ -157,6 +158,11 @@ export async function completeInstallationDelivery(
           update.sourceUpdatedAt,
         ),
     );
+    if (changedAt !== null) {
+      statements.push(
+        notifySlopbotInstallationLost(db, update.installation.id, changedAt),
+      );
+    }
   }
   statements.push(
     db
