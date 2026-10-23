@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import worker from "./index";
 
 const SECRET = "webhook-installation-test-secret";
@@ -68,6 +68,23 @@ class TestDatabase {
     );
     const after = this.unixSecond();
     this.migrationSecond = before === after ? before : null;
+    for (const migration of readdirSync(
+      new URL("../../migrations/", import.meta.url),
+    )
+      .filter((name) => name.endsWith(".sql"))
+      .sort()) {
+      if (
+        migration === "0013_slopbot.sql" ||
+        migration === "0018_slopbot_delivery_processing.sql"
+      )
+        continue;
+      this.sqlite.exec(
+        readFileSync(
+          new URL(`../../migrations/${migration}`, import.meta.url),
+          "utf8",
+        ),
+      );
+    }
   }
 
   prepare(sql: string) {
@@ -159,7 +176,7 @@ function harness(seedBeforeDeliveryMigration?: (sqlite: Database) => void) {
     SLOPBOT_APP_USER_ID: "999999",
   };
   const deliver = async (
-    action: "created" | "suspend" | "unsuspend",
+    action: "created" | "suspend" | "unsuspend" | "deleted",
     deliveryId: string,
     updatedAt: string | number,
   ) => {
@@ -324,3 +341,73 @@ describe("installation webhook delivery", () => {
     });
   });
 });
+
+for (const action of ["suspend", "deleted"] as const) {
+  test(`installation ${action} records one owner notice in the webhook transaction`, async () => {
+    const { db, deliver } = harness();
+    const manifest = JSON.stringify({
+      id: "notice-project",
+      status: "active",
+      steward: { github: { actorId: "910000002" } },
+    });
+    db.sqlite
+      .query(
+        "INSERT INTO project_revisions(project_id, revision, manifest, manifest_sha256, reason, created_at) VALUES(?,1,?,?,?,?)",
+      )
+      .run(
+        "notice-project",
+        manifest,
+        "a".repeat(64),
+        "fixture",
+        "2026-10-23T10:00:00.000Z",
+      );
+    db.sqlite
+      .query(
+        "INSERT INTO projects(id,status,revision,manifest,manifest_sha256,created_at,updated_at) VALUES(?,'active',1,?,?,?,?)",
+      )
+      .run(
+        "notice-project",
+        manifest,
+        "a".repeat(64),
+        "2026-10-23T10:00:00.000Z",
+        "2026-10-23T10:00:00.000Z",
+      );
+    db.sqlite
+      .query(
+        "INSERT INTO project_repositories(repository_key,project_id) VALUES('acme/repo','notice-project')",
+      )
+      .run();
+    expect(
+      (await deliver("created", "notice-created", "2026-10-23T10:00:00Z"))
+        .status,
+    ).toBe(202);
+    db.installationFailure = "before";
+    await expect(
+      deliver(action, "notice-change", "2026-10-23T11:00:00Z"),
+    ).rejects.toThrow("simulated D1 failure before commit");
+    expect(
+      db.sqlite.query("SELECT COUNT(*) AS n FROM notifications").get(),
+    ).toEqual({ n: 0 });
+    db.installationFailure = "after";
+    await expect(
+      deliver(action, "notice-change", "2026-10-23T11:00:00Z"),
+    ).rejects.toThrow("simulated lost D1 response after commit");
+    expect(
+      (await deliver(action, "notice-change", "2026-10-23T11:00:00Z")).status,
+    ).toBe(202);
+    expect(
+      (await deliver(action, "notice-older", "2026-10-23T09:00:00Z")).status,
+    ).toBe(202);
+    expect(
+      db.sqlite
+        .query("SELECT recipient_github_id, kind, subject FROM notifications")
+        .all(),
+    ).toEqual([
+      {
+        recipient_github_id: "910000002",
+        kind: "project_installation_lost",
+        subject: "notice-project",
+      },
+    ]);
+  });
+}
