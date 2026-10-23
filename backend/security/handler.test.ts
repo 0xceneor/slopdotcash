@@ -877,10 +877,17 @@ describe("discretionary awards", () => {
     ).toEqual({ award_state: "pending", revision: 2 });
     // The same root cause never reserves twice.
     const third = await env.receive(REPORTER, "2026-10-19T09:30:00.000Z");
-    await env.decide(third, "oracle-skew");
-    const duplicate = await env.award(third, "100000");
+    const duplicate = await env.decide(third, "oracle-skew");
     expect(duplicate.status).toBe(409);
     expect(duplicate.body.error).toBe("root_cause_reserved");
+    expect(
+      (
+        await env.decide(third, "oracle-skew", {
+          outcome: "duplicate",
+          duplicateOf: second,
+        })
+      ).body.case.awardState,
+    ).toBe("ineligible");
   });
 
   test("a pledge reserves nothing", async () => {
@@ -939,8 +946,7 @@ describe("related-party awards", () => {
       ]);
     expect(env.inbox(FINANCE, related)).toEqual([]);
     // The pending review holds its root cause.
-    await env.decide(sameCause, "shared-cause");
-    expect((await env.award(sameCause, "100000")).body.error).toBe(
+    expect((await env.decide(sameCause, "shared-cause")).body.error).toBe(
       "root_cause_reserved",
     );
     const approved = await env.act(DISPUTE, related, {
