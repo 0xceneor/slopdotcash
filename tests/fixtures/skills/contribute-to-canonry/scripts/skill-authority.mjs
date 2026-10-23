@@ -599,6 +599,39 @@ def render_project_skill(role, template_files, manifest, binding):
     return dict(sorted(rendered.items()))
 
 
+def require_project_open(project_id):
+    # Contributors never install or work on a project that contributor flags,
+    # a security finding or a moderator paused, or whose current revision has
+    # no clean scan. The registry answers HTTP 410 for a restricted project.
+    url = f"{registry_origin}/api/v1/projects/{project_id}"
+    try:
+        record = decode_json(
+            fetch_bytes(url, 2 * max_manifest_bytes, registry_origin),
+            "project status",
+        )
+    except ValueError as error:
+        if "HTTP 410" in str(error):
+            raise ValueError(
+                "Slop paused or restricted this project (contributor flags, a security finding or moderation); do not install or work on it"
+            ) from error
+        if "HTTP 404" in str(error):
+            raise ValueError("this project is not listed on Slop; do not install or work on it") from error
+        raise
+    if isinstance(record, dict) and record.get("error") == "project_restricted":
+        raise ValueError(
+            "Slop paused or restricted this project (contributor flags, a security finding or moderation); do not install or work on it"
+        )
+    project = record.get("project") if isinstance(record, dict) else None
+    if not isinstance(project, dict) or project.get("id") != project_id:
+        raise ValueError("project status response has the wrong identity")
+    if record.get("skillsPublished") is not True:
+        raise ValueError(
+            "this project's current revision has no clean security scan; do not install or work on it"
+        )
+    if project.get("status") != "active":
+        raise ValueError("this project is paused; do not install or work on it")
+
+
 def expected_skill_bytes(revision, binding):
     """Returns (expected installed files, canonical template files)."""
     template_files = remote_skill_bytes(revision)
@@ -609,6 +642,8 @@ def expected_skill_bytes(revision, binding):
         return template_files, template_files
     if binding is None:
         raise ValueError("a generated project skill needs its registry binding")
+    if role == "contributor":
+        require_project_open(binding["projectId"])
     manifest = registry_manifest(binding)
     return render_project_skill(role, template_files, manifest, binding), template_files
 
