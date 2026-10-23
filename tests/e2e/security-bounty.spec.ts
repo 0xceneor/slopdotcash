@@ -856,13 +856,10 @@ test("private security bounty programs keep cases restricted from intake to awar
         grossMinor: "1000000",
       },
     });
-    // The same root cause cannot reserve again through another report.
+    // The same root cause cannot hold a second award through another report.
     expect(
-      (await act(request, "security", caseB, "decide", decision())).status,
-    ).toBe(200);
-    expect((await award(request, "security", caseB, "400000")).body.error).toBe(
-      "root_cause_reserved",
-    );
+      (await act(request, "security", caseB, "decide", decision())).body.error,
+    ).toBe("root_cause_reserved");
     const duplicate = await act(
       request,
       "security",
