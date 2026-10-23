@@ -1,7 +1,8 @@
 /**
  * A loopback stand-in for the public GitHub API reads the project registry
  * makes (repository facts, organization membership, the integration-branch
- * head that security vetting pins, and the security intake readiness check),
+ * head that security vetting pins, the security intake readiness check, and
+ * the synthetic private vulnerability reports that verify receipt),
  * so the registry browser lane is deterministic and never
  * spends GitHub's rate limit. The browser's own repository lookup is mocked
  * from the same facts.
@@ -31,6 +32,12 @@ export const E2E_SECURITY_ACCOUNTS = Object.freeze({
   dispute: "900000016",
   "security-b": "900000017",
 });
+
+/**
+ * The read token the local Pages server presents for private advisories. It
+ * is a fixture value; the fixture refuses advisory reads without it.
+ */
+export const E2E_ADVISORY_READ_TOKEN = "e2e-fixture-advisory-read-token";
 
 /** Deterministic public facts for a fixture repository. */
 export function fixtureRepository(fullName) {

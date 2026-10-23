@@ -1,10 +1,11 @@
 /**
- * Private security bounty programs end to end (PRD SEC-01 to SEC-18, the
- * MVP-13 matrix rows that can run locally). It runs on the shipped build with
- * the real Pages Functions, a fresh local D1 with every migration, seeded
- * sessions for each role, and the loopback GitHub API fixture for the
- * private-reporting readiness check. All findings and advisories are
- * synthetic. Nothing here reaches GitHub, a chain, or an email provider.
+ * Private security bounty programs end to end (PRD section 8, SEC-01 to
+ * SEC-18, the MVP-13 matrix rows that can run locally). It runs on the
+ * shipped build with the real Pages Functions, a fresh local D1 with every
+ * migration, seeded sessions for each role, and the loopback GitHub API
+ * fixture for the private-reporting readiness check and the private reports
+ * that verify receipt. All findings and advisories are synthetic. Nothing
+ * here reaches GitHub, a model provider, a chain, or an email provider.
  */
 import AxeBuilder from "@axe-core/playwright";
 import {
@@ -232,35 +233,82 @@ async function act(
   );
 }
 
-async function recordCase(
+/** GitHub receives a synthetic private report from this account. */
+async function githubReport(
+  request: APIRequestContext,
+  repository: string,
+  ghsa: string,
+  reporter: Role,
+  createdAt: string,
+) {
+  const response = await request.fetch(
+    `${GITHUB_FIXTURE}/__fixture/security-advisories/${repository}`,
+    {
+      method: "POST",
+      data: {
+        ghsa_id: ghsa,
+        created_at: createdAt,
+        state: "triage",
+        summary: "Synthetic private report",
+        description: "Synthetic reproduction on an isolated local fork.",
+        severity: "critical",
+        cwe_ids: [],
+        vulnerabilities: [],
+        submission: { accepted: false },
+        author: {
+          id: Number(account(reporter).githubId),
+          login: account(reporter).githubLogin,
+          type: "User",
+        },
+      },
+    },
+  );
+  expect(response.status()).toBe(204);
+}
+
+/** A report sent on GitHub directly; the maintainer brings it in. */
+async function importCase(
   request: APIRequestContext,
   projectId: string,
+  repository: string,
   advisory: string,
   reporter: Role,
   receivedAt: string,
   maintainer: Role = "security",
 ): Promise<string> {
-  const recorded = await api(
+  await githubReport(request, repository, advisory, reporter, receivedAt);
+  const imported = await api(
     request,
     "POST",
     "security-cases",
     TOKENS[maintainer],
-    {
-      mode: "record",
-      projectId,
-      advisory,
-      reporterGithubId: account(reporter).githubId,
-      reporterGithubLogin: account(reporter).githubLogin,
-      receivedAt,
-      confirmation: true,
-      idempotencyKey: key(),
-    },
+    { mode: "import", projectId },
   );
-  expect(recorded.status, JSON.stringify(recorded.body)).toBe(201);
-  return (recorded.body.case as { id: string }).id;
+  expect(imported.body, JSON.stringify(imported.body)).toEqual({
+    state: "ok",
+    received: 1,
+  });
+  const listed = await api(request, "GET", "security-cases", TOKENS[reporter]);
+  return (
+    listed.body.cases as { id: string; advisory?: { ghsa: string } }[]
+  ).find((entry) => entry.advisory?.ghsa === advisory)?.id as string;
 }
 
-const DIGEST = "b".repeat(64);
+async function award(
+  request: APIRequestContext,
+  role: Role,
+  caseId: string,
+  grossMinor: string,
+): Promise<Reply> {
+  return act(request, role, caseId, "award", {
+    decision: "amount",
+    grossMinor,
+    paymentDeadline: new Date(Date.now() + 14 * 86_400_000).toISOString(),
+    confirmation: true,
+    reason: "Owner award for the confirmed synthetic finding.",
+  });
+}
+
 const decision = (overrides: Record<string, unknown> = {}) => ({
   outcome: "confirmed",
   severity: "critical",
@@ -269,7 +317,6 @@ const decision = (overrides: Record<string, unknown> = {}) => ({
   relatedParty: false,
   rootCauseKey: "vault-share-rounding",
   evidenceReference: "private-advisory-comment-1",
-  evidenceDigest: DIGEST,
   reason: "Reproduced on an isolated local fork at the covered revision.",
   ...overrides,
 });
@@ -450,13 +497,14 @@ test("private security bounty programs keep cases restricted from intake to awar
     await page.goto(`/projects/${a.id}/security`, { waitUntil: "networkidle" });
     await expect(page.locator("h1")).toHaveText("Security bounty");
     await expect(page.locator(".security-lead")).toHaveText(
-      "$7,500 for a confirmed critical vulnerability that can cause loss of funds. Funded by Slop.",
+      "Published award: $10,000 gross per finding, $7,500 to the researcher. Funded by Slop.",
     );
     const facts = page.getByRole("region", { name: "Award terms" });
     await expect(facts).toContainText("Researcher · 75%$7,500");
     await expect(facts).toContainText(
-      "Gross funding per eligible finding$10,000",
+      "Published gross award per finding$10,000",
     );
+    await expect(facts).toContainText("Awards are discretionary.");
     await expect(facts).toContainText("Slop · 25%$2,500");
     await expect(facts).toContainText("Bounty only.");
     await expectAccessible(page);
@@ -466,11 +514,11 @@ test("private security bounty programs keep cases restricted from intake to awar
     });
     await page.goto(`/projects/${b.id}/security`, { waitUntil: "networkidle" });
     await expect(page.locator(".security-lead")).toContainText(
-      "75,000 USDC for a confirmed critical vulnerability",
+      "100,000 USDC gross per finding, 75,000 USDC to the researcher",
     );
     await expect(
       page.getByRole("region", { name: "Award terms" }),
-    ).toContainText("Gross funding per eligible finding100,000 USDC");
+    ).toContainText("Published gross award per finding100,000 USDC");
     // The project page links the program.
     await page.goto(`/projects/${a.id}`, { waitUntil: "networkidle" });
     await expect(
@@ -525,21 +573,42 @@ test("private security bounty programs keep cases restricted from intake to awar
 
   let caseA = "";
   let caseB = "";
-  await test.step("a reporter links a GitHub report; only a maintainer verifies it", async () => {
+  await test.step("a signed-in reporter reports privately; Slop confirms GitHub's receipt", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     const errors = observe(page);
     await signIn(page, TOKENS["reporter-a"]);
-    await page.goto("/security", { waitUntil: "networkidle" });
-    await expect(page.locator("h1")).toHaveText("Security cases");
-    await page.getByLabel("Project").selectOption(a.id);
-    await page.getByLabel("GitHub advisory ID").fill("GHSA-2c3f-4g5h-6j7m");
-    await page.getByRole("button", { name: "Link my GitHub report" }).click();
-    await expect(page.getByRole("status")).toContainText("saved");
-    await expect(page.locator(".security-case")).toContainText(
-      "Not submitted yet — waiting for a maintainer to verify the link",
+    await page.goto(`/projects/${a.id}/security`, { waitUntil: "networkidle" });
+    await page.getByRole("button", { name: "Start a private report" }).click();
+    await expect(
+      page.getByRole("link", { name: "Open GitHub's private report form" }),
+    ).toHaveAttribute(
+      "href",
+      `https://github.com/${a.repository}/security/advisories/new`,
     );
+    const confirm = page.getByRole("button", {
+      name: "I submitted it — confirm receipt",
+    });
+    // Nothing on GitHub yet: a complete answer, so the reporter may submit.
+    await confirm.click();
+    await expect(
+      page.getByText(/GitHub has no private report from your account/u),
+    ).toBeVisible();
     await expectAccessible(page);
+    await page.screenshot({ path: test.info().outputPath("intake-start.png") });
+    await githubReport(
+      request,
+      a.repository,
+      "GHSA-2c3f-4g5h-6j7m",
+      "reporter-a",
+      afterOpen,
+    );
+    // Repeated checks within ten seconds reuse the last answer.
+    await page.waitForTimeout(10_500);
+    await confirm.click();
+    await expect(page.getByRole("status")).toContainText(
+      "GitHub received your",
+    );
     expect(errors).toEqual([]);
     await context.close();
     const mine = await api(
@@ -552,39 +621,45 @@ test("private security bounty programs keep cases restricted from intake to awar
       (entry) => entry.projectId === a.id,
     )?.id as string;
     expect(caseA).toMatch(/^sc_/u);
-    const claimB = await api(
+    // Reporter B starts through the API and is confirmed the same way.
+    const started = await api(
       request,
       "POST",
-      "security-cases",
+      "security-submissions",
       TOKENS["reporter-b"],
-      {
-        mode: "claim",
-        projectId: a.id,
-        advisory: "GHSA-3c4f-5g6h-7j8m",
-        idempotencyKey: key(),
-      },
+      { projectId: a.id },
     );
-    expect(claimB.status).toBe(201);
-    caseB = (claimB.body.case as { id: string }).id;
-    // A claim is not a receipt and the reporter cannot verify it.
-    expect(
-      (
-        await act(request, "reporter-a", caseA, "verify-link", {
-          receivedAt: afterOpen,
-          confirmation: true,
-        })
-      ).status,
-    ).toBe(403);
-    // The maintainer verifies with GitHub's original receipt time.
-    for (const id of [caseA, caseB]) {
-      const verified = await act(request, "security", id, "verify-link", {
-        receivedAt: afterOpen,
-        confirmation: true,
-      });
-      expect(verified.status, JSON.stringify(verified.body)).toBe(200);
-      expect(verified.body.case).toMatchObject({
+    expect(started.status, JSON.stringify(started.body)).toBe(201);
+    await githubReport(
+      request,
+      a.repository,
+      "GHSA-3c4f-5g6h-7j8m",
+      "reporter-b",
+      afterOpen,
+    );
+    const checked = await api(
+      request,
+      "POST",
+      `security-submissions/${(started.body.submission as { id: string }).id}/check`,
+      TOKENS["reporter-b"],
+      {},
+    );
+    expect(checked.body.submission).toMatchObject({ state: "received" });
+    caseB = (checked.body.submission as { caseId: string }).caseId;
+    for (const [role, id] of [
+      ["reporter-a", caseA],
+      ["reporter-b", caseB],
+    ] as const) {
+      const read = await api(
+        request,
+        "GET",
+        `security-cases/${id}`,
+        TOKENS[role],
+      );
+      expect(read.body.case).toMatchObject({
         submissionState: "verified",
         receivedAt: afterOpen,
+        receivedAtSource: "github-advisory",
         policyRevision: opened.revision,
         terms: {
           grossMinor: "1000000",
@@ -596,55 +671,44 @@ test("private security bounty programs keep cases restricted from intake to awar
     }
   });
 
-  await test.step("a rejected link can be corrected", async () => {
-    const advisory = "GHSA-7c8f-9g2h-3j4m";
-    const claim = () =>
-      api(request, "POST", "security-cases", TOKENS["reporter-b"], {
-        mode: "claim",
-        projectId: a.id,
-        advisory,
-        idempotencyKey: key(),
-      });
-    const first = await claim();
-    expect(first.status).toBe(201);
-    const firstId = (first.body.case as { id: string }).id;
-    // A record over an open claim writes nothing and is refused.
-    const overClaim = await api(
-      request,
-      "POST",
-      "security-cases",
-      TOKENS.security,
-      {
-        mode: "record",
-        projectId: a.id,
-        advisory,
-        reporterGithubId: account("reporter-b").githubId,
-        reporterGithubLogin: account("reporter-b").githubLogin,
-        receivedAt: afterOpen,
-        confirmation: true,
-        idempotencyKey: key(),
-      },
-    );
-    expect(overClaim.body.error).toBe("claim_pending");
+  await test.step("a report sent on GitHub directly is brought in without typing", async () => {
+    // Only a security maintainer can import.
     expect(
       (
-        await act(request, "security", firstId, "reject-link", {
-          reason: "The advisory ID was mistyped in the link.",
+        await api(request, "POST", "security-cases", TOKENS["reporter-b"], {
+          mode: "import",
+          projectId: a.id,
         })
       ).status,
-    ).toBe(200);
-    const again = await claim();
-    expect(again.status, JSON.stringify(again.body)).toBe(201);
-    const againId = (again.body.case as { id: string }).id;
-    expect(againId).not.toBe(firstId);
-    const verified = await act(request, "security", againId, "verify-link", {
-      receivedAt: afterOpen,
-      confirmation: true,
-    });
-    expect(verified.body.case).toMatchObject({
+    ).toBe(403);
+    const direct = await importCase(
+      request,
+      a.id,
+      a.repository,
+      "GHSA-7c8f-9g2h-3j4m",
+      "reporter-b",
+      afterOpen,
+    );
+    const read = await api(
+      request,
+      "GET",
+      `security-cases/${direct}`,
+      TOKENS.security,
+    );
+    expect(read.body.case).toMatchObject({
       submissionState: "verified",
-      receivedAt: afterOpen,
+      receivedAtSource: "github-advisory",
+      reporter: { githubLogin: "e2e-reporter-b" },
     });
+    // Importing again records nothing twice.
+    expect(
+      (
+        await api(request, "POST", "security-cases", TOKENS.security, {
+          mode: "import",
+          projectId: a.id,
+        })
+      ).body,
+    ).toEqual({ state: "ok", received: 0 });
   });
 
   await test.step("identity and access stay isolated", async () => {
@@ -710,8 +774,8 @@ test("private security bounty programs keep cases restricted from intake to awar
     ).toBe(403);
     expect(
       (
-        await act(request, "triager", caseA, "triage", {
-          receiptState: "triaging",
+        await act(request, "triager", caseA, "request-information", {
+          reason: "Which fork block reproduces the rounding loss?",
         })
       ).status,
     ).toBe(200);
@@ -725,7 +789,7 @@ test("private security bounty programs keep cases restricted from intake to awar
     expect((await read("triager", caseA)).status).toBe(404);
   });
 
-  await test.step("human decision reserves one award per root cause", async () => {
+  await test.step("the owner's award reserves exactly once per root cause", async () => {
     const before = await api(
       request,
       "GET",
@@ -754,9 +818,26 @@ test("private security bounty programs keep cases restricted from intake to awar
       `security-cases/${caseA}`,
       TOKENS.security,
     );
+    // A technical decision reserves nothing; the owner decides the award.
     expect(decided.body.case).toMatchObject({
       receiptState: "confirmed",
-      awardState: "reserved",
+      awardState: "pending",
+      reservation: null,
+    });
+    // Neither the reporter nor finance can award.
+    expect((await award(request, "reporter-a", caseA, "1000000")).status).toBe(
+      403,
+    );
+    const awarded = await award(request, "security", caseA, "1000000");
+    expect(awarded.status, JSON.stringify(awarded.body)).toBe(200);
+    expect(awarded.body.case).toMatchObject({
+      awardState: "approved",
+      paymentState: "rail-unavailable",
+      award: {
+        grossMinor: "1000000",
+        researcherMinor: "750000",
+        slopMinor: "250000",
+      },
       reservation: {
         rootCauseKey: "vault-share-rounding",
         grossMinor: "1000000",
@@ -764,8 +845,11 @@ test("private security bounty programs keep cases restricted from intake to awar
     });
     // The same root cause cannot reserve again through another report.
     expect(
-      (await act(request, "security", caseB, "decide", decision())).body.error,
-    ).toBe("root_cause_reserved");
+      (await act(request, "security", caseB, "decide", decision())).status,
+    ).toBe(200);
+    expect((await award(request, "security", caseB, "400000")).body.error).toBe(
+      "root_cause_reserved",
+    );
     const duplicate = await act(
       request,
       "security",
@@ -774,7 +858,6 @@ test("private security bounty programs keep cases restricted from intake to awar
       decision({
         outcome: "duplicate",
         duplicateOf: caseA,
-        evidenceDigest: undefined,
         reason: "An earlier complete report covers this root cause.",
       }),
     );
@@ -791,119 +874,43 @@ test("private security bounty programs keep cases restricted from intake to awar
     expect(seen.body.case).not.toHaveProperty("duplicateOf");
   });
 
-  await test.step("capacity, eligibility truth table and receipt freeze", async () => {
-    // Capacity 1 is reserved, so a new valid finding is a financial
-    // exception, not a relabeled finding.
-    const third = await recordCase(
+  await test.step("severity guides the owner; funds bound the award; receipt freezes terms", async () => {
+    const third = await importCase(
       request,
       a.id,
+      a.repository,
       "GHSA-4c5f-6g7h-8j9m",
       "reporter-a",
       afterOpen,
     );
-    const exhausted = await act(
+    // A high-severity finding without verified loss is not barred.
+    const decided = await act(
       request,
       "security",
       third,
       "decide",
-      decision({ rootCauseKey: "oracle-staleness" }),
+      decision({
+        rootCauseKey: "oracle-staleness",
+        severity: "high",
+        loss: "not-verified",
+      }),
     );
-    expect(exhausted.body.case).toMatchObject({
+    expect(decided.body.case).toMatchObject({
       receiptState: "confirmed",
-      awardState: "capacity-exhausted",
+      awardState: "pending",
     });
-    const early = await recordCase(
-      request,
-      a.id,
-      "GHSA-5c6f-7g8h-9j2m",
-      "reporter-b",
-      beforeOpen,
-    );
-    const earlyCase = await api(
-      request,
-      "GET",
-      `security-cases/${early}`,
-      TOKENS.security,
-    );
-    expect(earlyCase.body.case).toMatchObject({
-      terms: null,
-      awardState: "not-applicable",
-    });
-    const rows: [Record<string, unknown>, string][] = [
-      [{ severity: "critical", loss: "not-verified" }, "ineligible"],
-      [{ severity: "high", loss: "verified-potential" }, "ineligible"],
-      [{ inScope: false }, "ineligible"],
-      [{ loss: "verified-potential" }, "reserved"],
-    ];
-    let index = 0;
-    for (const [overrides, expected] of rows) {
-      index += 1;
-      const id = await recordCase(
-        request,
-        b.id,
-        `GHSA-6c7f-8g9h-2j${"3456"[index - 1]}m`,
-        "reporter-a",
-        new Date().toISOString(),
-        "security-b",
-      );
-      const decided = await act(
-        request,
-        "security-b",
-        id,
-        "decide",
-        decision({ rootCauseKey: `root-cause-${index}`, ...overrides }),
-      );
-      expect(decided.body.case, JSON.stringify(overrides)).toMatchObject({
-        awardState: expected,
-      });
-    }
-  });
-
-  await test.step("raised capacity reserves an exhausted award, earliest receipt first", async () => {
-    const cases = (
-      (await api(request, "GET", "security-cases", TOKENS.finance)).body
-        .cases as { id: string; projectId: string; awardState: string }[]
-    ).filter(
-      (entry) =>
-        entry.projectId === a.id && entry.awardState === "capacity-exhausted",
-    );
-    expect(cases).toHaveLength(1);
-    const third = cases[0].id;
-    // A later valid finding also waits for capacity.
-    const fourth = await recordCase(
-      request,
-      a.id,
-      "GHSA-7c8f-9g2h-4j5m",
-      "reporter-b",
-      new Date(Date.now() - 1000).toISOString(),
-    );
+    // The verified funds (one published award) are already reserved.
+    const short = await award(request, "security", third, "400000");
+    expect(short.status).toBe(409);
+    expect(short.body.error).toBe("insufficient_funds");
     expect(
-      (
-        await act(
-          request,
-          "security",
-          fourth,
-          "decide",
-          decision({ rootCauseKey: "bridge-replay" }),
-        )
-      ).body.case,
-    ).toMatchObject({ awardState: "capacity-exhausted" });
-    const reserve = (id: string) =>
-      act(request, "finance", id, "reserve-award", {
-        reason: "Capacity raised by revision; published exhaustion rule.",
-      });
-    // Without new capacity nothing changes and no event is written.
-    const refused = await reserve(third);
-    expect(refused.status).toBe(409);
-    expect(refused.body.error).toBe("capacity_exhausted");
-    // The technical maintainer cannot reserve money.
-    expect(
-      (
-        await act(request, "security", third, "reserve-award", {
-          reason: "Capacity raised by revision; published exhaustion rule.",
-        })
-      ).status,
-    ).toBe(409);
+      (await api(request, "GET", `security-cases/${third}`, TOKENS.security))
+        .body.case,
+    ).toMatchObject({ awardState: "pending", reservation: null });
+    // An amount that cannot split exactly 75/25 is refused.
+    expect((await award(request, "security", third, "400002")).body.error).toBe(
+      "invalid_amount",
+    );
     const raised = await revise(request, a.id, (m) => ({
       ...m,
       securityBounty: {
@@ -915,39 +922,13 @@ test("private security bounty programs keep cases restricted from intake to awar
       },
     }));
     expect(raised.status).toBe(200);
-    // A later decision cannot take the slot the earlier receipt waits for.
-    const fifth = await recordCase(
-      request,
-      a.id,
-      "GHSA-8c9f-2g3h-5j6m",
-      "reporter-b",
-      new Date(Date.now() - 500).toISOString(),
-    );
-    expect(
-      (
-        await act(
-          request,
-          "security",
-          fifth,
-          "decide",
-          decision({ rootCauseKey: "price-feed-replay" }),
-        )
-      ).body.case,
-    ).toMatchObject({ awardState: "capacity-exhausted", reservation: null });
-    // The earlier receipt is funded first, whatever the request order.
-    expect((await reserve(fourth)).body.error).toBe("earlier_receipt_waiting");
-    expect((await reserve(fifth)).body.error).toBe("earlier_receipt_waiting");
-    const reserved = await reserve(third);
-    expect(reserved.status, JSON.stringify(reserved.body)).toBe(200);
-    expect(reserved.body.case).toMatchObject({
-      awardState: "reserved",
-      receivedAtSource: "maintainer-attested",
-      reservation: { grossMinor: "1000000", policyRevision: 2 },
-      allowedActions: ["approve-award"],
+    const funded = await award(request, "security", third, "400000");
+    expect(funded.status, JSON.stringify(funded.body)).toBe(200);
+    expect(funded.body.case).toMatchObject({
+      awardState: "approved",
+      receivedAtSource: "github-advisory",
+      reservation: { grossMinor: "400000" },
     });
-    // Capacity 2 is now used; the later findings still wait in receipt order.
-    expect((await reserve(fourth)).body.error).toBe("capacity_exhausted");
-    expect((await reserve(fifth)).body.error).toBe("earlier_receipt_waiting");
     const history = await api(
       request,
       "GET",
@@ -958,26 +939,45 @@ test("private security bounty programs keep cases restricted from intake to awar
       (history.body.case as { events: { kind: string }[] }).events.map(
         (event) => event.kind,
       ),
-    ).toEqual(["record", "decide", "reserve-award"]);
+    ).toEqual(["receive", "decide", "award"]);
+    // A report GitHub received before the program opened has no paid terms.
+    const early = await importCase(
+      request,
+      a.id,
+      a.repository,
+      "GHSA-5c6f-7g8h-9j2m",
+      "reporter-b",
+      beforeOpen,
+    );
+    expect(
+      (await api(request, "GET", `security-cases/${early}`, TOKENS.security))
+        .body.case,
+    ).toMatchObject({ terms: null, awardState: "not-applicable" });
   });
 
   await test.step("a related-party award needs an independent reviewer", async () => {
     // Declared by the technical decider.
-    const declared = await recordCase(
+    const declared = await importCase(
       request,
       b.id,
+      b.repository,
       "GHSA-8c9f-2g3h-4j5m",
       "reporter-b",
       new Date(Date.now() - 1000).toISOString(),
       "security-b",
     );
-    const pending = await act(
-      request,
-      "security-b",
-      declared,
-      "decide",
-      decision({ rootCauseKey: "related-declared", relatedParty: true }),
-    );
+    expect(
+      (
+        await act(
+          request,
+          "security-b",
+          declared,
+          "decide",
+          decision({ rootCauseKey: "related-declared", relatedParty: true }),
+        )
+      ).status,
+    ).toBe(200);
+    const pending = await award(request, "security-b", declared, "40000000000");
     expect(pending.body.case).toMatchObject({
       receiptState: "confirmed",
       awardState: "pending",
@@ -1000,20 +1000,27 @@ test("private security bounty programs keep cases restricted from intake to awar
       ).status,
     ).toBe(409);
     // A program approver as reporter is always a related party.
-    const approverReport = await recordCase(
+    const approverReport = await importCase(
       request,
       b.id,
+      b.repository,
       "GHSA-9c2f-3g4h-5j6m",
       "finance",
       new Date(Date.now() - 1000).toISOString(),
       "security-b",
     );
-    const automatic = await act(
+    await act(
       request,
       "security-b",
       approverReport,
       "decide",
       decision({ rootCauseKey: "related-approver" }),
+    );
+    const automatic = await award(
+      request,
+      "security-b",
+      approverReport,
+      "20000000000",
     );
     expect(automatic.body.case).toMatchObject({
       relatedParty: "related",
@@ -1034,9 +1041,7 @@ test("private security bounty programs keep cases restricted from intake to awar
       .click();
     const detail = page.locator(".security-case");
     await expect(detail).toContainText("Waiting for an independent reviewer");
-    await detail.getByText("Case details", { exact: true }).focus();
-    await page.keyboard.press("Enter");
-    await expect(detail.getByText(/\(maintainer verified\)/u)).toBeVisible();
+    await expect(detail.getByText(/\(verified from GitHub\)/u)).toBeVisible();
     const form = detail.getByRole("form", {
       name: "Related-party award review",
     });
@@ -1060,9 +1065,10 @@ test("private security bounty programs keep cases restricted from intake to awar
       (await api(request, "GET", `security-cases/${declared}`, TOKENS.finance))
         .body.case,
     ).toMatchObject({
-      awardState: "reserved",
+      awardState: "approved",
       relatedPartyReview: "approved",
-      allowedActions: ["approve-award"],
+      award: { grossMinor: "40000000000" },
+      allowedActions: [],
     });
 
     // A refusal makes the award ineligible; the refuser cannot hear the appeal.
@@ -1136,7 +1142,7 @@ test("private security bounty programs keep cases restricted from intake to awar
     });
   });
 
-  await test.step("finance approves a reserved award; nothing becomes paid", async () => {
+  await test.step("finance sees only award and payment fields; nothing becomes paid", async () => {
     const finance = await api(
       request,
       "GET",
@@ -1145,10 +1151,13 @@ test("private security bounty programs keep cases restricted from intake to awar
     );
     expect(finance.body.case).toMatchObject({
       view: "financial",
-      awardState: "reserved",
+      awardState: "approved",
+      paymentState: "rail-unavailable",
+      paymentRail: "unavailable",
       payee: { githubLogin: "e2e-reporter-a" },
-      allowedActions: ["approve-award"],
+      allowedActions: [],
     });
+    expect(finance.body.case).not.toHaveProperty("analysis");
     expect(finance.body.case).not.toHaveProperty("advisory");
     expect(finance.body.case).not.toHaveProperty("severity");
     // A financial approver never sees cases without an award.
@@ -1156,16 +1165,6 @@ test("private security bounty programs keep cases restricted from intake to awar
       (await api(request, "GET", `security-cases/${caseB}`, TOKENS.finance))
         .status,
     ).toBe(404);
-    const deadline = new Date(Date.now() + 14 * 86_400_000).toISOString();
-    const approved = await act(request, "finance", caseA, "approve-award", {
-      paymentDeadline: deadline,
-      confirmation: true,
-    });
-    expect(approved.body.case).toMatchObject({
-      awardState: "approved",
-      paymentState: "rail-unavailable",
-      paymentRail: "unavailable",
-    });
     // Remediation and disclosure stay separate: fixed and paid publish nothing.
     expect(
       (
@@ -1319,7 +1318,7 @@ test("private security bounty programs keep cases restricted from intake to awar
       .focus();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("status")).toContainText("Disclosure: saved.");
-    await page.getByText(/^History \(/u).click();
+    await page.getByText("Case details and history", { exact: true }).click();
     await expect(page.locator(".security-history")).toContainText(digest);
     await expect(page.locator(".security-history")).toContainText(
       "extending the embargo",
@@ -1432,9 +1431,12 @@ test("private security bounty programs keep cases restricted from intake to awar
       .click();
     const detail = page.locator(".security-case");
     await expect(detail).toContainText(
-      "$7,500 researcher · $2,500 Slop · $10,000 gross",
+      "$7,500 to the researcher · $2,500 to Slop · $10,000 gross",
     );
-    await expect(detail).toContainText("Approved, not paid.");
+    await expect(detail).toContainText("Approved, not paid yet");
+    await expect(detail).toContainText("Received by GitHub");
+    await expect(detail).not.toContainText("AI summary");
+    await detail.getByText("More actions", { exact: true }).click();
     await detail.getByLabel("Show my name publicly").selectOption("opt-in");
     await detail.getByRole("button", { name: "Save my choice" }).click();
     await expect(detail.getByRole("status")).toContainText(
@@ -1525,9 +1527,10 @@ test("private settlement requires visibility consent and produces an unsigned re
     securityBounty: openTerms(terms),
   }));
   expect(revised.status, JSON.stringify(revised.body)).toBe(200);
-  const caseId = await recordCase(
+  const caseId = await importCase(
     request,
     id,
+    repository,
     "GHSA-2345-6789-cfgh",
     "reporter-a",
     new Date().toISOString(),
@@ -1535,14 +1538,9 @@ test("private settlement requires visibility consent and produces an unsigned re
   expect(
     (await act(request, "security", caseId, "decide", decision())).status,
   ).toBe(200);
-  expect(
-    (
-      await act(request, "finance", caseId, "approve-award", {
-        paymentDeadline: new Date(Date.now() + 86400000).toISOString(),
-        confirmation: true,
-      })
-    ).status,
-  ).toBe(200);
+  expect((await award(request, "security", caseId, "100000000")).status).toBe(
+    200,
+  );
   expect(
     (
       await act(request, "finance", caseId, "prepare-payment", {

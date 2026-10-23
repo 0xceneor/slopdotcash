@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  E2E_ADVISORY_READ_TOKEN,
   E2E_OWNER,
   E2E_SECURITY_ACCOUNTS,
   startGitHubApiFixture,
@@ -240,6 +241,7 @@ async function runRegistryPhase() {
               SLOP_E2E_INTAKE_GRANT_KEY: randomBytes(32).toString("base64url"),
             }
           : {}),
+        SLOP_E2E_ADVISORY_READ_TOKEN: E2E_ADVISORY_READ_TOKEN,
         SLOP_E2E_OUTPUT: "registry",
         SLOP_E2E_NOTIFY_SERVICE: notify.name,
         SLOP_E2E_SLOPBOT_SERVICE: slopbot.name,
