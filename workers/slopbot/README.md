@@ -779,6 +779,21 @@ If the App was installed while its webhook was inactive, recover its installatio
 delivery after protected deployment; a missing installation row must not be
 invented as proof of a qualified shadow period.
 
+### Repository access for project setup
+
+Self-service project setup (`backend/projects/README.md`) needs Slopbot
+installed on the repository before a project is ready, and reads the owner's
+current permission through the App. The site calls
+`GET https://slopbot.internal/v1/repository-access?repository=OWNER/REPO&repositoryId=ID&login=LOGIN`
+over its `SLOPBOT` service binding only; a public host never matches that
+origin. The Worker asks GitHub for the repository's installation with the App
+JWT, rejects a repository whose id changed, and returns
+`{ installation: "missing" }`, `{ installation: "suspended", installationId }`
+or `{ installation: "installed", installationId, permission, roleName }`
+with GitHub's base permission (maintain reads as write). It returns no token.
+Any GitHub failure is HTTP 503; setup shows it as a retry. Installation
+records in D1 alone never answer this check.
+
 ## Objective quality verification
 
 The [trusted evidence contract](QUALITY.md) implements the approved objective

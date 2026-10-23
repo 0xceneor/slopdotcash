@@ -33,10 +33,11 @@ import type { RepositoryControl } from "../../../backend/projects/contracts";
 import { edgeCache } from "../../../backend/projects/edge-cache";
 import { publicRestrictionOf } from "../../../backend/projects/enforcement";
 import { githubApiOrigin } from "../../../backend/projects/github-lookup";
+import { handleProjectApi } from "../../../backend/projects/handler";
 import {
-  type AdminApplicationNotice,
-  handleProjectApi,
-} from "../../../backend/projects/handler";
+  parseRepositoryAccess,
+  vettingScanRequester,
+} from "../../../backend/projects/setup";
 import { assetTemplateSource } from "../../../backend/projects/skill-publication";
 import { rpcTokenMetadataReader } from "../../../backend/projects/token-metadata";
 import {
@@ -64,6 +65,7 @@ import { VettingEvidence } from "../../../backend/vetting/evidence";
 import {
   handleVettingApi,
   signedVettingRequest,
+  vettingServiceAvailable,
 } from "../../../backend/vetting/handler";
 import {
   readVettingPin,
@@ -136,8 +138,14 @@ type Env = {
   SLOP_INTAKE_GRANT_KEY?: string;
   /** Local browser tests only: a loopback GitHub OAuth fixture origin. */
   SLOP_GITHUB_OAUTH_ORIGIN?: string;
-  /** Admin email Worker; absent where no notifier is deployed. */
+  /** Notification Worker; absent where no notifier is deployed. */
   SLOP_NOTIFY?: { fetch(request: Request): Promise<Response> };
+  /**
+   * Slopbot Worker service binding. Self-service setup reads the Slopbot
+   * installation and the owner's exact repository permission through it;
+   * absent, setup reports the installation check as a retry.
+   */
+  SLOPBOT?: { fetch(request: Request): Promise<Response> };
   SLOPBOT_VALUE_IMPORT?: HistoricalValueBinding;
   ASSETS?: { fetch(request: Request): Promise<Response> };
   /** Secure-VM vetting service Ed25519 public keys (base64, comma separated). */
@@ -319,19 +327,22 @@ function githubIdSet(value: string | undefined): Set<string> {
   );
 }
 
-async function notifyAdmins(
-  notify: Env["SLOP_NOTIFY"],
-  notice: AdminApplicationNotice,
-): Promise<boolean> {
-  if (notify === undefined) return false;
-  const response = await notify.fetch(
-    new Request("https://notify.internal/v1/project-applications", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(notice),
-    }),
+/** Reads one repository's Slopbot installation and account permission. */
+async function slopbotRepositoryAccess(
+  slopbot: Env["SLOPBOT"],
+  repository: { path: string; githubId: string },
+  actor: { githubLogin: string },
+) {
+  if (slopbot === undefined) throw new Error("Slopbot is not connected");
+  const url = new URL("https://slopbot.internal/v1/repository-access");
+  url.searchParams.set("repository", repository.path);
+  url.searchParams.set("repositoryId", repository.githubId);
+  url.searchParams.set("login", actor.githubLogin);
+  const response = await slopbot.fetch(
+    new Request(url, { headers: { accept: "application/json" } }),
   );
-  return response.status === 202;
+  if (!response.ok) throw new Error(`Slopbot returned ${response.status}`);
+  return parseRepositoryAccess(await readBoundedJson(response, 4 * 1024));
 }
 
 function githubHeaders(token: string | undefined): Record<string, string> {
@@ -380,7 +391,7 @@ const MAX_APPLICATION_GITHUB_NAMES = 5;
  * repository and every alias must be a public GitHub repository, an alias the
  * repository it names, and control is proven only for every owner.
  */
-async function repositoryControl(
+export async function repositoryControl(
   manifest: ProjectDefinition,
   actor: { githubId: string; githubLogin: string },
   env: Env,
@@ -586,10 +597,18 @@ export async function onRequest(context: PagesContext): Promise<Response> {
         context.env.SLOP_DB,
         new Date().toISOString(),
       ),
-    tier: deploymentTier(context.env.SLOP_ENVIRONMENT),
-    notifyAdmins: (notice) => notifyAdmins(context.env.SLOP_NOTIFY, notice),
     repositoryControl: (manifest, actor) =>
       repositoryControl(manifest, actor, context.env),
+    repositoryAccess: (repository, actor) =>
+      slopbotRepositoryAccess(context.env.SLOPBOT, repository, actor),
+    requestScan: vettingScanRequester({
+      vetting,
+      serviceAvailable: () =>
+        vettingServiceAvailable(context.env.VETTING_RESULT_PUBLIC_KEYS),
+      livePin,
+      now: () => new Date(),
+      randomId: () => crypto.randomUUID(),
+    }),
     readTokenMetadata: rpcTokenMetadataReader(fetch, {
       base: context.env.REWARD_RPC_BASE,
       ethereum: context.env.REWARD_RPC_ETHEREUM,
