@@ -113,6 +113,7 @@ const codeDigest = async (address: string) =>
     )
     .digest("hex");
 let serial = 0;
+const received = new Date(Date.now() - 60_000).toISOString();
 async function call(
   actor: typeof reporter,
   method: string,
@@ -131,6 +132,26 @@ async function call(
       randomId: () => crypto.randomUUID(),
       sessionActor: async () => actor,
       github: { fetch, apiOrigin: "https://api.github.invalid" },
+      // The synthetic private report that GitHub received from the reporter.
+      advisories: {
+        privateReports: async () => ({
+          state: "ok" as const,
+          reports: [
+            {
+              ghsa: "GHSA-2345-6789-cfgh",
+              createdAt: received,
+              state: "triage",
+              author: reporter,
+              summary: "Synthetic report",
+              description: "Synthetic local funds-loss example.",
+              severity: null,
+              cweIds: [],
+              packages: [],
+            },
+          ],
+        }),
+        privateReport: async () => ({ state: "unavailable" as const }),
+      },
     },
   );
   assert(response);
@@ -208,7 +229,6 @@ try {
     sourceCommit: "a".repeat(40),
     deploymentTransaction: `0x${"0".repeat(64)}`,
   };
-  const received = new Date(Date.now() - 60_000).toISOString();
   const program = {
     status: "open",
     intake: { repository: "synthetic/private" },
@@ -219,6 +239,11 @@ try {
       grossMinor: "100000000",
     },
     sponsor: { name: "Synthetic sponsor", githubId: null },
+    funding: {
+      state: "verified-available",
+      evidence: "synthetic-local-vault-funding",
+      verifiedAt: received,
+    },
     capacity: { awards: 1, closesAt: null },
     responseTargets: { acknowledgeHours: 24 },
     approvers: {
@@ -251,18 +276,16 @@ try {
       "INSERT INTO projects(id,status,revision,manifest,manifest_sha256,created_at,updated_at) VALUES(?,'active',1,?,?,?,?)",
     )
     .run("synthetic-private", manifest, digest(manifest), received, received);
-  const created = await call(technical, "POST", "security-cases", {
-    mode: "record",
+  const imported = await call(technical, "POST", "security-cases", {
+    mode: "import",
     projectId: "synthetic-private",
-    advisory: "GHSA-2345-6789-cfgh",
-    reporterGithubId: reporter.githubId,
-    reporterGithubLogin: reporter.githubLogin,
-    receivedAt: received,
-    confirmation: true,
-    idempotencyKey: "synthetic-record-910",
   });
-  assert.equal(created.status, 201, JSON.stringify(created.body));
-  const caseId = created.body.case.id;
+  assert.deepEqual(imported.body, { state: "ok", received: 1 });
+  const caseId = (
+    sqlite
+      .query("SELECT id FROM security_cases WHERE advisory_ghsa = ?")
+      .get("GHSA-2345-6789-cfgh") as { id: string }
+  ).id;
   assert.equal(
     (
       await act(technical, caseId, "decide", {
@@ -279,11 +302,15 @@ try {
     ).status,
     200,
   );
+  // The owner's discretionary award reserves exactly this gross amount.
   assert.equal(
     (
-      await act(finance, caseId, "approve-award", {
+      await act(technical, caseId, "award", {
+        decision: "amount",
+        grossMinor: "100000000",
         paymentDeadline: new Date(Date.now() + 86400000).toISOString(),
         confirmation: true,
+        reason: "Synthetic owner award for the local example.",
       })
     ).status,
     200,

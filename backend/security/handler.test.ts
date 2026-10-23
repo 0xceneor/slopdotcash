@@ -1,10 +1,13 @@
-// Runs the security case API against the real migrations. A concurrent
-// writer is injected between the case read and the write batch, which a
-// browser test cannot schedule deterministically.
+// Runs the security case API against the real migrations. GitHub's private
+// vulnerability reports and the analysis model are injected, and a
+// concurrent writer can run between the case read and the write batch,
+// which a browser test cannot schedule deterministically.
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { sqliteD1 } from "../../tests/sqlite-d1";
+import type { AdvisoryReader, GithubPrivateReport } from "./advisories";
+import type { SecurityAnalysisInput, SecurityAnalyzer } from "./analysis";
 import { handleSecurityApi, type SecurityD1Database } from "./handler";
 
 const migrations = readdirSync("migrations")
@@ -12,6 +15,7 @@ const migrations = readdirSync("migrations")
   .sort();
 const ORIGIN = "https://slop.test";
 const PROJECT = "bounty";
+const REPOSITORY = "example/bounty";
 const MAINTAINER = { githubId: "900000101", githubLogin: "maintainer" };
 const REPORTER = { githubId: "900000102", githubLogin: "reporter" };
 const TRIAGER = { githubId: "900000103", githubLogin: "triager" };
@@ -22,33 +26,65 @@ const DISPUTE_2 = { githubId: "900000106", githubLogin: "dispute-two" };
 const DISPUTE_3 = { githubId: "900000108", githubLogin: "dispute-three" };
 const DISPUTE_4 = { githubId: "900000109", githubLogin: "dispute-four" };
 const DISPUTE_5 = { githubId: "900000110", githubLogin: "dispute-five" };
-const ADVISORY = "GHSA-7c8f-9g2h-3j4m";
-const RECEIVED = "2026-10-19T09:00:00.000Z";
+const OTHER = { githubId: "900000111", githubLogin: "other-reporter" };
+const REVISION_AT = "2026-10-19T09:00:00.000Z";
+const SECRET_DETAIL = "Synthetic exploit narrative that must stay private.";
 
+type Account = typeof MAINTAINER;
+type CaseReply = {
+  id: string;
+  revision: number;
+  submissionState: string;
+  receivedAt: string | null;
+  receivedAtSource: string | null;
+  awardState: string;
+  receiptState: string;
+  appealState: string;
+  allowedActions: string[];
+  nextStep: string;
+  award: {
+    grossMinor: string;
+    researcherMinor: string;
+    slopMinor: string;
+  } | null;
+  analysis?: {
+    state: string;
+    summary: string | null;
+    duplicateCaseIds: string[];
+    retryable: boolean;
+  } | null;
+  awardFunds?: { availableMinor: string } | null;
+};
 type Reply = {
   error?: string;
   replayed?: boolean;
-  case: {
+  state?: string;
+  received?: number;
+  submission?: {
     id: string;
-    revision: number;
-    submissionState: string;
-    receivedAt: string | null;
-    awardState: string;
-    receiptState: string;
-    appealState: string;
-    allowedActions: string[];
+    state: string;
+    lastCheck: string | null;
+    caseId: string | null;
   };
+  submissions?: { id: string }[];
+  cases?: CaseReply[];
+  case: CaseReply;
 };
 
-// An open paid program with separate financial and dispute approvers.
+// An open paid program: 2 awards of 10,000.00 USD of verified funds.
 const OPEN_PROGRAM = {
   status: "open",
-  intake: { repository: "example/bounty" },
+  intake: { repository: REPOSITORY },
   amount: {
     currency: "USD",
     decimals: 2,
     network: null,
     grossMinor: "1000000",
+  },
+  funding: {
+    state: "verified-available",
+    evidence: "synthetic-funding-evidence",
+    verifiedAt: REVISION_AT,
   },
   sponsor: { name: "Slop", githubId: null },
   approvers: {
@@ -56,21 +92,43 @@ const OPEN_PROGRAM = {
     financial: [FINANCE, FINANCE_2],
     dispute: [DISPUTE, DISPUTE_2, DISPUTE_3, DISPUTE_4, DISPUTE_5],
   },
-  capacity: { awards: 1, closesAt: null },
+  capacity: { awards: 2, closesAt: null },
+  responseTargets: {
+    acknowledgeHours: 24,
+    triageBusinessDays: 3,
+    updateIntervalDays: 7,
+  },
+  scope: {
+    includedAssets: ["Vault deposits"],
+    severityRubric: "Critical means loss of covered funds.",
+    lossDefinition: "Unauthorized loss of covered assets.",
+  },
 };
 
 function programManifest(securityBounty: Record<string, unknown>): string {
   return JSON.stringify({ id: PROJECT, status: "active", securityBounty });
 }
 
-function open(
-  securityBounty: Record<string, unknown> = {
-    status: "pending-approval",
-    intake: { repository: "example/bounty" },
-    approvers: { technical: [MAINTAINER], financial: [], dispute: [] },
-    capacity: { awards: 1, closesAt: null },
-  },
-) {
+let ghsaCount = 0;
+function report(
+  author: Account,
+  createdAt: string,
+  ghsa = `GHSA-2c3f-4g5h-${"23456789cfghjmpqrvwx"[ghsaCount++ % 20]}j9m`,
+): GithubPrivateReport {
+  return {
+    ghsa,
+    createdAt,
+    state: "triage",
+    author: { githubId: author.githubId, githubLogin: author.githubLogin },
+    summary: "Vault share rounding",
+    description: SECRET_DETAIL,
+    severity: "critical",
+    cweIds: ["CWE-682"],
+    packages: ["npm:vault"],
+  };
+}
+
+function open(securityBounty: Record<string, unknown> = OPEN_PROGRAM) {
   const { db, sqlite } = sqliteD1(migrations);
   const manifest = programManifest(securityBounty);
   const digest = createHash("sha256").update(manifest).digest("hex");
@@ -78,14 +136,15 @@ function open(
     .query(
       "INSERT INTO project_revisions (project_id, revision, manifest, manifest_sha256, reason, created_at) VALUES (?, 1, ?, ?, 'test', ?)",
     )
-    .run(PROJECT, manifest, digest, RECEIVED);
+    .run(PROJECT, manifest, digest, REVISION_AT);
   sqlite
     .query(
       "INSERT INTO projects (id, status, revision, manifest, manifest_sha256, created_at, updated_at) VALUES (?, 'active', 1, ?, ?, ?, ?)",
     )
-    .run(PROJECT, manifest, digest, RECEIVED, RECEIVED);
+    .run(PROJECT, manifest, digest, REVISION_AT, REVISION_AT);
   let actor = MAINTAINER;
   let ids = 0;
+  let clock = Date.parse("2026-10-19T10:00:00.000Z");
   // Runs before the next write batch, after the handler read the case.
   let beforeBatch: (() => void) | null = null;
   const securityDb = db as unknown as SecurityD1Database;
@@ -98,8 +157,43 @@ function open(
       return securityDb.batch(statements);
     },
   };
+  // GitHub: private reporting readiness and the repository's private reports.
+  let intake: "enabled" | "disabled" | "forbidden" = "enabled";
+  const reports: GithubPrivateReport[] = [];
+  let reportsAvailable = true;
+  const advisories: AdvisoryReader = {
+    privateReports: async (repository) =>
+      reportsAvailable && repository === REPOSITORY
+        ? { state: "ok", reports: [...reports] }
+        : { state: "unavailable" },
+    privateReport: async (_repository, ghsa) => {
+      const found = reports.find((entry) => entry.ghsa === ghsa);
+      return found && reportsAvailable
+        ? { state: "found", report: found }
+        : { state: "unavailable" };
+    },
+  };
+  const analyzed: SecurityAnalysisInput[] = [];
+  let analyzerFails = false;
+  let analyzerConfigured = true;
+  const analyzer: SecurityAnalyzer = {
+    provider: "fixture",
+    model: "fixture-model",
+    analyze: async (input) => {
+      analyzed.push(input);
+      if (analyzerFails) throw new Error("provider down");
+      return {
+        summary: "Rounding lets a depositor withdraw more than deposited.",
+        severity: "critical",
+        potentialLoss: "likely",
+        duplicateCaseIds: input.priorCases.map((entry) => entry.id),
+        rootCauseKey: "vault-share-rounding",
+        remediation: "Round shares down on withdrawal.",
+      };
+    },
+  };
   const call = async (
-    as: typeof MAINTAINER,
+    as: Account,
     method: "GET" | "POST",
     path: string,
     body?: unknown,
@@ -116,13 +210,21 @@ function open(
       }),
       {
         db: wrapped,
-        now: () => new Date("2026-10-19T10:00:00.000Z"),
+        now: () => new Date(clock),
         randomId: () => {
           ids += 1;
           return `case${String(ids).padStart(8, "0")}`;
         },
         sessionActor: async () => actor,
-        github: { fetch, apiOrigin: "https://api.github.invalid" },
+        github: {
+          fetch: async () =>
+            intake === "forbidden"
+              ? new Response("{}", { status: 403 })
+              : Response.json({ enabled: intake === "enabled" }),
+          apiOrigin: "https://api.github.invalid",
+        },
+        advisories,
+        analyzer: analyzerConfigured ? analyzer : null,
       },
     );
     return {
@@ -135,44 +237,19 @@ function open(
     keys += 1;
     return `test-key-${String(keys).padStart(8, "0")}`;
   };
-  // Inbox rows (NOT-01, SEC-09): event key, kind, subject, detail and link.
-  const inbox = (recipient: { githubId: string }) =>
-    sqlite
-      .query(
-        "SELECT event_key, kind, subject, detail, action_path FROM notifications WHERE recipient_github_id = ? ORDER BY event_key",
-      )
-      .all(recipient.githubId) as Record<string, string | null>[];
-  return {
-    sqlite,
-    call,
-    key,
-    inbox,
-    setBeforeBatch: (hook: () => void) => {
-      beforeBatch = hook;
-    },
-  };
-}
-
-/** Real API steps for a paid program, shared by the award tests. */
-function awardSteps({ call, key, sqlite }: ReturnType<typeof open>) {
-  let advisories = 0;
-  const record = async (receivedAt: string) => {
-    advisories += 1;
-    const recorded = await call(MAINTAINER, "POST", "security-cases", {
-      mode: "record",
-      projectId: PROJECT,
-      advisory: `GHSA-2c3f-4g5h-6j${"23456789"[advisories - 1]}m`,
-      reporterGithubId: REPORTER.githubId,
-      reporterGithubLogin: REPORTER.githubLogin,
-      receivedAt,
-      confirmation: true,
-      idempotencyKey: key(),
-    });
-    expect(recorded.status).toBe(201);
-    return recorded.body.case;
-  };
+  // Inbox rows one account received for a case (NOT-01, SEC-09).
+  const inbox = (account: Account, caseId: string) =>
+    (
+      sqlite
+        .query(
+          "SELECT event_key FROM notifications WHERE recipient_github_id = ? AND event_key LIKE ? ORDER BY event_key",
+        )
+        .all(account.githubId, `security-case:${caseId}:%`) as {
+        event_key: string;
+      }[]
+    ).map((row) => row.event_key);
   const act = async (
-    as: typeof MAINTAINER,
+    as: Account,
     id: string,
     fields: Record<string, unknown>,
   ) => {
@@ -183,210 +260,399 @@ function awardSteps({ call, key, sqlite }: ReturnType<typeof open>) {
       ...fields,
     });
   };
-  const decide = (id: string, rootCauseKey: string, relatedParty = false) =>
+  /** GitHub received a report; the maintainer imports it into Slop. */
+  const receive = async (author: Account, createdAt: string) => {
+    const entry = report(author, createdAt);
+    reports.push(entry);
+    const imported = await call(MAINTAINER, "POST", "security-cases", {
+      mode: "import",
+      projectId: PROJECT,
+    });
+    expect(imported.body).toMatchObject({ state: "ok", received: 1 });
+    const row = sqlite
+      .query("SELECT id FROM security_cases WHERE advisory_ghsa = ?")
+      .get(entry.ghsa) as { id: string };
+    return row.id;
+  };
+  const decide = (
+    id: string,
+    rootCauseKey: string,
+    fields: Record<string, unknown> = {},
+  ) =>
     act(MAINTAINER, id, {
       action: "decide",
       outcome: "confirmed",
       severity: "critical",
-      loss: "verified-actual",
+      loss: "verified-potential",
       inScope: true,
-      reason: "Confirmed critical loss of covered funds.",
-      evidenceReference: "private-evidence-1",
-      relatedParty,
+      reason: "Reproduced on an isolated local fork.",
+      relatedParty: false,
       rootCauseKey,
-      evidenceDigest: "a".repeat(64),
+      ...fields,
     });
-  // The owner raises capacity to 2 by an appended project revision.
-  const raiseCapacity = () => {
-    const raised = programManifest({
-      ...OPEN_PROGRAM,
-      capacity: { awards: 2, closesAt: null },
+  const award = (id: string, grossMinor: string, as: Account = MAINTAINER) =>
+    act(as, id, {
+      action: "award",
+      decision: "amount",
+      grossMinor,
+      paymentDeadline: "2026-11-30T00:00:00.000Z",
+      confirmation: true,
+      reason: "Owner award for a confirmed vault finding.",
     });
-    const raisedDigest = createHash("sha256").update(raised).digest("hex");
+  const reservations = () =>
     sqlite
       .query(
-        "INSERT INTO project_revisions (project_id, revision, manifest, manifest_sha256, reason, created_at) VALUES (?, 2, ?, ?, 'raise capacity', ?)",
+        "SELECT case_id, gross_minor FROM security_award_reservations ORDER BY case_id",
       )
-      .run(PROJECT, raised, raisedDigest, RECEIVED);
-    sqlite
-      .query(
-        "UPDATE projects SET revision = 2, manifest = ?, manifest_sha256 = ? WHERE id = ?",
-      )
-      .run(raised, raisedDigest, PROJECT);
+      .all() as { case_id: string; gross_minor: string }[];
+  return {
+    sqlite,
+    call,
+    key,
+    act,
+    receive,
+    decide,
+    award,
+    inbox,
+    reports,
+    analyzed,
+    reservations,
+    setIntake: (state: typeof intake) => {
+      intake = state;
+    },
+    setReportsAvailable: (available: boolean) => {
+      reportsAvailable = available;
+    },
+    setAnalyzerFails: (fails: boolean) => {
+      analyzerFails = fails;
+    },
+    setAnalyzerConfigured: (configured: boolean) => {
+      analyzerConfigured = configured;
+    },
+    advance: (ms: number) => {
+      clock += ms;
+    },
+    setBeforeBatch: (hook: () => void) => {
+      beforeBatch = hook;
+    },
   };
-  // Inbox rows one account received for a case (NOT-01, SEC-09).
-  const inbox = (account: typeof MAINTAINER, caseId: string) =>
-    (
-      sqlite
-        .query(
-          "SELECT event_key FROM notifications WHERE recipient_github_id = ? AND event_key LIKE ? ORDER BY event_key",
-        )
-        .all(account.githubId, `security-case:${caseId}:%`) as {
-        event_key: string;
-      }[]
-    ).map((row) => row.event_key);
-  return { record, act, decide, raiseCapacity, inbox };
 }
 
-describe("security cases", () => {
+describe("automatic private intake", () => {
+  test("a reporter's private report becomes a verified case from GitHub's own receipt", async () => {
+    const env = open();
+    const start = () =>
+      env.call(REPORTER, "POST", "security-submissions", {
+        projectId: PROJECT,
+      });
+    const started = await start();
+    expect(started.status).toBe(201);
+    const submission = started.body.submission as { id: string };
+    expect(started.body.submission).toMatchObject({
+      state: "awaiting-report",
+      lastCheck: null,
+      caseId: null,
+    });
+    // An interrupted submission is found again, never duplicated.
+    const again = await start();
+    expect(again.status).toBe(200);
+    expect(again.body.submission?.id).toBe(submission.id);
+    const check = () =>
+      env.call(
+        REPORTER,
+        "POST",
+        `security-submissions/${submission.id}/check`,
+        {},
+      );
+    // GitHub cannot be read: that is not "no report".
+    env.setReportsAvailable(false);
+    expect((await check()).body.submission).toMatchObject({
+      state: "awaiting-report",
+      lastCheck: "unavailable",
+    });
+    env.setReportsAvailable(true);
+    env.advance(11_000);
+    expect((await check()).body.submission).toMatchObject({
+      state: "awaiting-report",
+      lastCheck: "none-found",
+    });
+    // Another researcher's report is not this reporter's receipt.
+    env.reports.push(report(OTHER, "2026-10-19T10:00:05.000Z"));
+    const mine = report(REPORTER, "2026-10-19T10:00:07.000Z");
+    env.reports.push(mine);
+    // A repeated check within the transport bound reuses the last answer.
+    expect((await check()).body.submission?.lastCheck).toBe("none-found");
+    env.advance(11_000);
+    const found = await check();
+    expect(found.body.submission).toMatchObject({
+      state: "received",
+      lastCheck: "received",
+    });
+    const caseId = found.body.submission?.caseId as string;
+    const reporterView = await env.call(
+      REPORTER,
+      "GET",
+      `security-cases/${caseId}`,
+    );
+    expect(reporterView.body.case).toMatchObject({
+      submissionState: "verified",
+      receivedAt: mine.createdAt,
+      receivedAtSource: "github-advisory",
+      awardState: "pending",
+      receiptState: "received",
+      nextStep: "Waiting for the project owner's response.",
+    });
+    // The reporter sees receipt, response and payout, never the analysis.
+    expect(reporterView.body.case).not.toHaveProperty("analysis");
+    expect(
+      env.sqlite
+        .query(
+          "SELECT verified_by_github_id, reporter_github_login FROM security_cases WHERE id = ?",
+        )
+        .get(caseId),
+    ).toEqual({
+      verified_by_github_id: "github",
+      reporter_github_login: "reporter",
+    });
+    // Only this reporter's report was recorded by their own check.
+    expect(
+      env.sqlite.query("SELECT COUNT(*) AS n FROM security_cases").get(),
+    ).toEqual({ n: 1 });
+    // The maintainer is notified of the receipt; the reporter acted.
+    expect(env.inbox(MAINTAINER, caseId)).toEqual([
+      `security-case:${caseId}:1`,
+    ]);
+    expect(env.inbox(REPORTER, caseId)).toEqual([]);
+    // The private analysis read the report; D1 keeps only the proposal.
+    expect(env.analyzed).toHaveLength(1);
+    expect(env.analyzed[0].report.description).toBe(SECRET_DETAIL);
+    const ownerView = await env.call(
+      MAINTAINER,
+      "GET",
+      `security-cases/${caseId}`,
+    );
+    expect(ownerView.body.case.analysis).toMatchObject({
+      state: "complete",
+      summary: "Rounding lets a depositor withdraw more than deposited.",
+      retryable: false,
+    });
+    expect(ownerView.body.case.allowedActions).toEqual(
+      expect.arrayContaining(["request-information", "decide"]),
+    );
+    expect(ownerView.body.case.allowedActions).not.toContain("analyze");
+    const stored = JSON.stringify(
+      env.sqlite.query("SELECT * FROM security_case_analyses").all(),
+    );
+    expect(stored).not.toContain(SECRET_DETAIL);
+    // A new report starts a new submission.
+    expect((await start()).status).toBe(201);
+  });
+
+  test("starting a report needs private reporting on, with no public fallback", async () => {
+    const env = open();
+    for (const [state, code] of [
+      ["disabled", "intake_disabled"],
+      ["forbidden", "intake_forbidden"],
+    ] as const) {
+      env.setIntake(state);
+      const refused = await env.call(REPORTER, "POST", "security-submissions", {
+        projectId: PROJECT,
+      });
+      expect(refused.status).toBe(409);
+      expect(refused.body.error).toBe(code);
+    }
+    expect(
+      env.sqlite.query("SELECT COUNT(*) AS n FROM security_submissions").get(),
+    ).toEqual({ n: 0 });
+    // Signed out, nothing starts.
+    const unknown = await env.call(REPORTER, "POST", "security-submissions", {
+      projectId: "missing-project",
+    });
+    expect(unknown.status).toBe(404);
+  });
+
+  test("a maintainer imports direct GitHub reports and settles older links", async () => {
+    const env = open();
+    const linked = report(REPORTER, "2026-10-19T09:10:00.000Z");
+    const wrongAuthor = report(REPORTER, "2026-10-19T09:20:00.000Z");
+    const direct = report(OTHER, "2026-10-19T09:30:00.000Z");
+    // Links from before automatic receipt, as the old claim flow stored them.
+    const claim = (id: string, ghsa: string, account: Account) =>
+      env.sqlite
+        .query(
+          "INSERT INTO security_cases (id, project_id, advisory_repository, advisory_ghsa, reporter_github_id, reporter_github_login, submission_state, receipt_state, remediation_state, award_state, payment_state, disclosure_state, recognition, appeal_state, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'claimed', 'received', 'not-started', 'not-applicable', 'not-applicable', 'embargoed', 'private', 'none', 1, ?, ?)",
+        )
+        .run(
+          id,
+          PROJECT,
+          REPOSITORY,
+          ghsa,
+          account.githubId,
+          account.githubLogin,
+          REVISION_AT,
+          REVISION_AT,
+        );
+    claim("sc_legacyclaim1", linked.ghsa, REPORTER);
+    claim("sc_legacyclaim2", wrongAuthor.ghsa, OTHER);
+    claim("sc_legacyclaim3", "GHSA-9c9f-9g9h-9j9m", REPORTER);
+    env.reports.push(linked, wrongAuthor, direct);
+    const notMaintainer = await env.call(TRIAGER, "POST", "security-cases", {
+      mode: "import",
+      projectId: PROJECT,
+    });
+    expect(notMaintainer.status).toBe(403);
+    env.setReportsAvailable(false);
+    expect(
+      (
+        await env.call(MAINTAINER, "POST", "security-cases", {
+          mode: "import",
+          projectId: PROJECT,
+        })
+      ).body,
+    ).toMatchObject({ state: "unavailable", received: 0 });
+    expect(
+      env.sqlite
+        .query(
+          "SELECT COUNT(*) AS n FROM security_cases WHERE submission_state = 'claimed'",
+        )
+        .get(),
+    ).toEqual({ n: 3 });
+    env.setReportsAvailable(true);
+    const imported = await env.call(MAINTAINER, "POST", "security-cases", {
+      mode: "import",
+      projectId: PROJECT,
+    });
+    expect(imported.body).toMatchObject({ state: "ok", received: 3 });
+    const rows = env.sqlite
+      .query(
+        "SELECT id, advisory_ghsa, reporter_github_id, submission_state, received_at, received_at_source, revision FROM security_cases ORDER BY created_at, id",
+      )
+      .all() as Record<string, unknown>[];
+    // The older link by the true author became that case.
+    expect(rows.find((row) => row.id === "sc_legacyclaim1")).toMatchObject({
+      submission_state: "verified",
+      received_at: linked.createdAt,
+      received_at_source: "github-advisory",
+      revision: 2,
+    });
+    // GitHub names someone else, or no such private report exists.
+    for (const id of ["sc_legacyclaim2", "sc_legacyclaim3"])
+      expect(rows.find((row) => row.id === id)).toMatchObject({
+        submission_state: "link-rejected",
+        revision: 2,
+      });
+    for (const entry of [wrongAuthor, direct])
+      expect(
+        rows.find(
+          (row) =>
+            row.advisory_ghsa === entry.ghsa &&
+            row.submission_state === "verified",
+        ),
+      ).toMatchObject({ reporter_github_id: entry.author.githubId });
+    expect(
+      env.sqlite
+        .query(
+          "SELECT kind FROM security_case_events WHERE case_id = 'sc_legacyclaim3'",
+        )
+        .all(),
+    ).toEqual([{ kind: "receipt-mismatch" }]);
+    // Importing again records nothing twice.
+    expect(
+      (
+        await env.call(MAINTAINER, "POST", "security-cases", {
+          mode: "import",
+          projectId: PROJECT,
+        })
+      ).body,
+    ).toMatchObject({ state: "ok", received: 0 });
+    // Each new case got its private analysis; later ones compared earlier.
+    expect(env.analyzed).toHaveLength(3);
+    expect(env.analyzed[2].priorCases.map((entry) => entry.id)).toHaveLength(2);
+  });
+
   test("listing cases records only the cases disclosed and refuses an unaudited response", async () => {
-    const state = open(OPEN_PROGRAM);
-    const { record } = awardSteps(state);
-    const first = await record(RECEIVED);
-    const second = await record(RECEIVED);
+    const env = open();
+    const first = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    const second = await env.receive(REPORTER, "2026-10-19T09:20:00.000Z");
     const reads = () =>
-      state.sqlite
+      env.sqlite
         .query(
           "SELECT case_id, actor_github_id, actor_role FROM security_case_access_log WHERE action = 'read' ORDER BY case_id",
         )
         .all();
-    const listed = await state.call(REPORTER, "GET", "security-cases");
+    const listed = await env.call(REPORTER, "GET", "security-cases");
     expect(listed.status).toBe(200);
+    expect(listed.body.submissions).toEqual([]);
     expect(reads()).toEqual(
-      [first, second].map((row) => ({
-        case_id: row.id,
+      [first, second].sort().map((id) => ({
+        case_id: id,
         actor_github_id: REPORTER.githubId,
         actor_role: "reporter",
       })),
     );
-    const outsider = await state.call(TRIAGER, "GET", "security-cases");
+    const outsider = await env.call(TRIAGER, "GET", "security-cases");
     expect(outsider.status).toBe(200);
     expect(reads()).toHaveLength(2);
-    state.sqlite.exec(
+    env.sqlite.exec(
       "CREATE TRIGGER refuse_access_read BEFORE INSERT ON security_case_access_log BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END",
     );
-    const unavailable = await state.call(REPORTER, "GET", "security-cases");
+    const unavailable = await env.call(REPORTER, "GET", "security-cases");
     expect(unavailable.status).toBe(500);
     expect(unavailable.body).not.toHaveProperty("cases");
     expect(reads()).toHaveLength(2);
   });
 
-  test("a rejected link can be corrected by a new claim or a record", async () => {
-    const { call, key, inbox } = open();
-    const claim = () =>
-      call(REPORTER, "POST", "security-cases", {
-        mode: "claim",
-        projectId: PROJECT,
-        advisory: ADVISORY,
-        idempotencyKey: key(),
-      });
-    const record = (idempotencyKey = key()) =>
-      call(MAINTAINER, "POST", "security-cases", {
-        mode: "record",
-        projectId: PROJECT,
-        advisory: ADVISORY,
-        reporterGithubId: REPORTER.githubId,
-        reporterGithubLogin: REPORTER.githubLogin,
-        receivedAt: RECEIVED,
-        confirmation: true,
-        idempotencyKey,
-      });
-    const first = await claim();
-    expect(first.status).toBe(201);
-    // A record over an open claim wrote nothing, so it is not a success.
-    const overClaim = await record();
-    expect(overClaim.status).toBe(409);
-    expect(overClaim.body.error).toBe("claim_pending");
-    const rejected = await call(
-      MAINTAINER,
-      "POST",
-      `security-cases/${first.body.case.id}/actions`,
-      {
-        action: "reject-link",
-        expectedRevision: 1,
-        idempotencyKey: key(),
-        reason: "The advisory names a different reporter.",
-      },
-    );
-    expect(rejected.status).toBe(200);
-    expect(rejected.body.case.submissionState).toBe("link-rejected");
-    // The reporter links again: a new live case, not the rejected one.
-    const again = await claim();
-    expect(again.status).toBe(201);
-    expect(again.body.case.id).not.toBe(first.body.case.id);
-    expect(again.body.case.submissionState).toBe("claimed");
-    const reject2 = await call(
-      MAINTAINER,
-      "POST",
-      `security-cases/${again.body.case.id}/actions`,
-      {
-        action: "reject-link",
-        expectedRevision: 1,
-        idempotencyKey: key(),
-        reason: "Rejected again so the maintainer records it directly.",
-      },
-    );
-    expect(reject2.status).toBe(200);
-    // The maintainer records the advisory; the verified receipt is written.
-    const recordKey = key();
-    const recorded = await record(recordKey);
-    expect(recorded.status).toBe(201);
-    expect(recorded.body.case).toMatchObject({
-      submissionState: "verified",
-      receivedAt: RECEIVED,
+  test("a failed or missing analysis can be run again by the owner", async () => {
+    const env = open();
+    env.setAnalyzerConfigured(false);
+    const id = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    const read = () => env.call(MAINTAINER, "GET", `security-cases/${id}`);
+    expect((await read()).body.case.analysis).toMatchObject({
+      state: "unavailable",
+      retryable: true,
     });
-    // Only the exact request replays; another record is refused.
-    const replay = await record(recordKey);
-    expect(replay.status).toBe(200);
-    expect(replay.body.replayed).toBe(true);
-    expect(replay.body.case.id).toBe(recorded.body.case.id);
-    const other = await record();
-    expect(other.status).toBe(409);
-    expect(other.body.error).toBe("advisory_already_recorded");
-    // The inbox holds one row per event and recipient, with only the private
-    // case reference and the sign-in link (SEC-09). A replay adds nothing,
-    // and nobody is told about their own action.
-    const row = (id: string, revision: number) => ({
-      event_key: `security-case:${id}:${revision}`,
-      kind: "security_case",
-      subject: id,
-      detail: null,
-      action_path: "/security",
+    expect((await read()).body.case.allowedActions).toContain("analyze");
+    // The reporter cannot run it.
+    expect((await env.act(REPORTER, id, { action: "analyze" })).status).toBe(
+      409,
+    );
+    env.setAnalyzerConfigured(true);
+    env.setAnalyzerFails(true);
+    const failed = await env.act(MAINTAINER, id, { action: "analyze" });
+    expect(failed.status).toBe(200);
+    expect(failed.body.case.analysis).toMatchObject({
+      state: "failed",
+      retryable: true,
     });
-    const ids = [first, again, recorded].map(
-      (reply) => reply.body.case.id as string,
-    );
-    expect(inbox(MAINTAINER)).toEqual(
-      [row(ids[0], 1), row(ids[1], 1)].sort((a, b) =>
-        a.event_key.localeCompare(b.event_key),
-      ),
-    );
-    expect(inbox(REPORTER)).toEqual(
-      [row(ids[0], 2), row(ids[1], 2), row(ids[2], 1)].sort((a, b) =>
-        a.event_key.localeCompare(b.event_key),
-      ),
-    );
-    expect(inbox(TRIAGER)).toEqual([]);
+    env.setAnalyzerFails(false);
+    const complete = await env.act(MAINTAINER, id, { action: "analyze" });
+    expect(complete.body.case.analysis).toMatchObject({
+      state: "complete",
+      retryable: false,
+    });
+    const again = await env.act(MAINTAINER, id, { action: "analyze" });
+    expect(again.status).toBe(409);
+    expect(again.body.error).toBe("analysis_running");
   });
 
   test("a stale triager change grants or revokes nothing", async () => {
-    const { call, key, sqlite, setBeforeBatch, inbox } = open();
-    const recorded = await call(MAINTAINER, "POST", "security-cases", {
-      mode: "record",
-      projectId: PROJECT,
-      advisory: ADVISORY,
-      reporterGithubId: REPORTER.githubId,
-      reporterGithubLogin: REPORTER.githubLogin,
-      receivedAt: RECEIVED,
-      confirmation: true,
-      idempotencyKey: key(),
-    });
-    expect(recorded.status).toBe(201);
-    const id = recorded.body.case.id as string;
+    const env = open();
+    const { call, key, sqlite, setBeforeBatch, inbox } = env;
+    const id = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
     // Another maintainer moves the case two revisions ahead while this
     // request is in flight, so its event guard skips instead of colliding.
-    const advanceTwice = () => {
-      for (const revision of [2, 3]) {
+    const advance = (revisions: number[]) => () => {
+      for (const revision of revisions) {
         sqlite
           .query(
             "UPDATE security_cases SET revision = ?, updated_at = ? WHERE id = ?",
           )
-          .run(revision, RECEIVED, id);
+          .run(revision, REVISION_AT, id);
         sqlite
           .query(
-            "INSERT INTO security_case_events (case_id, case_revision, kind, actor_github_id, actor_role, idempotency_key, detail, at) VALUES (?, ?, 'next-action', ?, 'security-maintainer', ?, '{}', ?)",
+            "INSERT INTO security_case_events (case_id, case_revision, kind, actor_github_id, actor_role, idempotency_key, detail, at) VALUES (?, ?, 'remediation', ?, 'security-maintainer', ?, '{}', ?)",
           )
-          .run(id, revision, MAINTAINER.githubId, key(), RECEIVED);
+          .run(id, revision, MAINTAINER.githubId, key(), REVISION_AT);
       }
     };
     const members = () =>
@@ -395,7 +661,7 @@ describe("security cases", () => {
           "SELECT github_id, revoked_at FROM security_case_members WHERE case_id = ?",
         )
         .all(id) as { github_id: string; revoked_at: string | null }[];
-    setBeforeBatch(advanceTwice);
+    setBeforeBatch(advance([2, 3]));
     const stale = await call(
       MAINTAINER,
       "POST",
@@ -410,11 +676,10 @@ describe("security cases", () => {
     expect(stale.status).toBe(409);
     expect(stale.body.error).toBe("stale_revision");
     expect(members()).toEqual([]);
-    expect(inbox(TRIAGER)).toEqual([]);
+    expect(inbox(TRIAGER, id)).toEqual([]);
     expect((await call(TRIAGER, "GET", `security-cases/${id}`)).status).toBe(
       404,
     );
-
     const assigned = await call(
       MAINTAINER,
       "POST",
@@ -431,22 +696,8 @@ describe("security cases", () => {
       { github_id: TRIAGER.githubId, revoked_at: null },
     ]);
     // Only the assignment that landed reaches the triager.
-    expect(inbox(TRIAGER).map((n) => n.event_key)).toEqual([
-      `security-case:${id}:4`,
-    ]);
-
-    setBeforeBatch(() => {
-      for (const revision of [5, 6]) {
-        sqlite
-          .query("UPDATE security_cases SET revision = ? WHERE id = ?")
-          .run(revision, id);
-        sqlite
-          .query(
-            "INSERT INTO security_case_events (case_id, case_revision, kind, actor_github_id, actor_role, idempotency_key, detail, at) VALUES (?, ?, 'next-action', ?, 'security-maintainer', ?, '{}', ?)",
-          )
-          .run(id, revision, MAINTAINER.githubId, key(), RECEIVED);
-      }
-    });
+    expect(inbox(TRIAGER, id)).toEqual([`security-case:${id}:4`]);
+    setBeforeBatch(advance([5, 6]));
     const staleRevoke = await call(
       MAINTAINER,
       "POST",
@@ -462,402 +713,308 @@ describe("security cases", () => {
     expect(members()).toEqual([
       { github_id: TRIAGER.githubId, revoked_at: null },
     ]);
-    const events = sqlite
-      .query(
-        "SELECT kind FROM security_case_events WHERE case_id = ? AND kind LIKE '%triager' ORDER BY case_revision",
-      )
-      .all(id) as { kind: string }[];
-    expect(events).toEqual([{ kind: "assign-triager" }]);
   });
+});
 
-  test("raised capacity funds the earliest waiting receipt on every reserving path", async () => {
-    const env = open(OPEN_PROGRAM);
-    const { sqlite } = env;
-    const { record, act, decide, raiseCapacity, inbox } = awardSteps(env);
-    const funded = await record("2026-10-19T09:10:00.000Z");
-    const waiting = await record("2026-10-19T09:20:00.000Z");
-    const later = await record("2026-10-19T09:30:00.000Z");
-    const related = await record("2026-10-19T09:40:00.000Z");
-    expect((await decide(funded.id, "vault-drain")).body.case.awardState).toBe(
-      "reserved",
-    );
-    // Capacity 1 is used, so the earlier valid finding waits.
-    expect((await decide(waiting.id, "oracle-skew")).body.case.awardState).toBe(
-      "capacity-exhausted",
-    );
-    raiseCapacity();
-    // A related-party approval cannot take the slot the earlier receipt
-    // waits for.
-    expect(
-      (await decide(related.id, "fee-rounding", true)).body.case.awardState,
-    ).toBe("pending");
-    const approved = await act(DISPUTE, related.id, {
-      action: "decide-related-party",
-      outcome: "approve",
-      reason: "Approved after independent review.",
+describe("discretionary awards", () => {
+  test("the owner chooses the amount, and approval reserves exactly that amount", async () => {
+    const env = open();
+    const first = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    const second = await env.receive(REPORTER, "2026-10-19T09:20:00.000Z");
+    // A high-severity finding with unverified loss is not barred: severity
+    // and loss are priority guidance, not eligibility.
+    const decided = await env.decide(first, "vault-drain", {
+      severity: "high",
+      loss: "not-verified",
     });
-    expect(approved.status).toBe(200);
-    expect(approved.body.case.awardState).toBe("capacity-exhausted");
-    // A later decision cannot take it either.
-    const laterDecided = await decide(later.id, "bridge-replay");
-    expect(laterDecided.status).toBe(200);
-    expect(laterDecided.body.case.awardState).toBe("capacity-exhausted");
-    const reserve = (id: string) =>
-      act(FINANCE, id, {
-        action: "reserve-award",
-        reason: "Capacity raised by revision; earliest receipt first.",
-      });
-    expect((await reserve(later.id)).body.error).toBe(
-      "earlier_receipt_waiting",
-    );
-    const reserved = await reserve(waiting.id);
-    expect(reserved.status).toBe(200);
-    expect(reserved.body.case.awardState).toBe("reserved");
-    // The reservation reaches the other financial approver, never the
-    // actor; a related-party approval that reserved nothing reaches no one
-    // in finance.
-    expect(inbox(FINANCE_2, waiting.id)).toEqual([
-      `security-case:${waiting.id}:3`,
-    ]);
-    expect(inbox(FINANCE, waiting.id)).toEqual([]);
-    expect(inbox(FINANCE_2, related.id)).toEqual([]);
-    // Capacity 2 is now used; the later findings still wait their turn.
-    expect((await reserve(later.id)).body.error).toBe("capacity_exhausted");
+    expect(decided.status).toBe(200);
+    expect(decided.body.case).toMatchObject({
+      awardState: "pending",
+      nextStep: "Choose an award amount or no award.",
+    });
+    expect(decided.body.case.allowedActions).toContain("award");
+    // Nothing is reserved by a technical decision.
+    expect(env.reservations()).toEqual([]);
+    const inexact = await env.award(first, "1000002");
+    expect(inexact.status).toBe(400);
+    expect(inexact.body.error).toBe("invalid_amount");
+    // Only the owner decides awards; finance cannot even see the case yet,
+    // and the reporter cannot award their own report.
     expect(
-      sqlite
-        .query(
-          "SELECT case_id FROM security_award_reservations ORDER BY reserved_at, case_id",
-        )
-        .all()
-        .map((row) => (row as { case_id: string }).case_id)
-        .sort(),
-    ).toEqual([funded.id, waiting.id].sort());
+      (
+        await env.call(FINANCE, "POST", `security-cases/${first}/actions`, {
+          action: "award",
+          expectedRevision: 2,
+          idempotencyKey: env.key(),
+          decision: "amount",
+          grossMinor: "1500000",
+          paymentDeadline: "2026-11-30T00:00:00.000Z",
+          confirmation: true,
+          reason: "Finance trying to award directly.",
+        })
+      ).status,
+    ).toBe(404);
+    expect((await env.award(first, "1500000", REPORTER)).status).toBe(403);
+    const approved = await env.award(first, "1500000");
+    expect(approved.status).toBe(200);
+    expect(approved.body.case).toMatchObject({
+      awardState: "approved",
+      award: {
+        grossMinor: "1500000",
+        researcherMinor: "1125000",
+        slopMinor: "375000",
+      },
+    });
+    expect(env.reservations()).toEqual([
+      { case_id: first, gross_minor: "1500000" },
+    ]);
+    // Both finance approvers learn of the approved award.
+    for (const payer of [FINANCE, FINANCE_2])
+      expect(env.inbox(payer, first)).toEqual([`security-case:${first}:3`]);
+    // The second finding decides and awards in one step; 500,000 remains.
+    const tooMuch = await env.decide(second, "oracle-skew", {
+      award: {
+        decision: "amount",
+        grossMinor: "600000",
+        paymentDeadline: "2026-11-30T00:00:00.000Z",
+        confirmation: true,
+      },
+    });
+    expect(tooMuch.status).toBe(409);
+    expect(tooMuch.body.error).toBe("insufficient_funds");
+    const unchanged = await env.call(
+      MAINTAINER,
+      "GET",
+      `security-cases/${second}`,
+    );
+    expect(unchanged.body.case).toMatchObject({
+      revision: 1,
+      receiptState: "received",
+    });
+    expect(unchanged.body.case.awardFunds).toMatchObject({
+      availableMinor: "500000",
+    });
+    const fits = await env.decide(second, "oracle-skew", {
+      award: {
+        decision: "amount",
+        grossMinor: "500000",
+        paymentDeadline: "2026-11-30T00:00:00.000Z",
+        confirmation: true,
+      },
+    });
+    expect(fits.status).toBe(200);
+    expect(fits.body.case.awardState).toBe("approved");
+    // A reserved obligation cannot be redecided or withdrawn.
+    expect(
+      (
+        await env.act(MAINTAINER, first, {
+          action: "award",
+          decision: "none",
+          reason: "Changing my mind after approval.",
+        })
+      ).status,
+    ).toBe(409);
   });
 
-  test("a pending related-party review holds its root cause and its place", async () => {
-    const env = open(OPEN_PROGRAM);
-    const { act, decide, record, inbox } = awardSteps(env);
-    const related = await record("2026-10-19T09:10:00.000Z");
-    const otherCause = await record("2026-10-19T09:20:00.000Z");
-    const sameCause = await record("2026-10-19T09:30:00.000Z");
-    expect(
-      (await decide(related.id, "shared-cause", true)).body.case.awardState,
-    ).toBe("pending");
-    // The dispute reviewers learn that a review waits for them; finance
-    // learns nothing before an award is reserved.
+  test("no award is a decision the reporter can appeal", async () => {
+    const env = open();
+    const id = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    await env.decide(id, "vault-drain");
+    const none = await env.act(MAINTAINER, id, {
+      action: "award",
+      decision: "none",
+      reason: "Already known and mitigated before the report.",
+    });
+    expect(none.status).toBe(200);
+    expect(none.body.case.awardState).toBe("ineligible");
+    expect(env.reservations()).toEqual([]);
+    const reporter = await env.call(REPORTER, "GET", `security-cases/${id}`);
+    expect(reporter.body.case.allowedActions).toContain("appeal");
+    const appealed = await env.act(REPORTER, id, {
+      action: "appeal",
+      reason: "The mitigation did not cover the path I reported.",
+    });
+    expect(appealed.body.case.appealState).toBe("open");
     for (const reviewer of [DISPUTE, DISPUTE_2])
-      expect(inbox(reviewer, related.id)).toEqual([
-        `security-case:${related.id}:2`,
-      ]);
-    expect(inbox(FINANCE, related.id)).toEqual([]);
-    // The earlier receipt waits for its independent review, so a later
-    // finding cannot take the only capacity.
+      expect(env.inbox(reviewer, id)).toEqual([`security-case:${id}:4`]);
+    // A returned appeal reopens the award decision.
+    const returned = await env.act(DISPUTE, id, {
+      action: "decide-appeal",
+      outcome: "return",
+      reason: "Decide the award again with the new evidence.",
+    });
+    expect(returned.body.case).toMatchObject({
+      receiptState: "triaging",
+      awardState: "pending",
+    });
+  });
+
+  test("a concurrent reservation cannot overspend the program", async () => {
+    const env = open();
+    const first = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    const second = await env.receive(REPORTER, "2026-10-19T09:20:00.000Z");
+    await env.decide(first, "vault-drain");
+    await env.decide(second, "oracle-skew");
+    // Another owner request reserves 1,500,000 after this request read the
+    // available funds and before its batch commits.
+    env.setBeforeBatch(() => {
+      env.sqlite
+        .query(
+          "INSERT INTO security_award_reservations (case_id, project_id, root_cause_key, policy_revision, gross_minor, currency, reserved_at) VALUES (?, ?, 'oracle-skew', 1, '1500000', 'USD', ?)",
+        )
+        .run(second, PROJECT, REVISION_AT);
+    });
+    const raced = await env.award(first, "1000000");
+    expect(raced.status).toBe(409);
+    expect(raced.body.error).toBe("insufficient_funds");
+    expect(env.reservations()).toEqual([
+      { case_id: second, gross_minor: "1500000" },
+    ]);
     expect(
-      (await decide(otherCause.id, "other-cause")).body.case.awardState,
-    ).toBe("capacity-exhausted");
-    // The pending review holds its root cause: a later report records a
-    // duplicate instead.
-    const duplicate = await decide(sameCause.id, "shared-cause");
+      env.sqlite
+        .query("SELECT award_state, revision FROM security_cases WHERE id = ?")
+        .get(first),
+    ).toEqual({ award_state: "pending", revision: 2 });
+    // The same root cause never reserves twice.
+    const third = await env.receive(REPORTER, "2026-10-19T09:30:00.000Z");
+    await env.decide(third, "oracle-skew");
+    const duplicate = await env.award(third, "100000");
     expect(duplicate.status).toBe(409);
     expect(duplicate.body.error).toBe("root_cause_reserved");
-    const approved = await act(DISPUTE, related.id, {
+  });
+
+  test("a pledge reserves nothing", async () => {
+    const env = open({ ...OPEN_PROGRAM, funding: { state: "pledged" } });
+    const id = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    await env.decide(id, "vault-drain");
+    const refused = await env.award(id, "1000000");
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toBe("funds_unavailable");
+    expect(env.reservations()).toEqual([]);
+  });
+
+  test("an award reserved before discretionary awards is approved at its amount", async () => {
+    const env = open();
+    const id = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    await env.decide(id, "vault-drain");
+    // The older flow reserved the program amount at the technical decision.
+    env.sqlite
+      .query(
+        "INSERT INTO security_award_reservations (case_id, project_id, root_cause_key, policy_revision, gross_minor, currency, reserved_at) VALUES (?, ?, 'vault-drain', 1, '1000000', 'USD', ?)",
+      )
+      .run(id, PROJECT, REVISION_AT);
+    env.sqlite
+      .query("UPDATE security_cases SET award_state = 'reserved' WHERE id = ?")
+      .run(id);
+    expect((await env.award(id, "800000")).body.error).toBe(
+      "award_obligation_exists",
+    );
+    const approved = await env.award(id, "1000000");
+    expect(approved.status).toBe(200);
+    expect(approved.body.case.awardState).toBe("approved");
+    expect(env.reservations()).toEqual([
+      { case_id: id, gross_minor: "1000000" },
+    ]);
+  });
+});
+
+describe("related-party awards", () => {
+  test("a proposed related-party award reserves only after independent approval", async () => {
+    const env = open();
+    const related = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    const sameCause = await env.receive(OTHER, "2026-10-19T09:20:00.000Z");
+    await env.decide(related, "shared-cause", { relatedParty: true });
+    const proposed = await env.award(related, "800000");
+    expect(proposed.status).toBe(200);
+    expect(proposed.body.case).toMatchObject({
+      awardState: "pending",
+      award: { grossMinor: "800000" },
+    });
+    expect(env.reservations()).toEqual([]);
+    // The dispute reviewers learn that a review waits; finance learns
+    // nothing before an award is approved.
+    for (const reviewer of [DISPUTE, DISPUTE_2])
+      expect(env.inbox(reviewer, related)).toEqual([
+        `security-case:${related}:3`,
+      ]);
+    expect(env.inbox(FINANCE, related)).toEqual([]);
+    // The pending review holds its root cause.
+    await env.decide(sameCause, "shared-cause");
+    expect((await env.award(sameCause, "100000")).body.error).toBe(
+      "root_cause_reserved",
+    );
+    const approved = await env.act(DISPUTE, related, {
       action: "decide-related-party",
       outcome: "approve",
       reason: "Approved after independent review.",
     });
     expect(approved.status).toBe(200);
-    expect(approved.body.case.awardState).toBe("reserved");
-    // The approval reserved an award, so finance is told once.
-    expect(inbox(FINANCE, related.id)).toEqual([
-      `security-case:${related.id}:3`,
+    expect(approved.body.case.awardState).toBe("approved");
+    expect(env.reservations()).toEqual([
+      { case_id: related, gross_minor: "800000" },
     ]);
+    expect(env.inbox(FINANCE, related)).toEqual([`security-case:${related}:4`]);
     // The reviewer is never notified of its own action.
-    expect(inbox(DISPUTE, related.id)).toEqual([
-      `security-case:${related.id}:2`,
-    ]);
+    expect(env.inbox(DISPUTE, related)).toEqual([`security-case:${related}:3`]);
   });
 
-  test("a finding that waits for capacity can still be appealed", async () => {
-    const env = open(OPEN_PROGRAM);
-    const { sqlite } = env;
-    const { act, decide, record, raiseCapacity, inbox } = awardSteps(env);
-    const funded = await record("2026-10-19T09:10:00.000Z");
-    const waiting = await record("2026-10-19T09:20:00.000Z");
-    const laterSameCause = await record("2026-10-19T09:30:00.000Z");
-    expect((await decide(funded.id, "vault-drain")).body.case.awardState).toBe(
-      "reserved",
+  test("an appealed related-party refusal cannot be re-reviewed by the same reviewers", async () => {
+    const env = open();
+    const { act } = env;
+    const related = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+    const propose = async () => {
+      expect(
+        (await env.decide(related, "insider-cause", { relatedParty: false }))
+          .status,
+      ).toBe(200);
+      return env.award(related, "800000");
+    };
+    await env.decide(related, "insider-cause", { relatedParty: true });
+    expect((await env.award(related, "800000")).body.case.awardState).toBe(
+      "pending",
     );
-    // Capacity 1 is used, so the finding stays confirmed and waits for money
-    // (SEC-06). The shortage is a financial exception, not a reason to
-    // relabel the finding (SEC-12), so its award can still be disputed.
-    const decided = await decide(waiting.id, "oracle-skew");
-    expect(decided.status).toBe(200);
-    expect(decided.body.case.awardState).toBe("capacity-exhausted");
-    const reporterSees = await env.call(
-      REPORTER,
-      "GET",
-      `security-cases/${waiting.id}`,
-    );
-    expect(reporterSees.body.case.receiptState).toBe("confirmed");
-    expect(reporterSees.body.case.allowedActions).toContain("appeal");
-    const appeal = await act(REPORTER, waiting.id, {
-      action: "appeal",
-      reason: "The award was withheld for capacity without telling me.",
-    });
-    expect(appeal.status).toBe(200);
-    expect(appeal.body.case.receiptState).toBe("disputed");
-    expect(appeal.body.case.appealState).toBe("open");
-    // The appeal reaches both dispute reviewers and the reporter, never the
-    // maintainer who decided (SEC-04).
-    for (const reviewer of [DISPUTE, DISPUTE_2])
-      expect(inbox(reviewer, waiting.id)).toEqual([
-        `security-case:${waiting.id}:3`,
-      ]);
-    expect(inbox(REPORTER, waiting.id)).toEqual([
-      `security-case:${waiting.id}:1`,
-      `security-case:${waiting.id}:2`,
-    ]);
-    expect(inbox(MAINTAINER, waiting.id)).toEqual([]);
-    // The appeal keeps the funding place of the earliest receipt: a later
-    // report on the same root cause reserves nothing while it is disputed, so
-    // it waits for capacity too (SEC-04).
-    raiseCapacity();
-    const laterDecided = await decide(laterSameCause.id, "oracle-skew");
-    expect(laterDecided.status).toBe(200);
-    expect(laterDecided.body.case.awardState).toBe("capacity-exhausted");
-    // The independent reviewer can now open the case and resolve the dispute
-    // (SEC-04, SEC-18).
-    const waitingForReview = await env.call(
-      DISPUTE,
-      "GET",
-      `security-cases/${waiting.id}`,
-    );
-    expect(waitingForReview.body.case.allowedActions).toContain(
-      "decide-appeal",
-    );
-    // Upholding restores the confirmed receipt unchanged, so the reporter
-    // keeps the award its appeal protected (SEC-12).
-    const upheld = await act(DISPUTE, waiting.id, {
-      action: "decide-appeal",
-      outcome: "uphold",
-      reason: "The finding stands; only the funding was disputed.",
-    });
-    expect(upheld.status).toBe(200);
-    expect(
-      sqlite
-        .query(
-          "SELECT receipt_state, award_state, appeal_state FROM security_cases WHERE id = ?",
-        )
-        .get(waiting.id),
-    ).toEqual({
-      receipt_state: "confirmed",
-      award_state: "capacity-exhausted",
-      appeal_state: "upheld",
-    });
-    const reserved = await act(FINANCE, waiting.id, {
-      action: "reserve-award",
-      reason: "Capacity raised by revision; earliest receipt first.",
-    });
-    expect(reserved.status).toBe(200);
-    expect(reserved.body.case.awardState).toBe("reserved");
-    expect(
-      sqlite
-        .query(
-          "SELECT case_id FROM security_award_reservations ORDER BY reserved_at, case_id",
-        )
-        .all()
-        .map((row) => (row as { case_id: string }).case_id)
-        .sort(),
-    ).toEqual([funded.id, waiting.id].sort());
-  });
-
-  test("a returned funding appeal waits for a new decision", async () => {
-    const env = open(OPEN_PROGRAM);
-    const { sqlite } = env;
-    const { act, decide, record, raiseCapacity } = awardSteps(env);
-    const funded = await record("2026-10-19T09:10:00.000Z");
-    const waiting = await record("2026-10-19T09:20:00.000Z");
-    expect((await decide(funded.id, "vault-drain")).body.case.awardState).toBe(
-      "reserved",
-    );
-    expect((await decide(waiting.id, "oracle-skew")).body.case.awardState).toBe(
-      "capacity-exhausted",
-    );
-    expect(
-      (
-        await act(REPORTER, waiting.id, {
-          action: "appeal",
-          reason: "The award was withheld for capacity without telling me.",
-        })
-      ).status,
-    ).toBe(200);
-    // Returning it sends the finding back for a new decision; the award it
-    // waited for is untouched, so nothing is reserved or erased (SEC-12).
-    const returned = await act(DISPUTE, waiting.id, {
-      action: "decide-appeal",
-      outcome: "return",
-      reason:
-        "Funding shortage is a financial exception, not a finding change.",
-    });
-    expect(returned.status).toBe(200);
-    expect(
-      sqlite
-        .query(
-          "SELECT receipt_state, award_state, appeal_state FROM security_cases WHERE id = ?",
-        )
-        .get(waiting.id),
-    ).toEqual({
-      receipt_state: "triaging",
-      award_state: "capacity-exhausted",
-      appeal_state: "returned",
-    });
-    expect(
-      sqlite
-        .query("SELECT COUNT(*) AS n FROM security_award_reservations")
-        .get(),
-    ).toEqual({ n: 1 });
-    // A new decision reserves as soon as the program raises its budget, so
-    // the returned appeal does not strand the money (SEC-06).
-    raiseCapacity();
-    const redecided = await decide(waiting.id, "oracle-skew");
-    expect(redecided.status).toBe(200);
-    expect(redecided.body.case.awardState).toBe("reserved");
-  });
-
-  test("a returned appeal cannot clear the related-party review", async () => {
-    const env = open(OPEN_PROGRAM);
-    const { sqlite } = env;
-    const { act, decide, record } = awardSteps(env);
-    const related = await record("2026-10-19T09:10:00.000Z");
-    expect(
-      (await decide(related.id, "insider-cause", true)).body.case.awardState,
-    ).toBe("pending");
-    const refused = await act(DISPUTE, related.id, {
-      action: "decide-related-party",
-      outcome: "refuse",
-      reason: "Refused after independent review.",
-    });
-    expect(refused.body.case.awardState).toBe("ineligible");
-    expect(
-      (
-        await act(REPORTER, related.id, {
-          action: "appeal",
-          reason: "The related-party refusal used the wrong facts.",
-        })
-      ).status,
-    ).toBe(200);
-    const returned = await act(DISPUTE_2, related.id, {
-      action: "decide-appeal",
-      outcome: "return",
-      reason: "Return for a new technical decision.",
-    });
-    expect(returned.status).toBe(200);
+    const refuse = (reviewer: Account) =>
+      act(reviewer, related, {
+        action: "decide-related-party",
+        outcome: "refuse",
+        reason: "Refused after independent review.",
+      });
+    const appealAndReturn = async (reviewer: Account) => {
+      expect(
+        (
+          await act(REPORTER, related, {
+            action: "appeal",
+            reason: "The related-party refusal used the wrong facts.",
+          })
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await act(reviewer, related, {
+            action: "decide-appeal",
+            outcome: "return",
+            reason: "Return for a new decision.",
+          })
+        ).status,
+      ).toBe(200);
+    };
+    expect((await refuse(DISPUTE)).body.case.awardState).toBe("ineligible");
+    await appealAndReturn(DISPUTE_2);
     // A redecision that declares no related party still needs a review.
-    const redecided = await decide(related.id, "insider-cause", false);
-    expect(redecided.status).toBe(200);
-    expect(redecided.body.case.awardState).toBe("pending");
+    expect((await propose()).body.case.awardState).toBe("pending");
     expect(
-      sqlite
+      env.sqlite
         .query(
           "SELECT related_party, related_party_review, related_party_reviewer_github_id FROM security_cases WHERE id = ?",
         )
-        .get(related.id),
+        .get(related),
     ).toEqual({
       related_party: "related",
       related_party_review: "pending",
       related_party_reviewer_github_id: DISPUTE.githubId,
     });
-    expect(
-      sqlite
-        .query("SELECT COUNT(*) AS n FROM security_award_reservations")
-        .get(),
-    ).toEqual({ n: 0 });
-  });
-
-  test("an appealed related-party refusal cannot be re-reviewed by the same reviewer", async () => {
-    const env = open(OPEN_PROGRAM);
-    const { act, decide, record } = awardSteps(env);
-    const related = await record("2026-10-19T09:10:00.000Z");
-    expect(
-      (await decide(related.id, "insider-cause", true)).body.case.awardState,
-    ).toBe("pending");
-    const refused = await act(DISPUTE, related.id, {
-      action: "decide-related-party",
-      outcome: "refuse",
-      reason: "Refused after independent review.",
-    });
-    expect(refused.body.case.awardState).toBe("ineligible");
-    expect(
-      (
-        await act(REPORTER, related.id, {
-          action: "appeal",
-          reason: "The related-party refusal used the wrong facts.",
-        })
-      ).status,
-    ).toBe(200);
-    expect(
-      (
-        await act(DISPUTE_2, related.id, {
-          action: "decide-appeal",
-          outcome: "return",
-          reason: "Return for a new technical decision.",
-        })
-      ).status,
-    ).toBe(200);
-    expect(
-      (await decide(related.id, "insider-cause", false)).body.case.awardState,
-    ).toBe("pending");
-    // The reviewer whose refusal the reporter appealed is not independent of
-    // the re-decided case, exactly as `decide-appeal` already treats them.
-    const again = await act(DISPUTE, related.id, {
-      action: "decide-related-party",
-      outcome: "approve",
-      reason: "Approved after independent review.",
-    });
-    expect(again.status).toBe(403);
-    expect(again.body.error).toBe("conflicted");
-    // The reviewer who decided the appeal took a position on the same case:
-    // returning it for a new decision is not independence from the approval
-    // that follows (SEC-12). The seat is checked from the case journal.
-    const appealDecider = await act(DISPUTE_2, related.id, {
-      action: "decide-related-party",
-      outcome: "approve",
-      reason: "Approved after independent review.",
-    });
-    expect(appealDecider.status).toBe(403);
-    expect(appealDecider.body.error).toBe("conflicted");
-    // A second refusal and appeal must not erase the earlier reviewers.
-    expect(
-      (
-        await act(DISPUTE_3, related.id, {
-          action: "decide-related-party",
-          outcome: "refuse",
-          reason: "The revised finding still needs independent review.",
-        })
-      ).body.case.awardState,
-    ).toBe("ineligible");
-    expect(
-      (
-        await act(REPORTER, related.id, {
-          action: "appeal",
-          reason: "Please review the additional evidence for this refusal.",
-        })
-      ).status,
-    ).toBe(200);
-    expect(
-      (
-        await act(DISPUTE_4, related.id, {
-          action: "decide-appeal",
-          outcome: "return",
-          reason: "Return the revised finding for a new decision.",
-        })
-      ).status,
-    ).toBe(200);
-    expect(
-      (await decide(related.id, "insider-cause", false)).body.case.awardState,
-    ).toBe("pending");
-    for (const prior of [DISPUTE, DISPUTE_2, DISPUTE_3, DISPUTE_4]) {
-      const reused = await act(prior, related.id, {
+    for (const prior of [DISPUTE, DISPUTE_2]) {
+      const reused = await act(prior, related, {
         action: "decide-related-party",
         outcome: "approve",
         reason: "Approved after independent review.",
@@ -865,13 +1022,23 @@ describe("security cases", () => {
       expect(reused.status).toBe(403);
       expect(reused.body.error).toBe("conflicted");
     }
-    // A reviewer with no part in either refusal or appeal can still approve it.
-    const approved = await act(DISPUTE_5, related.id, {
+    expect((await refuse(DISPUTE_3)).body.case.awardState).toBe("ineligible");
+    await appealAndReturn(DISPUTE_4);
+    expect((await propose()).body.case.awardState).toBe("pending");
+    for (const prior of [DISPUTE, DISPUTE_2, DISPUTE_3, DISPUTE_4]) {
+      const reused = await act(prior, related, {
+        action: "decide-related-party",
+        outcome: "approve",
+        reason: "Approved after independent review.",
+      });
+      expect(reused.status).toBe(403);
+    }
+    const approved = await act(DISPUTE_5, related, {
       action: "decide-related-party",
       outcome: "approve",
       reason: "Approved after independent review.",
     });
     expect(approved.status).toBe(200);
-    expect(approved.body.case.awardState).toBe("reserved");
+    expect(approved.body.case.awardState).toBe("approved");
   });
 });
