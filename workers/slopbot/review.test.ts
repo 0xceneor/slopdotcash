@@ -6,6 +6,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { closureEligibility } from "./closure-eligibility";
 import { labelOnlyConfig, type Verdict, validateVerdict } from "./contracts";
 import { authorExemption } from "./github";
 import {
@@ -55,9 +56,16 @@ describe("custom collaborator roles", () => {
       merged: false,
       authorType: "User",
       authorIsSelf: false,
+      scope: "contributor" as const,
       exemption,
       markerPresent: false,
       participant: false,
+      closure: closureEligibility({
+        itemKind: "pull_request",
+        exemption,
+        member: false,
+        verifiedSkillRun: false,
+      }),
       humanReopenedThisRevision: false,
       authorCapReached: false,
     };
@@ -381,13 +389,24 @@ describe("item text that instructs Slopbot to close another item", () => {
       merged: false,
       authorType: "User",
       authorIsSelf: false,
+      scope: "contributor",
       exemption: "not-exempt",
       markerPresent: hostileBody.includes("Made via @slopdotcash"),
       participant: false,
+      closure: closureEligibility({
+        itemKind: "issue",
+        exemption: "not-exempt",
+        member: false,
+        verifiedSkillRun: false,
+      }),
       humanReopenedThisRevision: false,
       authorCapReached: false,
     });
-    expect(routing).toMatchObject({ review: true, penaltyEligible: false });
+    expect(routing).toMatchObject({
+      review: true,
+      mayClose: false,
+      penaltyEligible: false,
+    });
   });
 });
 
