@@ -2029,6 +2029,16 @@ async function planDecision(
   if ((outcome === "confirmed" || outcome === "duplicate") && !rootCauseKey)
     fail(400, "invalid_request", "Record the root cause key");
   const terms = frozenTerms(row);
+  // The first verified report of a finding holds its award; a later report of
+  // a root cause that already holds an award or a pending review is recorded
+  // as a duplicate instead (PRD section 8).
+  if (outcome === "confirmed" && terms !== null)
+    await assertRootCauseFree(
+      deps,
+      row.project_id,
+      row.id,
+      rootCauseKey as string,
+    );
   const set: Record<string, string | number | null> = {
     receipt_state: outcome,
     severity,
