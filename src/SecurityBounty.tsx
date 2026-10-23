@@ -1,10 +1,13 @@
 /**
- * Private security bounty pages (PRD SEC-01 to SEC-18, MVP-13).
+ * Private security bounty pages (PRD section 8, SEC-01 to SEC-18, MVP-13).
  *
- * `/projects/:id/security` shows the public program terms and hands a
- * researcher to the project's GitHub private vulnerability reporting only
- * after a fresh readiness check. `/security` is the signed-in case inbox. The
- * API returns only the cases and fields the caller's current role allows.
+ * `/projects/:id/security` shows the public program terms and starts a
+ * private report through the project's GitHub private vulnerability
+ * reporting only after a fresh readiness check; Slop then confirms the
+ * receipt from GitHub. `/security` is the signed-in case inbox: the reporter
+ * sees the receipt, the owner's response and the payout; the owner sees the
+ * AI summary and the request-information, award and remediation actions.
+ * The API returns only the cases and fields the caller's current role allows.
  */
 import { CircleAlert, ExternalLink, RotateCcw } from "lucide-react";
 import {
@@ -506,8 +509,8 @@ export function SecurityProgramPage({
         </p>
         <h1>Security bounty</h1>
         <p className="security-lead">
-          {money.researcher} for a confirmed critical vulnerability that can
-          cause loss of funds. Funded by {terms.sponsor.name}.
+          Published award: {money.gross} gross per finding, {money.researcher}{" "}
+          to the researcher. Funded by {terms.sponsor.name}.
         </p>
         <p>{PROGRAM_STATUS_LABELS[terms.status]}.</p>
       </div>
@@ -525,7 +528,7 @@ export function SecurityProgramPage({
           </div>
         </section>
         <dl className="admin-facts">
-          <Fact term="Gross funding per eligible finding">{money.gross}</Fact>
+          <Fact term="Published gross award per finding">{money.gross}</Fact>
           <Fact term="Currency">
             {terms.amount.currency}
             {terms.amount.network ? ` on ${terms.amount.network}` : ""}
@@ -536,8 +539,14 @@ export function SecurityProgramPage({
               : `Verified available on ${formatUtc(terms.funding.verifiedAt)}: ${terms.funding.evidence}`}
           </Fact>
           <Fact term="Capacity">
-            {terms.capacity.awards} fundable award
-            {terms.capacity.awards === 1 ? "" : "s"}
+            {formatSecurityAmount(
+              (
+                BigInt(terms.amount.grossMinor) * BigInt(terms.capacity.awards)
+              ).toString(),
+              terms.amount,
+            )}{" "}
+            gross can be reserved for approved awards ({terms.capacity.awards}{" "}
+            at the published amount)
             {terms.capacity.closesAt
               ? `; closes ${formatUtc(terms.capacity.closesAt)}`
               : ""}
@@ -550,13 +559,14 @@ export function SecurityProgramPage({
           </Fact>
         </dl>
         <p>
-          Only a human security reviewer can make a finding eligible. The
-          reviewer must confirm critical severity and a reproducible path to
-          loss of funds on an in-scope asset. Proven potential loss qualifies;
-          nobody needs to lose funds. A severity label, scanner output or public
-          fix alone is not sufficient. No additional payout fee applies. The
-          amount and policy in force when GitHub received your report stay fixed
-          for your case.
+          Awards are discretionary. Critical bugs and potential loss of funds
+          are priorities, not an automatic payout promise: the project owner
+          decides whether to award a bounty and how much, and approving an award
+          reserves that amount from verified funds. Proven potential loss
+          counts; nobody needs to lose funds. An AI summary helps the owner
+          triage, but it never decides a finding or an award. No additional
+          payout fee applies. The policy in force when GitHub received your
+          report stays fixed for your case.
         </p>
       </section>
       <section aria-labelledby="security-scope" className="admin-card">
@@ -610,12 +620,10 @@ export function SecurityProgramPage({
       <section aria-labelledby="security-trust" className="admin-card">
         <h2 id="security-trust">Decisions, disputes and disclosure</h2>
         <dl className="admin-facts">
-          <Fact term="Technical decisions">
+          <Fact term="Findings and awards">
             {people(terms.approvers.technical)}
           </Fact>
-          <Fact term="Award approval and payment">
-            {people(terms.approvers.financial)}
-          </Fact>
+          <Fact term="Payment">{people(terms.approvers.financial)}</Fact>
           <Fact term="Independent dispute review">
             {people(terms.approvers.dispute)} ({terms.dispute.authority}).{" "}
             {terms.dispute.process}
@@ -675,6 +683,20 @@ type CaseEvent = {
   };
 };
 
+type Analysis = {
+  state: "running" | "complete" | "failed" | "unavailable";
+  provider: string | null;
+  model: string | null;
+  summary: string | null;
+  proposedSeverity: string | null;
+  potentialLoss: "likely" | "unlikely" | "unclear" | null;
+  duplicateCaseIds: string[];
+  rootCauseKey: string | null;
+  remediation: string | null;
+  finishedAt: string | null;
+  retryable: boolean;
+};
+
 type SecurityCase = {
   id: string;
   projectId: string;
@@ -682,6 +704,8 @@ type SecurityCase = {
   view: "restricted" | "reporter" | "financial";
   viewerRoles: string[];
   allowedActions: string[];
+  nextStep: string;
+  nextStepDueAt: string | null;
   submissionState: "claimed" | "verified" | "link-rejected";
   receivedAt: string | null;
   /**
@@ -692,6 +716,11 @@ type SecurityCase = {
   policyRevision: number | null;
   terms: Terms | null;
   awardState: string;
+  award: {
+    grossMinor: string;
+    researcherMinor: string;
+    slopMinor: string;
+  } | null;
   relatedParty: "not-assessed" | "unrelated" | "related";
   relatedPartyReview: "not-applicable" | "pending" | "approved" | "refused";
   paymentState: string;
@@ -713,11 +742,14 @@ type SecurityCase = {
   severity?: string | null;
   lossFinding?: string | null;
   appealState?: string;
-  nextAction?: string | null;
-  nextActionDueAt?: string | null;
-  overdue?: boolean;
   reporter?: { githubId: string; githubLogin: string };
   payee?: { githubLogin: string };
+  analysis?: Analysis | null;
+  awardFunds?: {
+    currency: "USD" | "USDC";
+    decimals: number;
+    availableMinor: string;
+  } | null;
   rootCauseKey?: string | null;
   duplicateOf?: string | null;
   evidenceDigest?: string | null;
@@ -785,17 +817,101 @@ function requestKey(): string {
   return crypto.randomUUID();
 }
 
-function caseMoney(terms: Terms | null): string {
-  if (terms === null) return "No paid terms were in force at receipt";
-  return `${formatSecurityAmount(terms.researcherMinor, terms)} researcher · ${formatSecurityAmount(terms.slopMinor, terms)} Slop · ${formatSecurityAmount(terms.grossMinor, terms)} gross`;
+function money(minor: string, terms: { currency: string; decimals: number }) {
+  return formatSecurityAmount(
+    minor,
+    terms as Parameters<typeof formatSecurityAmount>[1],
+  );
 }
 
-const SUBMISSION_LABELS: Record<SecurityCase["submissionState"], string> = {
-  claimed: "Not submitted yet — waiting for a maintainer to verify the link",
-  verified: "Submitted and verified",
-  "link-rejected":
-    "Link rejected — link the GitHub report again, or ask a maintainer to record it",
+/** Converts a typed decimal amount to integer minor units, without floats. */
+function decimalToMinor(text: string, decimals: number): string | null {
+  const value = text.replaceAll(",", "").trim();
+  const match = /^(\d{1,16})(?:\.(\d+))?$/u.exec(value);
+  if (!match || (match[2] ?? "").length > decimals) return null;
+  const minor = `${match[1]}${(match[2] ?? "").padEnd(decimals, "0")}`.replace(
+    /^0+(?=\d)/u,
+    "",
+  );
+  return minor === "0" ? null : minor;
+}
+
+const RECEIPT_LABELS: Record<string, string> = {
+  received: "Received — waiting for the owner",
+  triaging: "Under review",
+  "needs-information": "The owner asked for more information",
+  confirmed: "Confirmed",
+  duplicate: "Duplicate of an earlier report",
+  "out-of-scope": "Out of scope",
+  rejected: "Not accepted",
+  disputed: "Under appeal",
 };
+
+const AWARD_LABELS: Record<string, string> = {
+  "not-applicable": "No paid program was open when GitHub received it",
+  pending: "Award not decided yet",
+  ineligible: "No award",
+  reserved: "Reserved, waiting for approval",
+  "capacity-exhausted": "Waiting for the owner's award decision",
+  approved: "Approved and reserved",
+};
+
+const PAYMENT_LABELS: Record<string, string> = {
+  "not-applicable": "No approved award",
+  "rail-unavailable": "Approved, not paid yet",
+  "awaiting-owner-commitment": "Waiting for the vault owner",
+  "needs-wallet": "Wallet required",
+  uncertain: "Submission outcome not yet confirmed",
+  ready: "Ready for payment",
+  processing: "Payment in progress",
+  submitted: "Waiting for finality",
+  held: "Payment held",
+  paid: "Paid",
+};
+
+const SUBMISSION_LABELS: Record<SecurityCase["submissionState"], string> = {
+  claimed: "Confirming with GitHub",
+  verified: "Received by GitHub",
+  "link-rejected": "Not confirmed by GitHub",
+};
+
+const EVENT_LABELS: Record<string, string> = {
+  submit: "Reporter submitted privately; GitHub receipt verified",
+  "submit-direct": "Reporter linked their GitHub report; GitHub receipt verified",
+  claim: "Reporter linked the GitHub report",
+  record: "Maintainer recorded the GitHub report",
+  "verify-link": "Maintainer verified the GitHub report",
+  "reject-link": "Maintainer rejected the link",
+  receive: "GitHub receipt verified",
+  "receipt-mismatch": "GitHub did not confirm this link",
+  "assign-triager": "Triager assigned",
+  "revoke-triager": "Triager removed",
+  triage: "Triage state changed",
+  "next-action": "Next action set",
+  "request-information": "Owner asked for information",
+  decide: "Finding decided",
+  award: "Award decided",
+  remediation: "Remediation state changed",
+  disclosure: "Disclosure decision recorded",
+  recognition: "Recognition choice changed",
+  appeal: "Appeal sent",
+  "decide-appeal": "Appeal decided",
+  "approve-award": "Award approved",
+  "consent-payment": "Reporter accepted chain visibility",
+  "prepare-payment": "Unsigned payment prepared",
+  "decide-related-party": "Related-party award reviewed",
+  "reserve-award": "Award reserved with raised capacity",
+};
+
+/** The owner's latest words to the reporter, from the case history. */
+const RESPONSE_KINDS = new Set([
+  "request-information",
+  "decide",
+  "award",
+  "decide-appeal",
+  "decide-related-party",
+  "reject-link",
+]);
 
 function ProjectSelect({
   projects,
@@ -820,38 +936,42 @@ function ProjectSelect({
   );
 }
 
-/** A reporter links a GitHub advisory they already submitted. */
-function ClaimForm({
-  programProjects,
-  onCreated,
+/** A security maintainer brings direct GitHub reports into Slop. */
+function ImportReports({
+  projects,
+  onImported,
 }: {
-  programProjects: ProjectDefinition[];
-  onCreated: (created: SecurityCase) => void;
+  projects: ProjectDefinition[];
+  onImported: () => void;
 }) {
-  const [projectId, setProjectId] = useState(programProjects[0]?.id ?? "");
-  const [advisory, setAdvisory] = useState("");
-  const [key, setKey] = useState(requestKey);
+  const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  if (programProjects.length === 0)
-    return (
-      <p className="admin-status">No project runs a security program yet.</p>
-    );
-  const submit = (event: FormEvent) => {
+  const run = (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
-    projectApiRequest<{ case: SecurityCase }>("POST", "security-cases", {
-      mode: "claim",
-      projectId,
-      advisory: advisory.trim(),
-      idempotencyKey: key,
-    }).then(
+    setNote(null);
+    projectApiRequest<{ state: "ok" | "unavailable"; received: number }>(
+      "POST",
+      "security-cases",
+      { mode: "import", projectId },
+    ).then(
       (body) => {
         setBusy(false);
-        setAdvisory("");
-        setKey(requestKey());
-        onCreated(body.case);
+        if (body.state === "unavailable")
+          setError(
+            "Slop could not read the repository's private reports on GitHub. Nothing changed; try again later.",
+          );
+        else {
+          setNote(
+            body.received === 0
+              ? "Every private report on GitHub already has a case."
+              : `${body.received} new private report${body.received === 1 ? "" : "s"} recorded.`,
+          );
+          onImported();
+        }
       },
       (caught: unknown) => {
         setBusy(false);
@@ -860,30 +980,26 @@ function ClaimForm({
     );
   };
   return (
-    <form className="security-form" onSubmit={submit}>
-      <ProjectSelect
-        onChange={setProjectId}
-        projects={programProjects}
-        value={projectId}
-      />
-      <label>
-        GitHub advisory ID
-        <input
-          autoComplete="off"
-          onChange={(event) => setAdvisory(event.target.value)}
-          pattern="GHSA-[2-9cfghjmpqrvwx]{4}-[2-9cfghjmpqrvwx]{4}-[2-9cfghjmpqrvwx]{4}"
-          placeholder="GHSA-xxxx-xxxx-xxxx"
-          required
-          spellCheck={false}
-          value={advisory}
+    <form className="security-form" onSubmit={run}>
+      {projects.length > 1 ? (
+        <ProjectSelect
+          onChange={setProjectId}
+          projects={projects}
+          value={projectId}
         />
-        <small className="field-hint">
-          Only the ID. Do not paste report details here.
-        </small>
-      </label>
+      ) : null}
+      <p>
+        Reports that researchers sent on GitHub directly get a case with
+        GitHub's own author and receipt time. Nothing is typed in.
+      </p>
+      {note ? (
+        <p className="admin-status" role="status">
+          {note}
+        </p>
+      ) : null}
       <FormError message={error} />
-      <button className="button primary-button" disabled={busy} type="submit">
-        {busy ? "Linking…" : "Link my GitHub report"}
+      <button className="button secondary-button" disabled={busy} type="submit">
+        {busy ? "Reading GitHub…" : "Bring in GitHub private reports"}
       </button>
     </form>
   );
@@ -1232,112 +1348,6 @@ function SubmissionsPanel({
   );
 }
 
-function utcInput(value: string): string | null {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/u.test(value)) return null;
-  return `${value}:00.000Z`;
-}
-
-/** A security maintainer records a report that arrived through GitHub. */
-function RecordForm({
-  programProjects,
-  onCreated,
-}: {
-  programProjects: ProjectDefinition[];
-  onCreated: (created: SecurityCase) => void;
-}) {
-  const [projectId, setProjectId] = useState(programProjects[0]?.id ?? "");
-  const [advisory, setAdvisory] = useState("");
-  const [reporterId, setReporterId] = useState("");
-  const [reporterLogin, setReporterLogin] = useState("");
-  const [receivedAt, setReceivedAt] = useState("");
-  const [confirmed, setConfirmed] = useState(false);
-  const [key, setKey] = useState(requestKey);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    projectApiRequest<{ case: SecurityCase }>("POST", "security-cases", {
-      mode: "record",
-      projectId,
-      advisory: advisory.trim(),
-      reporterGithubId: reporterId.trim(),
-      reporterGithubLogin: reporterLogin.trim(),
-      receivedAt: utcInput(receivedAt),
-      confirmation: confirmed,
-      idempotencyKey: key,
-    }).then(
-      (body) => {
-        setBusy(false);
-        setKey(requestKey());
-        onCreated(body.case);
-      },
-      (caught: unknown) => {
-        setBusy(false);
-        setError(errorMessage(caught));
-      },
-    );
-  };
-  return (
-    <form className="security-form" onSubmit={submit}>
-      <ProjectSelect
-        onChange={setProjectId}
-        projects={programProjects}
-        value={projectId}
-      />
-      <label>
-        GitHub advisory ID
-        <input
-          autoComplete="off"
-          onChange={(event) => setAdvisory(event.target.value)}
-          required
-          spellCheck={false}
-          value={advisory}
-        />
-      </label>
-      <label>
-        Reporter GitHub account ID
-        <input
-          inputMode="numeric"
-          onChange={(event) => setReporterId(event.target.value)}
-          required
-          value={reporterId}
-        />
-      </label>
-      <label>
-        Reporter GitHub login
-        <input
-          onChange={(event) => setReporterLogin(event.target.value)}
-          required
-          value={reporterLogin}
-        />
-      </label>
-      <label>
-        Time GitHub received the report (UTC)
-        <input
-          onChange={(event) => setReceivedAt(event.target.value)}
-          required
-          type="datetime-local"
-          value={receivedAt}
-        />
-      </label>
-      <label className="checkbox-label">
-        <input
-          checked={confirmed}
-          onChange={(event) => setConfirmed(event.target.checked)}
-          type="checkbox"
-        />
-        I checked on GitHub that this advisory exists and that this reporter
-        submitted it.
-      </label>
-      <FormError message={error} />
-      <button className="button primary-button" disabled={busy} type="submit">
-        {busy ? "Recording…" : "Record verified report"}
-      </button>
-    </form>
-  );
-}
 
 type FieldSpec =
   | {
@@ -1346,10 +1356,36 @@ type FieldSpec =
       kind: "text" | "textarea";
       hint?: string;
       optional?: boolean;
+      initial?: string;
     }
-  | { name: string; label: string; kind: "select"; options: [string, string][] }
-  | { name: string; label: string; kind: "checkbox" }
-  | { name: string; label: string; kind: "utc" };
+  | {
+      name: string;
+      label: string;
+      kind: "select";
+      options: [string, string][];
+      /** Shown only when another select has one of these values. */
+      when?: { field: string; values: string[] };
+    }
+  | {
+      name: string;
+      label: string;
+      kind: "checkbox";
+      when?: { field: string; values: string[] };
+    }
+  | {
+      name: string;
+      label: string;
+      kind: "utc";
+      when?: { field: string; values: string[] };
+    }
+  | {
+      name: string;
+      label: string;
+      kind: "amount";
+      decimals: number;
+      hint?: string;
+      when?: { field: string; values: string[] };
+    };
 
 type ActionSpec = { title: string; submit: string; fields: FieldSpec[] };
 
@@ -1360,94 +1396,35 @@ const REASON: FieldSpec = {
   hint: "Do not name another reporter or quote another report.",
 };
 
+const SEVERITY_OPTIONS: [string, string][] = [
+  ["critical", "Critical"],
+  ["high", "High"],
+  ["medium", "Medium"],
+  ["low", "Low"],
+  ["informational", "Informational"],
+  ["unresolved", "Unresolved"],
+];
+
 function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
+  const proposal =
+    record.analysis?.state === "complete" ? record.analysis : null;
   switch (action) {
-    case "verify-link":
+    case "request-information":
       return {
-        title: "Verify the GitHub report",
-        submit: "Verify report",
+        title: "Ask the reporter for information",
+        submit: "Ask for information",
         fields: [
           {
-            name: "receivedAt",
-            label: "Time GitHub received the report (UTC)",
-            kind: "utc",
+            name: "reason",
+            label: "What you need",
+            kind: "textarea",
+            hint: "The reporter answers in the private GitHub advisory.",
           },
-          {
-            name: "confirmation",
-            label: `I checked on GitHub that ${record.advisory?.ghsa ?? "this advisory"} exists and that @${record.reporter?.githubLogin ?? "the reporter"} submitted it.`,
-            kind: "checkbox",
-          },
-        ],
-      };
-    case "reject-link":
-      return {
-        title: "Reject this link",
-        submit: "Reject link",
-        fields: [REASON],
-      };
-    case "assign-triager":
-      return {
-        title: "Assign a triager",
-        submit: "Assign triager",
-        fields: [
-          {
-            name: "githubId",
-            label: "Triager GitHub account ID",
-            kind: "text",
-          },
-          { name: "githubLogin", label: "Triager GitHub login", kind: "text" },
-        ],
-      };
-    case "revoke-triager": {
-      const active = (record.triagers ?? []).filter(
-        (entry) => entry.revokedAt === null,
-      );
-      if (active.length === 0) return null;
-      return {
-        title: "Remove a triager",
-        submit: "Remove triager",
-        fields: [
-          {
-            name: "githubId",
-            label: "Triager",
-            kind: "select",
-            options: active.map((entry) => [
-              entry.githubId,
-              `@${entry.githubLogin}`,
-            ]),
-          },
-        ],
-      };
-    }
-    case "triage":
-      return {
-        title: "Triage",
-        submit: "Save triage state",
-        fields: [
-          {
-            name: "receiptState",
-            label: "Receipt state",
-            kind: "select",
-            options: [
-              ["triaging", "Triaging"],
-              ["needs-information", "Needs information"],
-            ],
-          },
-          { ...REASON, optional: true } as FieldSpec,
-        ],
-      };
-    case "next-action":
-      return {
-        title: "Owner and next action",
-        submit: "Save next action",
-        fields: [
-          { name: "nextAction", label: "Next action", kind: "text" },
-          { name: "dueAt", label: "Due (UTC)", kind: "utc" },
         ],
       };
     case "decide":
       return {
-        title: "Technical decision",
+        title: "Decide the finding",
         submit: "Record decision",
         fields: [
           {
@@ -1465,24 +1442,20 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
             name: "severity",
             label: "Severity",
             kind: "select",
-            options: [
-              ["critical", "Critical"],
-              ["high", "High"],
-              ["medium", "Medium"],
-              ["low", "Low"],
-              ["informational", "Informational"],
-              ["unresolved", "Unresolved"],
-            ],
+            // The AI proposal is listed first, so the form starts with it.
+            options: [...SEVERITY_OPTIONS].sort(([value]) =>
+              value === proposal?.proposedSeverity ? -1 : 1,
+            ),
           },
           {
             name: "loss",
             label: "Loss of funds",
             kind: "select",
             options: [
+              ["unresolved", "Unresolved"],
               ["verified-potential", "Verified potential loss"],
               ["verified-actual", "Verified actual loss"],
               ["not-verified", "Not verified"],
-              ["unresolved", "Unresolved"],
             ],
           },
           {
@@ -1493,7 +1466,7 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
           {
             name: "relatedParty",
             label:
-              "The reporter is a related party (owner, employee, sponsor or approver). An independent reviewer must then approve the award.",
+              "The reporter is a related party (owner, employee, sponsor or approver). An independent reviewer must then approve any award.",
             kind: "checkbox",
           },
           {
@@ -1501,30 +1474,69 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
             label: "Root cause key",
             kind: "text",
             optional: true,
-            hint: "Lowercase words and hyphens. One root cause reserves one award.",
+            initial: proposal?.rootCauseKey ?? "",
+            hint: "Lowercase words and hyphens. Required to confirm. One root cause gets one award.",
           },
           {
             name: "duplicateOf",
             label: "Original case ID (duplicates only)",
             kind: "text",
             optional: true,
+            initial: proposal?.duplicateCaseIds[0] ?? "",
           },
           {
             name: "evidenceReference",
-            label: "Private evidence reference",
-            kind: "text",
-            hint: "Where the reproduction, environment and tested revision are recorded.",
-          },
-          {
-            name: "evidenceDigest",
-            label: "Decision-evidence SHA-256",
+            label: "Private evidence reference (optional)",
             kind: "text",
             optional: true,
-            hint: "Required to confirm. The digest of the frozen evidence snapshot.",
+            hint: "The decision binds the digest of the advisory text the AI read.",
           },
           REASON,
         ],
       };
+    case "award": {
+      if (record.terms === null) return null;
+      const decimals = record.terms.decimals;
+      const available = record.awardFunds
+        ? money(record.awardFunds.availableMinor, record.awardFunds)
+        : "no verified funds";
+      return {
+        title: "Award",
+        submit: "Record award decision",
+        fields: [
+          {
+            name: "decision",
+            label: "Decision",
+            kind: "select",
+            options: [
+              ["amount", "Award an amount"],
+              ["none", "No award"],
+            ],
+          },
+          {
+            name: "grossMinor",
+            label: `Gross award (${record.terms.currency})`,
+            kind: "amount",
+            decimals,
+            hint: `The researcher receives 75% and Slop 25%. Available to reserve: ${available}. Use a whole number of minor units divisible by four.`,
+            when: { field: "decision", values: ["amount"] },
+          },
+          {
+            name: "paymentDeadline",
+            label: "Payment deadline (UTC)",
+            kind: "utc",
+            when: { field: "decision", values: ["amount"] },
+          },
+          {
+            name: "confirmation",
+            label: `I approve this award for @${record.reporter?.githubLogin ?? "the reporter"}. Approval reserves the amount now.`,
+            kind: "checkbox",
+            when: { field: "decision", values: ["amount"] },
+          },
+          REASON,
+        ],
+      };
+    }
     case "remediation":
       return {
         title: "Remediation",
@@ -1579,18 +1591,52 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
             label: "Approved redacted content SHA-256",
             kind: "text",
             optional: true,
-            hint: "Required when approving redacted text or recording disclosure. Use the digest of the exact approved content.",
+            hint: "Required when approving redacted text or recording disclosure.",
           },
           {
             name: "embargoChange",
             label: "Approved embargo change",
             kind: "textarea",
             optional: true,
-            hint: "Record any approved deadline or terms change. Leave blank if unchanged. This does not publish content or schedule disclosure.",
+            hint: "Leave blank if unchanged. This does not publish content or schedule disclosure.",
           },
           REASON,
         ],
       };
+    case "assign-triager":
+      return {
+        title: "Assign a triager",
+        submit: "Assign triager",
+        fields: [
+          {
+            name: "githubId",
+            label: "Triager GitHub account ID",
+            kind: "text",
+          },
+          { name: "githubLogin", label: "Triager GitHub login", kind: "text" },
+        ],
+      };
+    case "revoke-triager": {
+      const active = (record.triagers ?? []).filter(
+        (entry) => entry.revokedAt === null,
+      );
+      if (active.length === 0) return null;
+      return {
+        title: "Remove a triager",
+        submit: "Remove triager",
+        fields: [
+          {
+            name: "githubId",
+            label: "Triager",
+            kind: "select",
+            options: active.map((entry) => [
+              entry.githubId,
+              `@${entry.githubLogin}`,
+            ]),
+          },
+        ],
+      };
+    }
     case "recognition":
       return {
         title: "Public recognition",
@@ -1634,7 +1680,7 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
             kind: "select",
             options: [
               ["uphold", "Uphold the original decision"],
-              ["return", "Return the case for a new technical decision"],
+              ["return", "Return the case for a new decision"],
             ],
           },
           REASON,
@@ -1650,24 +1696,14 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
             label: "Outcome",
             kind: "select",
             options: [
-              ["approve", "Approve: reserve the award if capacity remains"],
+              [
+                "approve",
+                `Approve ${record.award && record.terms ? money(record.award.grossMinor, record.terms) : "the proposed award"} and reserve it if funds remain`,
+              ],
               ["refuse", "Refuse: the reporter is not eligible for this award"],
             ],
           },
           REASON,
-        ],
-      };
-    case "reserve-award":
-      return {
-        title: "Reserve with raised capacity",
-        submit: "Reserve award",
-        fields: [
-          {
-            name: "reason",
-            label: "Private reason",
-            kind: "textarea",
-            hint: "Name the project revision that raised capacity and the published exhaustion rule you apply. The earliest receipt is funded first.",
-          },
         ],
       };
     case "consent-payment":
@@ -1694,24 +1730,7 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
             label:
               action === "consent-payment"
                 ? "I understand that chain transactions reveal my GitHub actor number, wallet, time and amounts. My report stays private."
-                : `I approve ${caseMoney(record.terms)} on this network. The reporter must have accepted chain visibility. This prepares an unsigned owner request; it does not pay.`,
-            kind: "checkbox",
-          },
-        ],
-      };
-    case "approve-award":
-      return {
-        title: "Approve the award",
-        submit: "Approve award",
-        fields: [
-          {
-            name: "paymentDeadline",
-            label: "Payment deadline (UTC)",
-            kind: "utc",
-          },
-          {
-            name: "confirmation",
-            label: `I reviewed the preview: ${caseMoney(record.terms)}, payee @${record.payee?.githubLogin ?? record.reporter?.githubLogin ?? "reporter"}, reserved under policy revision ${record.policyRevision ?? "—"}.`,
+                : `I approve ${awardText(record)} on this network. The reporter must have accepted chain visibility. This prepares an unsigned owner request; it does not pay.`,
             kind: "checkbox",
           },
         ],
@@ -1728,8 +1747,15 @@ function initialValues(spec: ActionSpec): Record<string, string | boolean> {
         ? false
         : field.kind === "select"
           ? field.options[0][0]
-          : "";
+          : field.kind === "text" || field.kind === "textarea"
+            ? (field.initial ?? "")
+            : "";
   return values;
+}
+
+function utcInput(value: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/u.test(value)) return null;
+  return `${value}:00.000Z`;
 }
 
 function ActionForm({
@@ -1747,6 +1773,10 @@ function ActionForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (spec === null) return null;
+  const shown = (field: FieldSpec) =>
+    !("when" in field) ||
+    field.when === undefined ||
+    field.when.values.includes(String(values[field.when.field]));
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const body: Record<string, unknown> = {
@@ -1755,9 +1785,17 @@ function ActionForm({
       idempotencyKey: key,
     };
     for (const field of spec.fields) {
+      if (!shown(field)) continue;
       const value = values[field.name];
       if (field.kind === "utc") body[field.name] = utcInput(String(value));
-      else if (
+      else if (field.kind === "amount") {
+        const minor = decimalToMinor(String(value), field.decimals);
+        if (minor === null) {
+          setError(`Enter the ${field.label.toLowerCase()} as a number.`);
+          return;
+        }
+        body[field.name] = minor;
+      } else if (
         field.kind !== "checkbox" &&
         field.kind !== "select" &&
         field.optional &&
@@ -1794,7 +1832,7 @@ function ActionForm({
       onSubmit={submit}
     >
       <h4 id={`${formId}-title`}>{spec.title}</h4>
-      {spec.fields.map((field) => {
+      {spec.fields.filter(shown).map((field) => {
         const set = (value: string | boolean) =>
           setValues((current) => ({ ...current, [field.name]: value }));
         if (field.kind === "checkbox")
@@ -1836,9 +1874,37 @@ function ActionForm({
               />
             </label>
           );
-        const hint = field.hint ? (
-          <small className="field-hint">{field.hint}</small>
-        ) : null;
+        const hint =
+          "hint" in field && field.hint ? (
+            <small className="field-hint">{field.hint}</small>
+          ) : null;
+        if (field.kind === "amount") {
+          const minor = decimalToMinor(
+            String(values[field.name]),
+            field.decimals,
+          );
+          const exact = minor !== null && BigInt(minor) % 4n === 0n;
+          return (
+            <label key={field.name}>
+              {field.label}
+              <input
+                autoComplete="off"
+                inputMode="decimal"
+                onChange={(event) => set(event.target.value)}
+                required
+                value={String(values[field.name])}
+              />
+              {hint}
+              {minor !== null && record.terms ? (
+                <small className="field-hint" role="status">
+                  {exact
+                    ? `Researcher ${money(((BigInt(minor) * 3n) / 4n).toString(), record.terms)} · Slop ${money((BigInt(minor) / 4n).toString(), record.terms)}`
+                    : "This amount cannot be split exactly 75/25."}
+                </small>
+              ) : null}
+            </label>
+          );
+        }
         if (field.kind === "textarea")
           return (
             <label key={field.name}>
@@ -1874,42 +1940,11 @@ function ActionForm({
   );
 }
 
-const PAYMENT_LABELS: Record<string, string> = {
-  "not-applicable": "No approved award",
-  "awaiting-owner-commitment": "Waiting for the vault owner",
-  "needs-wallet": "Wallet required",
-  uncertain: "Submission outcome not yet confirmed",
-  ready: "Ready for payment",
-  processing: "Payment in progress",
-  submitted: "Waiting for finality",
-  held: "Payment held",
-  paid: "Paid",
-};
-
-const EVENT_LABELS: Record<string, string> = {
-  submit: "Reporter submitted privately; GitHub receipt verified",
-  "submit-direct":
-    "Reporter linked their GitHub report; GitHub receipt verified",
-  claim: "Reporter linked the GitHub report",
-  record: "Maintainer recorded the GitHub report",
-  "verify-link": "Maintainer verified the GitHub report",
-  "reject-link": "Maintainer rejected the link",
-  "assign-triager": "Triager assigned",
-  "revoke-triager": "Triager removed",
-  triage: "Triage state changed",
-  "next-action": "Next action set",
-  decide: "Technical decision recorded",
-  remediation: "Remediation state changed",
-  disclosure: "Disclosure decision recorded",
-  recognition: "Recognition choice changed",
-  appeal: "Appeal sent",
-  "decide-appeal": "Appeal decided",
-  "approve-award": "Award approved",
-  "consent-payment": "Reporter accepted chain visibility",
-  "prepare-payment": "Unsigned payment prepared",
-  "decide-related-party": "Related-party award reviewed",
-  "reserve-award": "Award reserved with raised capacity",
-};
+function awardText(record: SecurityCase): string {
+  if (record.award === null || record.terms === null)
+    return AWARD_LABELS[record.awardState] ?? record.awardState;
+  return `${money(record.award.researcherMinor, record.terms)} to the researcher · ${money(record.award.slopMinor, record.terms)} to Slop · ${money(record.award.grossMinor, record.terms)} gross`;
+}
 
 const RELATED_PARTY_LABELS: Record<SecurityCase["relatedPartyReview"], string> =
   {
@@ -1918,6 +1953,114 @@ const RELATED_PARTY_LABELS: Record<SecurityCase["relatedPartyReview"], string> =
     approved: "Approved by an independent reviewer",
     refused: "Refused by an independent reviewer",
   };
+
+const LOSS_LABELS: Record<string, string> = {
+  likely: "Likely path to loss of funds",
+  unlikely: "No path to loss of funds found",
+  unclear: "Loss of funds unclear",
+};
+
+/** The automatic private analysis, for the owner and triagers only. */
+function AnalysisPanel({
+  record,
+  onRetry,
+}: {
+  record: SecurityCase;
+  onRetry: () => void;
+}) {
+  const analysis = record.analysis ?? null;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const retry = () => {
+    setBusy(true);
+    setError(null);
+    projectApiRequest<{ case: SecurityCase }>(
+      "POST",
+      `security-cases/${encodeURIComponent(record.id)}/actions`,
+      {
+        action: "analyze",
+        expectedRevision: record.revision,
+        idempotencyKey: requestKey(),
+      },
+    ).then(
+      () => {
+        setBusy(false);
+        onRetry();
+      },
+      (caught: unknown) => {
+        setBusy(false);
+        setError(errorMessage(caught));
+      },
+    );
+  };
+  return (
+    <section aria-labelledby={`analysis-${record.id}`}>
+      <h4 id={`analysis-${record.id}`}>AI summary</h4>
+      {analysis === null ? (
+        <p className="admin-status">No analysis yet.</p>
+      ) : analysis.state === "running" ? (
+        <p aria-live="polite" className="admin-status">
+          Analyzing the private report…
+        </p>
+      ) : analysis.state === "complete" ? (
+        <>
+          <p>{analysis.summary}</p>
+          <dl className="admin-facts">
+            <Fact term="Proposed severity">
+              {analysis.proposedSeverity ?? "—"}
+            </Fact>
+            <Fact term="Loss of funds">
+              {analysis.potentialLoss
+                ? LOSS_LABELS[analysis.potentialLoss]
+                : "—"}
+            </Fact>
+            <Fact term="Possible duplicates">
+              {analysis.duplicateCaseIds.length === 0
+                ? "None found"
+                : analysis.duplicateCaseIds.join(", ")}
+            </Fact>
+            <Fact term="Remediation">{analysis.remediation ?? "—"}</Fact>
+          </dl>
+          <p className="field-hint">
+            A proposal from {analysis.model ?? "the analysis model"}. The report
+            text can try to influence it; you decide the finding and any award.
+          </p>
+        </>
+      ) : (
+        <p className="admin-status">
+          {analysis.state === "unavailable"
+            ? "The analysis was unavailable: no analysis model is configured, or GitHub could not be read."
+            : "The analysis failed."}
+        </p>
+      )}
+      {record.allowedActions.includes("analyze") ? (
+        <button
+          className="text-button"
+          disabled={busy}
+          onClick={retry}
+          type="button"
+        >
+          <RotateCcw aria-hidden="true" />{" "}
+          {busy ? "Starting…" : "Run the analysis again"}
+        </button>
+      ) : null}
+      <FormError message={error} />
+    </section>
+  );
+}
+
+/** Owner and reviewer decisions shown at once; access tools stay folded. */
+const PRIMARY_ACTIONS = [
+  "request-information",
+  "decide",
+  "award",
+  "remediation",
+  "decide-appeal",
+  "decide-related-party",
+  "prepare-payment",
+  "consent-payment",
+  "appeal",
+];
 
 function CaseDetail({
   caseId,
@@ -1952,6 +2095,38 @@ function CaseDetail({
       </div>
     );
   const record = state.value.case;
+  const owner = record.view === "restricted";
+  const response = [...(record.events ?? [])]
+    .reverse()
+    .find((event) => RESPONSE_KINDS.has(event.kind) && event.reason);
+  // Disclosure is shown once a fix exists or a decision was recorded.
+  const disclosureRelevant =
+    ["resolved", "mitigation-verified"].includes(
+      record.remediationState ?? "",
+    ) || record.disclosureState !== "embargoed";
+  const form = (action: string) => (
+    <ActionForm
+      action={action}
+      key={`${action}-${record.revision}`}
+      onDone={(updated, saved) => {
+        setNote(saved);
+        if (updated) replace({ case: updated });
+        else reload();
+        onChanged();
+      }}
+      record={record}
+    />
+  );
+  const primary = record.allowedActions.filter(
+    (action) =>
+      PRIMARY_ACTIONS.includes(action) ||
+      (action === "disclosure" && disclosureRelevant),
+  );
+  const more = record.allowedActions.filter(
+    (action) =>
+      ["assign-triager", "revoke-triager", "recognition"].includes(action) ||
+      (action === "disclosure" && !disclosureRelevant),
+  );
   return (
     <article
       aria-labelledby={`case-${record.id}`}
@@ -1959,7 +2134,7 @@ function CaseDetail({
     >
       <header>
         <h3 id={`case-${record.id}`}>
-          Case {record.id} · {record.projectId}
+          {record.advisory?.ghsa ?? record.id} · {record.projectId}
         </h3>
       </header>
       {note ? (
@@ -1967,93 +2142,57 @@ function CaseDetail({
           {note}
         </p>
       ) : null}
+      <p className="security-next-step">
+        <strong>Next step:</strong> {record.nextStep}
+        {record.nextStepDueAt ? ` Due ${formatUtc(record.nextStepDueAt)}.` : ""}
+      </p>
       <dl className="admin-facts">
-        <Fact term="Submission">
+        <Fact term="Receipt">
           {SUBMISSION_LABELS[record.submissionState]}
+          {record.receivedAt
+            ? ` ${formatUtc(record.receivedAt)}${record.receivedAtSource === "github-verified" ? " (verified from GitHub)" : " (maintainer-attested)"}`
+            : ""}
+          {record.advisory ? (
+            <>
+              {" · "}
+              <ExternalLinkAnchor href={record.advisory.url}>
+                GitHub advisory
+              </ExternalLinkAnchor>
+            </>
+          ) : null}
         </Fact>
-        {record.nextAction ? (
-          <Fact term="Next action">
-            {record.nextAction}
-            {record.nextActionDueAt
-              ? ` · due ${formatUtc(record.nextActionDueAt)}`
-              : ""}
-            {record.overdue ? " · overdue" : ""}
+        {record.receiptState ? (
+          <Fact term="Owner response">
+            {RECEIPT_LABELS[record.receiptState] ?? record.receiptState}
+            {response?.reason ? ` — “${response.reason}”` : ""}
           </Fact>
         ) : null}
-        <Fact term="Award terms">{caseMoney(record.terms)}</Fact>
-        <Fact term="Award">{record.awardState}</Fact>
-        {record.relatedParty === "related" ? (
+        <Fact term="Award">{awardText(record)}</Fact>
+        {record.relatedParty === "related" &&
+        record.relatedPartyReview !== "not-applicable" ? (
           <Fact term="Related party">
             {RELATED_PARTY_LABELS[record.relatedPartyReview]}
           </Fact>
         ) : null}
-        <Fact term="Payment">
-          {record.paymentState === "rail-unavailable"
-            ? "Approved, not paid. Payment preparation requires a reviewed rail and the reporter’s consent."
-            : (PAYMENT_LABELS[record.paymentState] ?? record.paymentState)}
+        <Fact term="Payout">
+          {PAYMENT_LABELS[record.paymentState] ?? record.paymentState}
           {record.paymentDeadline
-            ? ` Deadline ${formatUtc(record.paymentDeadline)}.`
+            ? ` · deadline ${formatUtc(record.paymentDeadline)}`
             : ""}
         </Fact>
-        {record.advisory ? (
-          <Fact term="GitHub advisory">
-            <ExternalLinkAnchor href={record.advisory.url}>
-              {record.advisory.ghsa}
-            </ExternalLinkAnchor>
-          </Fact>
-        ) : null}
       </dl>
-      <details className="security-reference">
-        <summary>Case details</summary>
-        <dl className="admin-facts">
-          <Fact term="Your role">{record.viewerRoles.join(", ")}</Fact>
-          <Fact term="Received by GitHub">
-            {formatUtc(record.receivedAt)}
-            {record.receivedAtSource === "maintainer-attested"
-              ? " (maintainer verified)"
-              : record.receivedAtSource === "github-verified"
-                ? " (verified with GitHub)"
-                : ""}
-          </Fact>
-          <Fact term="Policy revision">{record.policyRevision ?? "—"}</Fact>
-          {record.receiptState ? (
-            <>
-              <Fact term="Receipt">{record.receiptState}</Fact>
-              <Fact term="Remediation">{record.remediationState}</Fact>
-              <Fact term="Disclosure">{record.disclosureState}</Fact>
-              <Fact term="Recognition">{record.recognition}</Fact>
-              <Fact term="Severity">{record.severity ?? "—"}</Fact>
-              <Fact term="Loss of funds">{record.lossFinding ?? "—"}</Fact>
-              <Fact term="Appeal">{record.appealState}</Fact>
-            </>
-          ) : null}
-          {record.reporter ? (
-            <Fact term="Reporter">@{record.reporter.githubLogin}</Fact>
-          ) : null}
-          {record.payee ? (
-            <Fact term="Payee">@{record.payee.githubLogin}</Fact>
-          ) : null}
-          {record.view === "restricted" ? (
-            <>
-              <Fact term="Root cause">{record.rootCauseKey ?? "—"}</Fact>
-              <Fact term="Duplicate of">{record.duplicateOf ?? "—"}</Fact>
-              <Fact term="Evidence digest">
-                {record.evidenceDigest ? (
-                  <code>{record.evidenceDigest}</code>
-                ) : (
-                  "—"
-                )}
-              </Fact>
-              <Fact term="Triagers">
-                {(record.triagers ?? [])
-                  .filter((entry) => entry.revokedAt === null)
-                  .map((entry) => `@${entry.githubLogin}`)
-                  .join(", ") || "None"}
-              </Fact>
-            </>
-          ) : null}
-        </dl>
-      </details>
+      {owner ? (
+        <AnalysisPanel
+          onRetry={() => {
+            reload();
+            onChanged();
+          }}
+          record={record}
+        />
+      ) : null}
+      {record.allowedActions.includes("check-receipt") ? (
+        <CheckReceipt onDone={reload} record={record} />
+      ) : null}
       {record.settlement ? (
         <section aria-label="Private payment">
           <p>{record.settlement.privacyNotice}</p>
@@ -2076,9 +2215,60 @@ function CaseDetail({
           ) : null}
         </section>
       ) : null}
-      {record.events && record.events.length > 0 ? (
+      {primary.map(form)}
+      {more.length > 0 ? (
         <details>
-          <summary>History ({record.events.length})</summary>
+          <summary>More actions</summary>
+          {more.map(form)}
+        </details>
+      ) : null}
+      <details className="security-reference">
+        <summary>Case details and history</summary>
+        <dl className="admin-facts">
+          <Fact term="Case">{record.id}</Fact>
+          <Fact term="Your role">{record.viewerRoles.join(", ")}</Fact>
+          <Fact term="Program terms at receipt">
+            {record.terms
+              ? `${money(record.terms.grossMinor, record.terms)} published gross per finding (policy revision ${record.policyRevision ?? "—"})`
+              : "No paid program was open"}
+          </Fact>
+          {record.receiptState ? (
+            <>
+              <Fact term="Severity">{record.severity ?? "—"}</Fact>
+              <Fact term="Loss of funds">{record.lossFinding ?? "—"}</Fact>
+              <Fact term="Remediation">{record.remediationState}</Fact>
+              <Fact term="Disclosure">{record.disclosureState}</Fact>
+              <Fact term="Recognition">{record.recognition}</Fact>
+              <Fact term="Appeal">{record.appealState}</Fact>
+            </>
+          ) : null}
+          {record.reporter ? (
+            <Fact term="Reporter">@{record.reporter.githubLogin}</Fact>
+          ) : null}
+          {record.payee ? (
+            <Fact term="Payee">@{record.payee.githubLogin}</Fact>
+          ) : null}
+          {owner ? (
+            <>
+              <Fact term="Root cause">{record.rootCauseKey ?? "—"}</Fact>
+              <Fact term="Duplicate of">{record.duplicateOf ?? "—"}</Fact>
+              <Fact term="Evidence digest">
+                {record.evidenceDigest ? (
+                  <code>{record.evidenceDigest}</code>
+                ) : (
+                  "—"
+                )}
+              </Fact>
+              <Fact term="Triagers">
+                {(record.triagers ?? [])
+                  .filter((entry) => entry.revokedAt === null)
+                  .map((entry) => `@${entry.githubLogin}`)
+                  .join(", ") || "None"}
+              </Fact>
+            </>
+          ) : null}
+        </dl>
+        {record.events && record.events.length > 0 ? (
           <ol className="security-history">
             {record.events.map((event) => (
               <li key={event.revision}>
@@ -2097,22 +2287,56 @@ function CaseDetail({
               </li>
             ))}
           </ol>
-        </details>
-      ) : null}
-      {record.allowedActions.map((action) => (
-        <ActionForm
-          action={action}
-          key={`${action}-${record.revision}`}
-          onDone={(updated, saved) => {
-            setNote(saved);
-            if (updated) replace({ case: updated });
-            else reload();
-            onChanged();
-          }}
-          record={record}
-        />
-      ))}
+        ) : null}
+      </details>
     </article>
+  );
+}
+
+/** Settles a link from before automatic receipt against GitHub. */
+function CheckReceipt({
+  record,
+  onDone,
+}: {
+  record: SecurityCase;
+  onDone: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const check = () => {
+    setBusy(true);
+    setError(null);
+    projectApiRequest(
+      "POST",
+      `security-cases/${encodeURIComponent(record.id)}/actions`,
+      {
+        action: "check-receipt",
+        expectedRevision: record.revision,
+        idempotencyKey: requestKey(),
+      },
+    ).then(
+      () => {
+        setBusy(false);
+        onDone();
+      },
+      (caught: unknown) => {
+        setBusy(false);
+        setError(errorMessage(caught));
+      },
+    );
+  };
+  return (
+    <div>
+      <button
+        className="button secondary-button"
+        disabled={busy}
+        onClick={check}
+        type="button"
+      >
+        {busy ? "Checking GitHub…" : "Confirm with GitHub"}
+      </button>
+      <FormError message={error} />
+    </div>
   );
 }
 
@@ -2123,7 +2347,6 @@ export function SecurityCasesPage() {
     session.status === "signed-in" ? "security-cases" : null,
   );
   const [selected, setSelected] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
   // `null` until the submission list answers; false while intake is off.
   const [automatic, setAutomatic] = useState<boolean | null>(null);
   // GitHub's authorization returns here with the submission and any error.
@@ -2155,7 +2378,7 @@ export function SecurityCasesPage() {
     body = (
       <SignInPanel
         next="/security"
-        purpose="Sign in with GitHub to see your private security cases. Reporting on GitHub does not need a Slop account."
+        purpose="Sign in with GitHub to report privately and see your security cases."
         state={session}
       />
     );
@@ -2188,18 +2411,8 @@ export function SecurityCasesPage() {
         .filter((entry) => entry.roles.includes("security-maintainer"))
         .map((entry) => entry.projectId),
     );
-    const created = (record: SecurityCase) => {
-      setNote(`Case ${record.id} saved.`);
-      setSelected(record.id);
-      reload();
-    };
     body = (
       <>
-        {note ? (
-          <p className="admin-status" role="status">
-            {note}
-          </p>
-        ) : null}
         <section aria-labelledby="security-cases" className="admin-section">
           <h2 id="security-cases">Your cases</h2>
           {list.value.cases.length === 0 ? (
@@ -2216,11 +2429,8 @@ export function SecurityCasesPage() {
                   >
                     <span>{record.projectId}</span>
                     <strong>{record.advisory?.ghsa ?? record.id}</strong>
-                    <span>{SUBMISSION_LABELS[record.submissionState]}</span>
-                    <span>
-                      Award: {record.awardState}
-                      {record.overdue ? " · overdue" : ""}
-                    </span>
+                    <span>{record.nextStep}</span>
+                    <span>Award: {awardText(record)}</span>
                   </button>
                 </li>
               ))}
@@ -2239,43 +2449,18 @@ export function SecurityCasesPage() {
         {automatic ? (
           <section aria-labelledby="security-link" className="admin-section">
             <h2 id="security-link">Already reported on GitHub? Verify it</h2>
-            <p className="admin-status">
-              GitHub’s own record proves you are the author and keeps the
-              original receipt time.
-            </p>
+            <p className="admin-status">GitHub's own record proves you are the author and keeps the original receipt time.</p>
             <DirectVerifyForm programProjects={programProjects} />
-            <details>
-              <summary>
-                The project has not installed the Slop private intake app
-              </summary>
-              <p className="admin-status">
-                Link the report instead. A maintainer verifies the link and the
-                original GitHub receipt time.
-              </p>
-              <ClaimForm
-                onCreated={created}
-                programProjects={programProjects}
-              />
-            </details>
           </section>
         ) : automatic === false ? (
-          <section aria-labelledby="security-link" className="admin-section">
-            <h2 id="security-link">Link a report you submitted on GitHub</h2>
-            <p className="admin-status">
-              A maintainer verifies the link and the original GitHub receipt
-              time.
-            </p>
-            <ClaimForm onCreated={created} programProjects={programProjects} />
-          </section>
+          <p className="admin-status">Automatic private intake is not available. Use the project's private GitHub report form. A security maintainer can import the verified receipt.</p>
         ) : null}
         {maintained.size > 0 ? (
-          <section aria-labelledby="security-record" className="admin-section">
-            <h2 id="security-record">
-              Record a report that came through GitHub
-            </h2>
-            <RecordForm
-              onCreated={created}
-              programProjects={programProjects.filter((project) =>
+          <section aria-labelledby="security-import" className="admin-section">
+            <h2 id="security-import">Reports sent on GitHub directly</h2>
+            <ImportReports
+              onImported={reload}
+              projects={programProjects.filter((project) =>
                 maintained.has(project.id),
               )}
             />
@@ -2293,9 +2478,10 @@ export function SecurityCasesPage() {
           <p>
             Private. Only the reporter, the program's security maintainers,
             assigned triagers, its finance approvers (award fields only) and its
-            independent dispute reviewers (appealed cases only) can see a case.
-            Slop admins have no automatic access. Slop never publishes cases or
-            counts them.
+            independent dispute reviewers (appealed or related-party cases only)
+            can see a case. The AI summary is shown only to maintainers and
+            triagers. Slop admins have no automatic access. Slop never publishes
+            cases or counts them.
           </p>
         </details>
       </div>

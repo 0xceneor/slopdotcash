@@ -42,6 +42,8 @@ for (const [name, value] of [
   if (value !== undefined && !/^[1-9][0-9]*(?:,[1-9][0-9]*)*$/u.test(value))
     throw new Error(`${name} must list GitHub actor IDs`);
 const registryGitHub = process.env.SLOP_E2E_GITHUB_API_ORIGIN;
+// The fixture's read token for synthetic private advisories.
+const registryAdvisoryToken = process.env.SLOP_E2E_ADVISORY_READ_TOKEN;
 if (
   registryGitHub !== undefined &&
   !/^http:\/\/127\.0\.0\.1:[0-9]{4,5}$/u.test(registryGitHub)
@@ -77,6 +79,10 @@ const registryArguments = registryPersistTo
     }${
       registryGitHub
         ? ` --binding SLOP_GITHUB_API_ORIGIN=${registryGitHub}`
+        : ""
+    }${
+      registryAdvisoryToken
+        ? ` --binding SECURITY_ADVISORY_READ_TOKEN=${registryAdvisoryToken}`
         : ""
     }${
       registryVettingKey

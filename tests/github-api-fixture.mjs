@@ -1,7 +1,8 @@
 /**
  * A loopback stand-in for the public GitHub API reads the project registry
  * makes (repository facts, organization membership, the integration-branch
- * head that security vetting pins, and the security intake readiness check),
+ * head that security vetting pins, the security intake readiness check, and
+ * the synthetic private vulnerability reports that verify receipt),
  * so the registry browser lane is deterministic and never
  * spends GitHub's rate limit. The browser's own repository lookup is mocked
  * from the same facts.
@@ -29,6 +30,12 @@ export const E2E_SECURITY_ACCOUNTS = Object.freeze({
   dispute: "900000016",
   "security-b": "900000017",
 });
+
+/**
+ * The read token the local Pages server presents for private advisories. It
+ * is a fixture value; the fixture refuses advisory reads without it.
+ */
+export const E2E_ADVISORY_READ_TOKEN = "e2e-fixture-advisory-read-token";
 
 /** Deterministic public facts for a fixture repository. */
 export function fixtureRepository(fullName) {
@@ -269,10 +276,44 @@ async function handlePrivateIntake(state, request, response, url) {
 export function startGitHubApiFixture(port) {
   // Private vulnerability reporting per repository; on unless a test sets it.
   const intake = new Map();
+  const advisories = new Map();
   const privateIntake = privateIntakeFixture();
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const path = url.pathname;
+    const reportControl =
+      /^\/__fixture\/security-advisories\/([^/]+\/[^/]+)$/u.exec(path);
+    if (request.method === "POST" && reportControl) {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const key = reportControl[1].toLowerCase();
+      advisories.set(key, [...(advisories.get(key) ?? []), JSON.parse(body)]);
+      response.writeHead(204);
+      response.end();
+      return;
+    }
+    const reports =
+      /^\/repos\/([^/]+\/[^/]+)\/security-advisories(?:\/(GHSA-[^/]+))?$/u.exec(
+        path,
+      );
+    if (request.method === "GET" && reports && request.headers.authorization === `Bearer ${E2E_ADVISORY_READ_TOKEN}`) {
+      if (
+        request.headers.authorization !== `Bearer ${E2E_ADVISORY_READ_TOKEN}`
+      ) {
+        response.writeHead(403, { "content-type": "application/json" });
+        response.end('{"message":"Resource not accessible"}');
+        return;
+      }
+      const list = [...(advisories.get(reports[1].toLowerCase()) ?? []), ...privateIntake.advisories.filter(entry => entry.repository === reports[1].toLowerCase()).map(entry => entry.advisory)];
+      const found = reports[2]
+        ? list.find((entry) => entry.ghsa_id === reports[2])
+        : list;
+      response.writeHead(found ? 200 : 404, {
+        "content-type": "application/json",
+      });
+      response.end(JSON.stringify(found ?? { message: "Not Found" }));
+        return;
+    }
     try {
       if (await handlePrivateIntake(privateIntake, request, response, url))
         return;
