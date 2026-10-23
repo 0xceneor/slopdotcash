@@ -189,7 +189,8 @@ export function providerSecurityAnalyzer(
     async analyze(input) {
       const response = await fetcher(ENDPOINTS[profile.transport], {
         method: "POST",
-        redirect: "error",
+        // Workers support only "follow" and "manual"; a redirect is not ok.
+        redirect: "manual",
         signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
         headers: {
           "content-type": "application/json",

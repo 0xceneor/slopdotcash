@@ -148,7 +148,8 @@ export function githubAdvisoryReader(options: {
   const get = (url: string) =>
     options.fetch(url, {
       headers,
-      redirect: "error",
+      // Workers support only "follow" and "manual"; a redirect is not ok.
+      redirect: "manual",
       signal: AbortSignal.timeout(10_000),
     });
   return {
