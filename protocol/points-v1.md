@@ -98,6 +98,18 @@ Membership is unique by immutable GitHub node and numeric IDs. Sessions cannot
 create arbitrary awards, choose another actor, read traces, or ingest history.
 Signout invalidates the session without resetting the welcome award.
 
+A member can close the account from Account after typing their GitHub login
+(`POST /api/v1/points/account/close`, migration 0063). One atomic change marks
+the membership closed and private, ends every session, removes the X and
+Telegram links and pending flows, and turns off optional activity email. The
+membership row, welcome and connection awards, X and Telegram claims, points
+history, wallets, unpaid obligations, payment and settlement records, private
+cases, inbox rows and public GitHub work stay. The database refuses a session
+or public visibility for a closed account. An ordinary sign-in to a closed
+account returns `account_closed`; only a sign-in that sends `reopen: true`
+opens it again, private and without connections. Support handles only lost
+GitHub access and contested recovery.
+
 New join-only membership is private unless opted into public display. Public
 GitHub contribution history remains public. Visibility can be changed without
 rejoining. Identity aliases never move balances between account IDs. A disputed
