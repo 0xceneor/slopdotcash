@@ -2409,7 +2409,21 @@ describe("generated project skill installation", () => {
         manifestText,
       }),
     );
+    publishStatus(root, {
+      schemaVersion: "1",
+      project: { ...manifest, status: "active" },
+      revision,
+      manifestSha256,
+      skillsPublished: true,
+    });
     return { projectId: "thenetwork", revision, manifestSha256 };
+  }
+
+  /** The public project status the contributor installer and run gate read. */
+  function publishStatus(root: string, body: Record<string, unknown>) {
+    const path = join(root, "registry", "api", "v1", "projects", "thenetwork");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(body));
   }
 
   function generatedArtifact(
@@ -2592,6 +2606,68 @@ describe("generated project skill installation", () => {
         "/",
       ),
     ).toBe(`.${skillName}-versions/${revisionA}-r5`);
+  });
+
+  it("refuses a flagged, restricted, unscanned or paused project before install and before work", async () => {
+    const root = freshRoot("generated-restricted");
+    const manifest = manifestFor("Prefer small PRs.");
+    const binding = publishRevision(root, manifest, 3);
+    const { artifact } = generatedArtifact(root, manifest, binding);
+    const authority = generatedAuthority(root);
+    const installRoot = join(root, "install");
+    const installed = run(
+      generatedCommand(artifact, authority, root),
+      installRoot,
+    );
+    expect(installed.status, installed.stderr).toBe(0);
+    const installedSkill = join(
+      installRoot,
+      "codex",
+      "skills",
+      readlinkSync(join(installRoot, "codex", "skills", skillName)),
+    );
+    const gate = await import(
+      pathToFileURL(join(installedSkill, "scripts", "run-receipt.mjs")).href
+    );
+    const registryOrigin = pathToFileURL(join(root, "registry")).href;
+    for (const [status, message] of [
+      [
+        {
+          error: "project_restricted",
+          restriction: { state: "quarantined" },
+        },
+        "paused or restricted this project",
+      ],
+      [
+        {
+          schemaVersion: "1",
+          project: { ...manifest, status: "active" },
+          skillsPublished: false,
+        },
+        "has no clean security scan",
+      ],
+      [
+        {
+          schemaVersion: "1",
+          project: { ...manifest, status: "paused" },
+          skillsPublished: true,
+        },
+        "this project is paused",
+      ],
+    ] as const) {
+      publishStatus(root, status);
+      // The run gate refuses work on the installed skill.
+      expect(() =>
+        gate.authorizeSkill(undefined, { ...authority, registryOrigin }),
+      ).toThrow(message);
+      // A fresh install is refused before any byte is activated.
+      const refused = run(
+        generatedCommand(artifact, authority, root),
+        join(root, `install-${message.length}`),
+      );
+      expect(refused.status).not.toBe(0);
+      expect(refused.stderr).toContain(message);
+    }
   });
 
   it("refuses a registry revision whose bytes disagree with the approved digest", () => {
