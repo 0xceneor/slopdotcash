@@ -62,7 +62,12 @@ import {
 import { handleTraceApi } from "../../../backend/trace/handler";
 import { VettingEvidence } from "../../../backend/vetting/evidence";
 import {
+  handleProjectFlagsApi,
+  ProjectFlagStore,
+} from "../../../backend/vetting/flags";
+import {
   handleVettingApi,
+  queueAutomaticScan,
   signedVettingRequest,
 } from "../../../backend/vetting/handler";
 import {
@@ -542,7 +547,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
   const vetting = new CloudflareVettingPersistence(
     context.env.SLOP_DB,
     async (assessment) =>
-      assessment.result !== null && evidence.complete(assessment.result),
+      assessment.result !== null && evidence.retained(assessment.result),
   );
   const github = {
     fetch: (url: string, init: RequestInit) => fetch(url, init),
@@ -623,17 +628,47 @@ export async function onRequest(context: PagesContext): Promise<Response> {
   if (securityResponse !== null) return securityResponse;
   const evidenceResponse = await evidence.handle(context.request);
   if (evidenceResponse !== null) return evidenceResponse;
+  const flags = new ProjectFlagStore(context.env.SLOP_DB);
+  const operatorGithubIds = [
+    ...new Set([
+      ...githubIdSet(context.env.ADMIN_GITHUB_IDS),
+      ...githubIdSet(context.env.PROJECT_MODERATOR_GITHUB_IDS),
+    ]),
+  ];
+  const flagsResponse = await handleProjectFlagsApi(context.request, {
+    flags,
+    projects: projectPersistence,
+    sessionActor: (request) =>
+      sessionGithubActor(
+        request,
+        context.env.SLOP_DB,
+        new Date().toISOString(),
+      ),
+    moderatorGithubIds: operatorGithubIds,
+    queueFreshScan: (project) =>
+      queueAutomaticScan(
+        {
+          vetting,
+          livePin,
+          resultPublicKeys: context.env.VETTING_RESULT_PUBLIC_KEYS,
+          now: () => new Date(),
+          randomId: () => crypto.randomUUID(),
+        },
+        project,
+        "Automatic fresh scan after two contributor flags paused the project",
+      ),
+    now: () => new Date(),
+    randomId: () => crypto.randomUUID(),
+    cache: edgeCache(),
+  });
+  if (flagsResponse !== null) return flagsResponse;
   const vettingResponse = await handleVettingApi(context.request, {
     evidence,
     vetting,
+    flags,
     projects: projectPersistence,
     resultPublicKeys: context.env.VETTING_RESULT_PUBLIC_KEYS,
-    operatorGithubIds: [
-      ...new Set([
-        ...githubIdSet(context.env.ADMIN_GITHUB_IDS),
-        ...githubIdSet(context.env.PROJECT_MODERATOR_GITHUB_IDS),
-      ]),
-    ],
+    operatorGithubIds,
     livePin,
     session: async (request) => {
       const actor = await sessionGithubActor(
