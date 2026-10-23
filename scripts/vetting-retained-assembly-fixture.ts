@@ -81,7 +81,7 @@ export async function retainedAssemblyFixture(input: {
   const projects = new CloudflareProjectPersistence(db);
   const vetting = new CloudflareVettingPersistence(
     db,
-    async (a) => a.result !== null && retained.evidence.complete(a.result),
+    async (a) => a.result !== null && retained.evidence.retained(a.result),
   );
   const keys = await vettingKeyPair();
   const pin = {

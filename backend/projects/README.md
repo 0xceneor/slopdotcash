@@ -272,6 +272,13 @@ rate limit, and caches each answer for five minutes. The browser never calls
   paused, `retired` revision of the restriction is still pending. It appends a paused `community` revision only if
   the project was listed when the restriction began; it never restores
   featuring, activation or money. A denial keeps the restriction.
+- Two standing rules act without a moderator (PRD section 8; see
+  `backend/vetting/README.md`). The second distinct active contributor flag
+  appends a `quarantine` record whose issuer is `contributor-flags`, and a
+  clean fresh scan requested at or after that flag-only pause appends a signed
+  `vetting-service` reinstatement. Neither appends a revision. A moderator
+  decides every other restriction, including a flag pause escalated by a
+  confirmed malicious result.
 - Each enforcement record adds, in the same D1 batch, one `/inbox` row for the
   account that listed the project and one for its GitHub steward (PRD
   NOT-01). A reinstatement request also adds a row for each moderator who

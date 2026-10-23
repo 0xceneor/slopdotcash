@@ -5,9 +5,10 @@ import {
 /**
  * The admin view of community project security vetting (PRD VET-01 to
  * VET-08). It shows each project's revision-bound clearance, the restricted
- * scan results and quarantine records, and queues a scan of the current
- * revision. The secure-VM service is external; when it is not configured the
- * view says so and offers no scan control.
+ * scan results and quarantine records, active contributor flags, and queues a
+ * scan of the current revision. Routine scans queue automatically; the
+ * scanner service is external, and when it is not configured the view says
+ * so and offers no scan control.
  */
 
 import { CircleAlert, RotateCcw } from "lucide-react";
@@ -23,9 +24,16 @@ type AdminAssessment = AssessmentSummary & {
   projectId: string;
   requestedBy: { githubLogin: string };
   requestReason: string;
+  /** A historical secure-VM result (v1) or a bounded scan result (v2). */
   result: {
-    environment: { runId: string };
-    telemetry: { visibilityGaps: string[]; tamperDetected: boolean };
+    schemaVersion: string;
+    environment?: { runId: string };
+    telemetry?: { visibilityGaps: string[]; tamperDetected: boolean };
+    scan?: { runId: string };
+    reusedAssessmentId?: string | null;
+    coverage?: Record<string, { state: string; items: number }>;
+    checks?: Record<string, string>;
+    visibilityGaps?: string[];
     artifacts: {
       sha256: string;
       path: string;
@@ -51,6 +59,16 @@ type Overview = {
     clearance: Clearance;
   }[];
   assessments: AdminAssessment[];
+  /** Active contributor flags; they count without moderator approval. */
+  flags?: {
+    id: string;
+    projectId: string;
+    reporter: { githubLogin: string };
+    category: string;
+    evidence: string;
+    evidenceUrl: string | null;
+    createdAt: string;
+  }[];
 };
 
 const LABELS: Record<Clearance["state"], string> = {
@@ -125,8 +143,24 @@ function QueueScan({
   );
 }
 
+/** Where a result's retained evidence lives; a reused scan points at its original. */
+function evidenceRun(assessment: AdminAssessment) {
+  const result = assessment.result;
+  if (result?.scan)
+    return {
+      assessmentId: result.reusedAssessmentId ?? assessment.id,
+      runId: result.scan.runId,
+    };
+  if (result?.environment)
+    return { assessmentId: assessment.id, runId: result.environment.runId };
+  return null;
+}
+
 function AssessmentDetails({ assessment }: { assessment: AdminAssessment }) {
   const result = assessment.result;
+  const run = evidenceRun(assessment);
+  const gaps =
+    result?.telemetry?.visibilityGaps ?? result?.visibilityGaps ?? [];
   return (
     <details>
       <summary>
@@ -162,12 +196,12 @@ function AssessmentDetails({ assessment }: { assessment: AdminAssessment }) {
                   .join(", ")}
           </dd>
         </div>
-        {result ? (
+        {run ? (
           <div>
             <dt>Retained evidence</dt>
             <dd>
               <a
-                href={`/vetting-evidence?assessmentId=${encodeURIComponent(assessment.id)}&runId=${encodeURIComponent(result.environment.runId)}`}
+                href={`/vetting-evidence?assessmentId=${encodeURIComponent(run.assessmentId)}&runId=${encodeURIComponent(run.runId)}`}
               >
                 Open restricted evidence console
               </a>
@@ -175,14 +209,29 @@ function AssessmentDetails({ assessment }: { assessment: AdminAssessment }) {
             </dd>
           </div>
         ) : null}
+        {result?.coverage && result.checks ? (
+          <div>
+            <dt>Scan coverage</dt>
+            <dd>
+              {Object.entries(result.coverage)
+                .map(([surface, entry]) => `${surface}: ${entry.state}`)
+                .join(", ")}
+              <br />
+              {Object.entries(result.checks)
+                .map(([threat, check]) => `${threat}: ${check}`)
+                .join(", ")}
+              {result.reusedAssessmentId
+                ? ` · Reused clean scan ${result.reusedAssessmentId} of identical executable content`
+                : ""}
+            </dd>
+          </div>
+        ) : null}
         {result ? (
           <div>
-            <dt>Telemetry</dt>
+            <dt>Visibility</dt>
             <dd>
-              {result.telemetry.tamperDetected ? "Tampering detected. " : ""}
-              {result.telemetry.visibilityGaps.length === 0
-                ? "No visibility gaps"
-                : result.telemetry.visibilityGaps.join("; ")}
+              {result.telemetry?.tamperDetected ? "Tampering detected. " : ""}
+              {gaps.length === 0 ? "No visibility gaps" : gaps.join("; ")}
             </dd>
           </div>
         ) : null}
@@ -362,6 +411,40 @@ export function VettingSection({ projectId }: { projectId: string }) {
                         }}
                         project={project}
                       />
+                    ) : null}
+                    {(state.value.flags ?? []).some(
+                      (flag) => flag.projectId === project.id,
+                    ) ? (
+                      <>
+                        <h4>Active contributor flags</h4>
+                        <ul>
+                          {(state.value.flags ?? [])
+                            .filter((flag) => flag.projectId === project.id)
+                            .map((flag) => (
+                              <li key={flag.id}>
+                                @{flag.reporter.githubLogin} · {flag.category} ·{" "}
+                                {time(flag.createdAt)}: {flag.evidence}
+                                {flag.evidenceUrl ? (
+                                  <>
+                                    {" "}
+                                    <a
+                                      href={flag.evidenceUrl}
+                                      rel="noreferrer"
+                                      target="_blank"
+                                    >
+                                      Evidence link
+                                    </a>
+                                  </>
+                                ) : null}
+                              </li>
+                            ))}
+                        </ul>
+                        <p className="admin-status">
+                          Two distinct flags pause the project without approval.
+                          A clean fresh scan reinstates a flag-only pause;
+                          decide only after a confirmed malicious result.
+                        </p>
+                      </>
                     ) : null}
                     {history.length > 0 ? (
                       <>

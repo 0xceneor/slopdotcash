@@ -78,6 +78,7 @@ import {
 } from "./Presentation";
 import { ProfilePage } from "./ProfilePage";
 import { ProjectLeaderboard } from "./ProjectLeaderboard";
+import { ProjectRiskFlag } from "./ProjectRiskFlag";
 
 export { safeProposalHttpsUrl } from "./lib/project-proposal";
 export {
@@ -1503,6 +1504,7 @@ function ProjectPage({
             view={view}
           />
         ) : null}
+        <ProjectRiskFlag projectId={project.id} />
       </div>
     </main>
   );

@@ -1,12 +1,14 @@
 # Community project security vetting
 
-PRD VET-01 to VET-08 and MVP-12. Slop serves no generated skill, lists no
-project in `/.well-known/slop/projects.json`, and activates no revision unless
-a secure-VM scan cleared that exact revision content. The VM, its collectors
-and the two model scanners are external services. This module stores their
-signed results and enforces the gate. It fails closed when the service is
-absent. [Private evidence storage and inspection](EVIDENCE.md) use a separate
-R2 binding and an explicit operator-attested policy with inactive defaults.
+PRD section 8, VET-01 to VET-08 and MVP-12; issues #909 and #911. Slop serves
+no generated skill, lists no project in `/.well-known/slop/projects.json`, and
+activates no revision unless a malicious-code scan cleared that exact revision
+content at the live pin. The scanner and its model reviews are an external
+service ([worker](../../workers/vetting/README.md)). This module stores their
+signed results, queues scans automatically, records contributor flags and
+enforces the gate. It fails closed when the service is absent. [Private
+evidence storage and inspection](EVIDENCE.md) use a separate R2 binding and an
+explicit operator-attested policy with inactive defaults.
 
 ## Tables
 
@@ -64,8 +66,9 @@ queue a scan, and Slop serves no skill for it.
 | `banned` | A malicious scan has no independent reinstatement decision covering it | Blocked; a new scan or commit alone cannot lift it |
 
 Merging to the integration branch therefore pauses skills and discovery for
-the project until an admin queues a scan of the new head and its clean result
-lands. Slop keeps each branch head in the edge cache for 30 seconds. Dynamic
+the project until a scan of the new head lands clean. The signed service's
+`POST /api/v1/vetting/refresh` queues that scan automatically; a scan whose
+executable inventory is unchanged reuses the cached clean result. Slop keeps each branch head in the edge cache for 30 seconds. Dynamic
 skills, discovery and public clearance responses use no-store. Each request
 checks current private evidence; an old cache cannot bypass access expiry.
 
@@ -80,7 +83,11 @@ records described in [Independent reinstatement](#independent-reinstatement).
 | `GET /api/v1/admin/vetting`              | admin          | Service state, clearance of every project, full results                                                                                                                      |
 | `POST /api/v1/admin/vetting/assessments` | admin          | Queues a scan of the current revision (`projectId`, `revision`, `reason`) at the live branch head and template digest; HTTP 503 `pin_unavailable` when either cannot be read |
 | `GET /api/v1/vetting/requests`           | signed service | Queued scans with the assigned `commitSha` and `templateSha256`, the revision URL and the template index URL                                                                 |
-| `POST /api/v1/vetting/results`           | signed service | Records one `slop-vetting-result-v1` result                                                                                                                                  |
+| `POST /api/v1/vetting/results`           | signed service | Records one `slop-vetting-result-v2` scan result, or a historical `slop-vetting-result-v1` result                                                                            |
+| `POST /api/v1/vetting/refresh`           | signed service | Body `{}`. Queues automatic scans, for the project steward, of changed or unscanned content and of flag-only pauses; returns the queued ids                                    |
+| `GET /api/v1/project-flags/:id`          | member         | The member's own active flag and the project's restriction state                                                                                                              |
+| `POST /api/v1/project-flags/:id`         | member         | Files one flag (`category`, `evidence`, optional GitHub `evidenceUrl`); the second distinct active reporter pauses the project                                              |
+| `POST /api/v1/project-flags/:id/withdraw`| member         | Withdraws the member's active flag; a pause already placed stays until a clean scan                                                                                           |
 | `GET /api/v1/projects/:id`               | public         | Adds the safe `vetting` summary; `skillsPublished` needs `cleared`                                                                                                           |
 
 ## Service signature
@@ -100,66 +107,86 @@ unavailable.
 
 ## Result contract
 
-`backend/vetting/result.ts` parses the result exactly. Unknown, missing or
-malformed fields refuse it. The result binds the assessment id, project id,
-revision, manifest SHA-256 and repository of the queued scan, the assessed
-commit and template input digest (which must equal the values the queue assigned,
-or the API returns HTTP 422 `commit_mismatch`), input inventory digest, dependency lock digests, VM
-provider, isolation, image digest, collector and run ids, the eleven
-telemetry channels, visibility gaps, tamper and canary signals, the trace
-digest, exactly one Astra and one Opus review with provider, model, prompt
-policy, input digest and run id, the artifact quarantine list, findings and
-an optional confirmation.
+New results use the bounded scan contract `slop-vetting-result-v2`
+(`scan-result.ts`). The parser refuses unknown, missing or malformed fields.
+A result binds the assessment, project, revision, manifest SHA-256 and
+repository of the queued scan, the assessed commit and template digest (which
+must equal the queue assignment, or HTTP 422 `commit_mismatch`), the
+executable inventory digest, dependency lock digests, the scan run and its
+private report digest, surface coverage, threat checks, visibility gaps, any
+isolated execution, an optional reused assessment, the primary review, an
+optional specialist review, artifacts, findings and an optional confirmation.
 
 The API never upgrades a result:
 
-- `clean` needs every telemetry channel complete, no visibility gap, no
-  tampering, no canary access, both reviews completed on the assessed
-  inventory without a malice verdict, every artifact released, and no high or
-  critical finding.
+- `clean` needs all six surfaces (`source`, `manifests`, `dependencies`,
+  `installScripts`, `downloads`, `agentInstructions`) read completely, no
+  visibility gap, no check `not-run`, a completed primary review of the
+  assessed inventory without suspected malice, every artifact released after a
+  clean analysis, and no high or critical finding. An ambiguous or high-risk
+  result (a non-low primary review, a flagged check, a medium or worse finding
+  or an unreleased artifact) also needs a completed specialist review of the
+  same inventory with no findings and low risk. An ordinary clean project
+  needs no second review.
+- Isolated execution is recorded only when it was needed, and the contract
+  requires `secretsProvided: false` and default-deny egress.
+- A clean result needs its retained report, inventory, dependency locks and
+  artifacts in the evidence store (`evidence_incomplete` otherwise). A reused
+  result must cite an original clean, non-reused scan of the same repository,
+  inventory, template, policy, run and report (`reuse_mismatch` otherwise);
+  the original's retained evidence stands in.
 - `malicious` needs a `confirmation` with basis `reproducible-behavior` or
-  `verified-source-evidence`, a rule id and evidence references. A model
-  label alone is refused (VET-06).
+  `verified-source-evidence`, a rule id and evidence references. A model label
+  alone is refused (VET-06).
 - `incomplete` records anything else, without a confirmation.
+
+Historical `slop-vetting-result-v1` results keep their secure-VM rules in
+`result.ts`: eleven telemetry channels, two model reviews and a complete
+canonical assembly. No recorded incomplete result is reinterpreted as clean.
 
 ## Remaining service implementation and operation
 
-The result intake does not implement the external execution service. These
-are source and integration requirements, not only missing credentials or
-deployment settings. Until the complete service exists and passes acceptance,
-no community project can be cleared, so no project skill is served.
+The intake, automatic queue, flags and scan composition are source. The
+deployed scanner service, its Ed25519 key, the public key in
+`VETTING_RESULT_PUBLIC_KEYS`, a pinned primary and specialist provider profile,
+the evidence store policy, an accepted isolated runner for risky artifacts and
+staging acceptance remain operational work. Until then no community project
+can be cleared, so no project skill is served. The earlier secure-VM
+components stay available for advanced detonation; they are no longer a
+prerequisite for an ordinary clean result.
 
-The [isolated artifact inventory](../../workers/vetting/README.md) implements
-bounded recursive inspection of a supplied file. It keeps every file in
-quarantine. It does not intercept guest execution, release artifacts, or
-replace the remaining requirements below.
+## Two-contributor flags
 
-[Source acquisition](../../workers/vetting/ACQUISITION.md) verifies immutable
-Git objects without checkout or execution. The [signed queue reader and template
-acquisition](../../workers/vetting/QUEUE.md) bind those objects to the assigned
-manifest and template inputs. Both retain visibility gaps and leave assessments
-pending. Independent provider transports are under review in
-[PR #953](https://github.com/SlopDotCash/slopdotcash/pull/953); actual provider
-acceptance is still required. These components do not complete execution,
-telemetry, artifact release or trusted publication.
+`flags.ts` and migration 0060 implement PRD sections 4 and 8. Any signed-in
+member except the project steward may file one active flag per project with a
+threat category and 20 to 4,000 characters of evidence. In the same D1
+transaction as the second distinct active reporter's flag, Slop appends a
+`quarantine` enforcement record whose issuer is `contributor-flags` with the
+flag ids, a standing rule and no GitHub actor. It notifies each configured
+administrator and project moderator once (`/admin`) and the applicant and
+steward (`/projects/:id`) through the inbox and its email outbox, purges cached
+skills and discovery, and queues a fresh scan. A database trigger refuses a
+flag pause without two distinct active reporters. No moderator approves a flag
+before it counts. A restricted project only records further flags.
 
-1. A hardware-isolated VM or microVM service that meets VET-02 and VET-03:
-   fresh disposable guest, no host mounts or credentials, default-deny egress
-   through an instrumented proxy, the eleven telemetry channels, canary
-   files, and host and proxy evidence collected outside the guest.
-2. Recursive artifact quarantine and analysis outside the guest (VET-04).
-3. Pinned Astra-class and Opus-class scanner runs with their own provider
-   credentials (VET-05).
-4. A trusted policy service, outside the guest and model context, that holds
-   the Ed25519 private key, decides the disposition, and signs the result.
-5. The public key in the Pages variable `VETTING_RESULT_PUBLIC_KEYS` for each
-   environment.
-6. The [restricted operator console](EVIDENCE.md) now verifies bounded retained
-   objects. Full assembly-reference closure and large overlay integration remain
-   missing source work. Approved published policy, physical retention, legal holds,
-   backup and recovery controls, and live acceptance remain required (VET-03).
-7. The VET-08 acceptance run of the harmless fixture classes on that
-   infrastructure, with its coverage and blind-spot report.
+A flag stops counting when it closes:
+
+- the reporter withdraws it;
+- a clean scan requested after the flag was filed resolves it;
+- any reinstatement of the project resolves the flags it found.
+
+The PRD sets no time-based flag lifetime, so `FLAG_ACTIVE_LIFETIME_MS` is
+null and awaits an owner decision: an unresolved flag counts until one of the
+events above.
+
+A clean fresh scan requested at or after a pause that flags alone placed
+appends a signed `vetting-service` reinstatement (rule
+`clean-fresh-scan-after-flags`) with the result, in one transaction. It
+appends no revision, because the pause never changed the manifest. A
+confirmed malicious result instead bans the project through the path below,
+and a moderator decides. Flag evidence is visible only to its reporter and to
+administrators in `GET /api/v1/admin/vetting`; public routes show only the
+restriction.
 
 ## Independent reinstatement
 

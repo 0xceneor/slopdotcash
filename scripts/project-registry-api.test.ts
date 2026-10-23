@@ -32,6 +32,7 @@ import {
   vettedContentSha256,
 } from "../backend/vetting/persistence";
 import { parseVettingResult } from "../backend/vetting/result";
+import { isScanResult } from "../backend/vetting/scan-result";
 import type { RepositoryAccess } from "../src/lib/project-contracts";
 import { slugify } from "../src/lib/project-proposal";
 import { PROJECT_SKILL_TEMPLATES } from "../src/lib/project-schema.mjs";
@@ -105,7 +106,7 @@ beforeEach(async () => {
   );
   vetting = new CloudflareVettingPersistence(
     database.db,
-    async (a) => a.result !== null && retained.evidence.complete(a.result),
+    async (a) => a.result !== null && retained.evidence.retained(a.result),
   );
   livePin = { commitSha: "a".repeat(40), templateSha256: "d".repeat(64) };
   cache = new MemoryCache();
@@ -1432,7 +1433,9 @@ test("cached skill and public clearance cannot survive loss of retained evidence
   await listProject();
   const id = await seedHistoricalResult("open-registry");
   const assessment = await vetting.getAssessment(id);
-  if (!assessment?.result) throw new Error("Missing fixture assessment");
+  if (!assessment?.result || isScanResult(assessment.result))
+    throw new Error("Missing historical fixture assessment");
+  const historical = assessment.result;
   const skillPath = "/projects/open-registry/skill.md";
   const oldSkill = await get(skillPath);
   const oldDetail = await call("GET", "projects/open-registry");
@@ -1472,7 +1475,7 @@ test("cached skill and public clearance cannot survive loss of retained evidence
       response,
     );
   await retained.bucket.delete(
-    `vetting/${id}/${assessment.result.environment.runId}/${assessment.result.traceSha256}`,
+    `vetting/${id}/${historical.environment.runId}/${historical.traceSha256}`,
   );
   const refused = await get(skillPath);
   expect(refused.status).toBe(503);

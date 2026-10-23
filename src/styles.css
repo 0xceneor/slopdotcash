@@ -4854,6 +4854,20 @@ small {
   gap: 10px;
 }
 
+.project-risk-flag {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.project-risk-flag summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 .security-action {
   padding-top: 12px;
   border-top: 1px solid var(--line);

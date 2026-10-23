@@ -24,11 +24,13 @@ import {
 import type { GithubActor, ProjectEnforcement } from "../projects/contracts";
 import {
   enforcedManifest,
+  planScanReinstatement,
   projectRestriction,
   repositoryIdentity,
 } from "../projects/enforcement";
 import { sha256Hex } from "../trace/validation";
-import type { VettingArtifact, VettingResult } from "./result";
+import type { VettingArtifact } from "./result";
+import { type RecordedVettingResult, resultReviewers } from "./scan-result";
 
 export type {
   AssessmentState,
@@ -52,7 +54,7 @@ export type VettingAssessment = {
   requestReason: string;
   state: AssessmentState;
   policyVersion: string | null;
-  result: VettingResult | null;
+  result: RecordedVettingResult | null;
   resultSha256: string | null;
   signingKeySha256: string | null;
   completedAt: string | null;
@@ -102,7 +104,9 @@ function fromRow(row: AssessmentRow): VettingAssessment {
     state: row.state,
     policyVersion: row.policy_version,
     result:
-      row.result === null ? null : (JSON.parse(row.result) as VettingResult),
+      row.result === null
+        ? null
+        : (JSON.parse(row.result) as RecordedVettingResult),
     resultSha256: row.result_sha256,
     signingKeySha256: row.signing_key_sha256,
     completedAt: row.completed_at,
@@ -134,11 +138,7 @@ export function summarize(assessment: VettingAssessment): AssessmentSummary {
     policyVersion: assessment.policyVersion,
     requestedAt: assessment.requestedAt,
     completedAt: assessment.completedAt,
-    modelRuns: (assessment.result?.modelReviews ?? []).map((review) => ({
-      reviewer: review.reviewer,
-      provider: review.provider,
-      model: review.model,
-    })),
+    modelRuns: assessment.result ? resultReviewers(assessment.result) : [],
     artifacts: artifacts.length,
     heldArtifacts: artifacts.filter((artifact) => artifact.state !== "released")
       .length,
@@ -260,7 +260,7 @@ export class CloudflareVettingPersistence {
    * landed, so artifacts can never attach to another result.
    */
   async recordResult(input: {
-    result: VettingResult;
+    result: RecordedVettingResult;
     resultText: string;
     resultSha256: string;
     signingKeySha256: string;
@@ -314,6 +314,32 @@ export class CloudflareVettingPersistence {
         createdAt: input.at,
       };
     }
+    if (result.disposition === "clean") {
+      // A clean fresh scan reinstates a project that flags alone paused
+      // (PRD section 8). The record commits with the result or not at all.
+      const projects = new CloudflareProjectPersistence(this.db);
+      const [project, assessment] = await Promise.all([
+        projects.getProject(result.projectId),
+        this.getAssessment(result.assessmentId),
+      ]);
+      if (project && assessment)
+        enforcement = planScanReinstatement({
+          project,
+          restriction: projectRestriction(
+            project.id,
+            await projects.listEnforcements(),
+          ),
+          scan: {
+            assessmentId: assessment.id,
+            requestedAt: assessment.requestedAt,
+            contentSha256: assessment.contentSha256,
+            keySha256: input.signingKeySha256,
+            policyVersion: result.policyVersion,
+          },
+          currentContentSha256: await vettedContentSha256(project.manifest),
+          at: input.at,
+        });
+    }
     try {
       await this.db.batch([
         this.db
@@ -336,6 +362,7 @@ export class CloudflareVettingPersistence {
           ? [
               enforcementStatement(this.db, enforcement),
               notifyProjectEnforcement(this.db, enforcement.id),
+              // Reads back the record and writes only for a service ban.
               notifyVettingBanAudience(
                 this.db,
                 enforcement.id,
@@ -367,7 +394,7 @@ export class CloudflareVettingPersistence {
     } catch (error) {
       if (
         error instanceof Error &&
-        /a vetting result is recorded once|enforcement sequence|NOT NULL constraint|UNIQUE constraint/u.test(
+        /a vetting result is recorded once|enforcement sequence|scan reinstatement needs|NOT NULL constraint|UNIQUE constraint/u.test(
           error.message,
         )
       )

@@ -82,7 +82,8 @@ export type EnforcementActorRole =
   | "project-moderator"
   | "project-steward"
   | "project-applicant"
-  | "vetting-service";
+  | "vetting-service"
+  | "contributor-flags";
 export type RestrictionState = "clear" | "quarantined" | "banned";
 export type AppealState = "none" | "requested" | "granted" | "denied";
 export type EnforcementResult =
@@ -105,13 +106,20 @@ export type ProjectEnforcement = {
   /** Lowercase repository paths, including transfer aliases. */
   repositoryKeys: string[];
   actor: GithubActor | null;
-  systemIssuer?: {
-    kind: "vetting-service";
-    keySha256: string;
-    assessmentId: string;
-    policyVersion: string;
-    rule: string;
-  };
+  systemIssuer?:
+    | {
+        kind: "vetting-service";
+        keySha256: string;
+        assessmentId: string;
+        policyVersion: string;
+        rule: string;
+      }
+    | {
+        /** Two distinct active contributor flags paused the project. */
+        kind: "contributor-flags";
+        threshold: number;
+        flagIds: string[];
+      };
   /** A steward or applicant may only file a reinstatement request (ELG-02). */
   actorRole: EnforcementActorRole;
   decisionSource: "admin-panel" | "owner-request" | "standing-rule";

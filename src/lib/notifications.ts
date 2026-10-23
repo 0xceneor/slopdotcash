@@ -158,10 +158,11 @@ export function notificationTitle(n: Notification): string {
 export function notificationAction(n: Notification): string {
   switch (n.kind) {
     case "project_banned":
+    case "project_quarantined":
+      // Moderators get the same event with an admin link (contributor flags).
       return n.actionPath === "/admin" ? "Open admin" : "Open project";
     case "application_approved":
     case "project_revision":
-    case "project_quarantined":
     case "reinstatement_requested":
     case "project_reinstated":
     case "reinstatement_denied":
