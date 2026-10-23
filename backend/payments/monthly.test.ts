@@ -1,0 +1,465 @@
+/** Real migrations and registry tables; GitHub authority is a controlled stub here (see scripts/owner-award-authority.test.ts). */
+
+import type { Database } from "bun:sqlite";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { monthlyBasesSql } from "../../scripts/prepare-monthly-rewards";
+import { escrowAwardOrigin } from "../../src/lib/payments/escrow-cycle";
+import { parseMonthlySchedule } from "../../src/lib/payments/monthly-allocation";
+import type { ProjectRecord } from "../../src/lib/project-contracts";
+import { sqliteD1 } from "../../tests/sqlite-d1";
+import { sha256Hex } from "../../workers/identity/crypto";
+import { runMonthlyCoordinator } from "../../workers/payments/index";
+import {
+  CloudflareProjectPersistence,
+  type ProjectD1Database,
+} from "../projects/cloudflare-persistence";
+import {
+  coordinateMonthlyPayments,
+  MonthlyPaymentError,
+  monthlyOwnerService,
+} from "./monthly";
+
+const deployment = {
+  network: "base-sepolia",
+  vault: "0x1000000000000000000000000000000000000001",
+  programId: null,
+  upgradeAuthority: null,
+  projectPda: null,
+  networkDomain: null,
+  asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
+  owner: "0x2000000000000000000000000000000000000002",
+  identityAuthority: "0x3000000000000000000000000000000000000003",
+  feeRecipient: "0x4000000000000000000000000000000000000004",
+  deploymentTransaction: `0x${"ab".repeat(32)}`,
+  sourceCommit: "0123456789abcdef0123456789abcdef01234567",
+  codeSha256: "ab".repeat(32),
+  bindingDelaySeconds: "60",
+  rotationDelaySeconds: null,
+  factory: "0x5000000000000000000000000000000000000005",
+  factoryCodeSha256: "cd".repeat(32),
+  registrar: "0x6000000000000000000000000000000000000006",
+};
+const OWNER = "900000071";
+const A = "101";
+const B = "202";
+const schedule = parseMonthlySchedule(
+  '{"firstPeriod":"2026-11","cutoffSecondsAfterPeriodEnd":3600}',
+);
+const beforeCutoff = new Date("2026-12-01T00:30:00.000Z");
+const afterCutoff = new Date("2026-12-01T01:00:00.000Z");
+
+let db: ProjectD1Database;
+let sqlite: Database;
+let project: ProjectRecord;
+let restricted = false;
+let clock = afterCutoff;
+
+beforeEach(async () => {
+  ({ db, sqlite } = sqliteD1(
+    readdirSync("migrations")
+      .filter((name) => name.endsWith(".sql"))
+      .sort(),
+  ));
+  const manifest = JSON.parse(
+    readFileSync("tests/fixtures/projects/eliza.json", "utf8"),
+  );
+  manifest.reward.feeBasisPoints = 200;
+  manifest.reward.chain = "base";
+  manifest.escrow = {
+    schemaVersion: "1",
+    effectiveCycle: "2026-11",
+    chain: "base",
+    feeBasisPoints: 200,
+    withdrawalFeeBasisPoints: 200,
+    feeMode: "deduct-from-gross",
+    deployments: [deployment],
+  };
+  const text = JSON.stringify(manifest);
+  const digest = await sha256Hex(text);
+  sqlite
+    .prepare(
+      "INSERT INTO project_revisions(project_id,revision,manifest,manifest_sha256,reason,created_at) VALUES(?,1,?,?,?,?)",
+    )
+    .run(manifest.id, text, digest, "Fixture", "2026-10-01T00:00:00.000Z");
+  sqlite
+    .prepare(
+      "INSERT INTO projects(id,status,revision,manifest,manifest_sha256,created_at,updated_at) VALUES(?,?,1,?,?,?,?)",
+    )
+    .run(
+      manifest.id,
+      manifest.status,
+      text,
+      digest,
+      "2026-10-01T00:00:00.000Z",
+      "2026-10-01T00:00:00.000Z",
+    );
+  const stored = await new CloudflareProjectPersistence(db).getProject(
+    manifest.id,
+  );
+  if (!stored) throw new Error("fixture project missing");
+  project = stored;
+  sqlite.exec(
+    monthlyBasesSql(
+      {
+        period: "2026-11",
+        skipped: [],
+        bases: [
+          {
+            projectId: project.id,
+            period: "2026-11",
+            manifest: text,
+            manifestSha256: digest,
+            sourceSnapshotSha256: "5".repeat(64),
+            capBase: "1000",
+            rows: [
+              {
+                githubUserId: A,
+                login: "first",
+                grossBase: "600",
+                sourceDigest: escrowAwardOrigin(project.id, "2026-11", A),
+              },
+              {
+                githubUserId: B,
+                login: "second",
+                grossBase: "400",
+                sourceDigest: escrowAwardOrigin(project.id, "2026-11", B),
+              },
+            ],
+          },
+        ],
+      },
+      "2026-12-01T00:11:00.000Z",
+    ),
+  );
+  restricted = false;
+  clock = afterCutoff;
+});
+afterEach(() => sqlite.close());
+
+const projects = () => ({
+  getProject: (id: string) =>
+    new CloudflareProjectPersistence(db).getProject(id),
+  restricted: async () => restricted,
+});
+const coordinate = (now: Date, configured = schedule) =>
+  coordinateMonthlyPayments({
+    db,
+    projects: projects(),
+    networks: ["base-sepolia"],
+    schedule: configured,
+    now,
+  });
+const owner = () =>
+  monthlyOwnerService({
+    db,
+    ...projects(),
+    networks: () => ["base-sepolia"],
+    verifyAuthority: async () => {},
+    schedule: () => schedule,
+    now: () => clock,
+  });
+const actor = { githubId: OWNER, githubLogin: "owner" };
+function vault(free: string, observedAt = afterCutoff.toISOString()) {
+  sqlite
+    .prepare(
+      "INSERT INTO vault_snapshots(project_id,network,chain,vault,asset_address,asset_decimals,total_deposited,total_paid,total_payout_fees,total_gross_withdrawn,total_withdrawal_fees,total_service_fees,free_balance,reserved_principal,reserved_fees,accrued_fees,reserved,block_number,block_time,observed_at) VALUES(?,?,?,?,?,6,'5000','0','0','0','0','0',?,'0','0','0','0','100',?,?) ON CONFLICT(project_id,network,vault) DO UPDATE SET free_balance=excluded.free_balance,observed_at=excluded.observed_at,block_number=CAST(CAST(block_number AS INTEGER)+1 AS TEXT)",
+    )
+    .run(
+      project.id,
+      "base-sepolia",
+      "base",
+      deployment.vault,
+      deployment.asset,
+      free,
+      observedAt,
+      observedAt,
+    );
+}
+const count = (table: string) =>
+  (sqlite.prepare(`SELECT COUNT(*) n FROM ${table}`).get() as { n: number }).n;
+async function rejects(promise: Promise<unknown>, code: string) {
+  const error = await promise.then(
+    () => null,
+    (reason: unknown) => reason,
+  );
+  expect(error).toBeInstanceOf(MonthlyPaymentError);
+  expect((error as MonthlyPaymentError).code).toBe(code);
+}
+
+describe("monthly coordinator", () => {
+  test("freezes the current private allocations once at the cutoff and creates each obligation once when funded", async () => {
+    clock = beforeCutoff;
+    const changed = await owner().changeAllocation(
+      project.id,
+      "2026-11",
+      actor,
+      {
+        githubUserId: B,
+        grossBase: "300",
+        expectedSequence: 0,
+      },
+    );
+    expect(changed.proposal?.allocations.map((row) => row.grossBase)).toEqual([
+      "600",
+      "300",
+    ]);
+    expect((await coordinate(beforeCutoff)).frozen).toEqual([]);
+    expect(count("monthly_payment_runs")).toBe(0);
+
+    const first = await coordinate(afterCutoff);
+    expect(first.frozen).toEqual([`${project.id}/2026-11`]);
+    // No finalized vault reading yet: nothing is created.
+    expect(first.waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "stale-funding" },
+    ]);
+    vault("899");
+    expect((await coordinate(afterCutoff)).waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "underfunded" },
+    ]);
+    expect(count("monthly_payment_obligations")).toBe(0);
+    vault("900");
+    expect((await coordinate(afterCutoff)).created).toEqual([
+      `${project.id}/2026-11`,
+    ]);
+    const again = await coordinate(afterCutoff);
+    expect([again.frozen, again.created, again.waiting]).toEqual([[], [], []]);
+    expect(
+      sqlite
+        .prepare(
+          "SELECT github_user_id,gross_base,fee_base,source_digest FROM monthly_payment_obligations ORDER BY github_user_id",
+        )
+        .all(),
+    ).toEqual([
+      {
+        github_user_id: A,
+        gross_base: "600",
+        fee_base: "12",
+        source_digest: escrowAwardOrigin(project.id, "2026-11", A),
+      },
+      {
+        github_user_id: B,
+        gross_base: "300",
+        fee_base: "6",
+        source_digest: escrowAwardOrigin(project.id, "2026-11", B),
+      },
+    ]);
+    // A finalized month accepts no change, through the service or directly.
+    await rejects(
+      owner().changeAllocation(project.id, "2026-11", actor, {
+        githubUserId: B,
+        grossBase: "1",
+        expectedSequence: 1,
+      }),
+      "month_frozen",
+    );
+    expect(() =>
+      sqlite
+        .prepare(
+          "INSERT INTO monthly_allocation_changes VALUES(?,?,2,?,'1',?,?)",
+        )
+        .run(project.id, "2026-11", B, OWNER, afterCutoff.toISOString()),
+    ).toThrow("monthly allocations frozen");
+    // The owner's late finalization reuses the automatic snapshot.
+    const view = await owner().finalize(project.id, "2026-11", actor, 1);
+    expect(view.run?.trigger).toBe("automatic");
+    expect(count("monthly_payment_runs")).toBe(1);
+    expect(view.run?.awards.map((award) => award.state)).toEqual([
+      "awaiting-reservation",
+      "awaiting-reservation",
+    ]);
+  });
+
+  test("without a defined cutoff nothing is frozen automatically, but the owner can finalize", async () => {
+    expect((await coordinate(afterCutoff, null)).frozen).toEqual([]);
+    expect(count("monthly_payment_runs")).toBe(0);
+    vault("1000");
+    const view = await owner().finalize(project.id, "2026-11", actor, 0);
+    expect(view.run).toMatchObject({ trigger: "owner", funded: true });
+    expect(count("monthly_payment_obligations")).toBe(2);
+    expect((await coordinate(afterCutoff, null)).created).toEqual([]);
+  });
+
+  test("an owner who turns the default off, a restricted project and an unserved vault are not distributed automatically", async () => {
+    expect(await owner().setAutomatic(project.id, actor, false)).toEqual({
+      automatic: false,
+    });
+    expect((await coordinate(afterCutoff)).waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "automatic-off" },
+    ]);
+    await owner().setAutomatic(project.id, actor, true);
+    restricted = true;
+    expect((await coordinate(afterCutoff)).waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "project-restricted" },
+    ]);
+    await rejects(
+      owner().finalize(project.id, "2026-11", actor, 0),
+      "project_restricted",
+    );
+    restricted = false;
+    const unserved = await coordinateMonthlyPayments({
+      db,
+      projects: projects(),
+      networks: ["solana-devnet"],
+      schedule,
+      now: afterCutoff,
+    });
+    expect(unserved.waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "vault-not-served" },
+    ]);
+    expect(count("monthly_payment_runs")).toBe(0);
+  });
+
+  test("an award reserved earlier needs no new funds and cannot be planned twice", async () => {
+    sqlite
+      .prepare(
+        "INSERT INTO payment_obligations(id,project_id,github_user_id,network,chain,vault,asset_address,asset_decimals,gross_base,fee_base,source_digest,state,created_at,paid_transaction) VALUES(?,?,?,?,?,?,?,6,'600','12',?,'reserved',?,NULL)",
+      )
+      .run(
+        `0x${"9".repeat(64)}`,
+        project.id,
+        A,
+        "base-sepolia",
+        "base",
+        deployment.vault,
+        deployment.asset,
+        escrowAwardOrigin(project.id, "2026-11", A),
+        afterCutoff.toISOString(),
+      );
+    await coordinate(afterCutoff);
+    vault("400");
+    expect((await coordinate(afterCutoff)).created).toEqual([
+      `${project.id}/2026-11`,
+    ]);
+    const view = await owner().view(project.id, "2026-11", actor);
+    expect(view.run?.awards.map((award) => [award.login, award.state])).toEqual(
+      [
+        ["first", "reserved"],
+        ["second", "awaiting-reservation"],
+      ],
+    );
+    const expected = {
+      network: "base-sepolia",
+      manifestSha256: project.manifestSha256,
+      snapshotSha256: view.run?.snapshotSha256 ?? "",
+    };
+    await rejects(
+      owner().commitment(project.id, "2026-11", actor, {
+        ...expected,
+        githubUserId: A,
+      }),
+      "award_reserved",
+    );
+    const plan = await owner().commitment(project.id, "2026-11", actor, {
+      ...expected,
+      githubUserId: B,
+    });
+    expect(plan).toMatchObject({
+      schemaVersion: "2",
+      cycleId: "2026-11",
+      deployment: { vault: deployment.vault },
+      award: {
+        githubUserId: B,
+        sourceDigest: escrowAwardOrigin(project.id, "2026-11", B),
+        gross: "400",
+        fee: "8",
+        net: "392",
+      },
+    });
+    await rejects(
+      owner().commitment(project.id, "2026-11", actor, {
+        ...expected,
+        githubUserId: B,
+        snapshotSha256: "0".repeat(64),
+      }),
+      "snapshot_changed",
+    );
+  });
+
+  test("an underfunded month has no obligation to reserve, and earlier unreserved obligations hold their funds", async () => {
+    await coordinate(afterCutoff);
+    vault("999");
+    await coordinate(afterCutoff);
+    const view = await owner().view(project.id, "2026-11", actor);
+    expect(view.run?.funded).toBe(false);
+    expect(view.run?.awards.map((award) => award.state)).toEqual([
+      "underfunded",
+      "underfunded",
+    ]);
+    await rejects(
+      owner().commitment(project.id, "2026-11", actor, {
+        network: "base-sepolia",
+        manifestSha256: project.manifestSha256,
+        snapshotSha256: view.run?.snapshotSha256 ?? "",
+        githubUserId: A,
+      }),
+      "award_unfunded",
+    );
+    // A stale vault reading never funds a month.
+    vault("5000", "2026-11-30T00:00:00.000Z");
+    expect((await coordinate(afterCutoff)).waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "stale-funding" },
+    ]);
+  });
+
+  test("private changes stay within the cap, never pay their author and are serialized", async () => {
+    const service = owner();
+    await rejects(
+      service.changeAllocation(project.id, "2026-11", actor, {
+        githubUserId: B,
+        grossBase: "401",
+        expectedSequence: 0,
+      }),
+      "invalid_allocation",
+    );
+    const self = await service
+      .changeAllocation(
+        project.id,
+        "2026-11",
+        { githubId: A, githubLogin: "first" },
+        { githubUserId: A, grossBase: "700", expectedSequence: 0 },
+      )
+      .catch((error: MonthlyPaymentError) => error);
+    expect(self).toMatchObject({ status: 403, code: "invalid_allocation" });
+    await service.changeAllocation(project.id, "2026-11", actor, {
+      githubUserId: B,
+      grossBase: "100",
+      expectedSequence: 0,
+    });
+    await rejects(
+      service.changeAllocation(project.id, "2026-11", actor, {
+        githubUserId: A,
+        grossBase: "100",
+        expectedSequence: 0,
+      }),
+      "allocations_changed",
+    );
+    await rejects(
+      service.finalize(project.id, "2026-11", actor, 0),
+      "allocations_changed",
+    );
+    // The view shows current amounts, never who changed them or when.
+    const view = await service.view(project.id, "2026-11", actor);
+    expect(JSON.stringify(view)).not.toContain(OWNER);
+    expect(view.proposal?.allocations.map((row) => row.grossBase)).toEqual([
+      "600",
+      "100",
+    ]);
+  });
+
+  test("an open month cannot be finalized", async () => {
+    clock = new Date("2026-11-30T23:00:00.000Z");
+    await rejects(
+      owner().finalize(project.id, "2026-11", actor, 0),
+      "month_open",
+    );
+  });
+
+  test("private bounty programs never run the monthly coordinator", async () => {
+    expect(
+      await runMonthlyCoordinator({
+        PAYMENT_SCOPE: "security-bounty",
+      } as never),
+    ).toBeNull();
+  });
+});

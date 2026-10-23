@@ -287,7 +287,7 @@ function useRoute(): Route {
 
 const PRIVATE_PAGE_TITLES = new Map<Route["kind"], string>([
   ["admin", "Admin"],
-  ["owner-awards", "Review awards"],
+  ["owner-awards", "Monthly awards"],
   ["account", "Account"],
   ["login", "Log in"],
   ["earnings", "Your payouts"],
@@ -1117,7 +1117,7 @@ function ProjectPaymentHistory({
           Draft a project update
         </Link>
         {project.escrow && (
-          <Link href={`/projects/${project.slug}/awards`}>Review awards</Link>
+          <Link href={`/projects/${project.slug}/awards`}>Monthly awards</Link>
         )}
       </div>
       {directState.status === "error" && !externalPrize ? (
@@ -1575,17 +1575,17 @@ function HowItWorksPage() {
               </p>
             </li>
             <li>
-              <strong>3. Review awards</strong>
+              <strong>3. Adjust awards</strong>
               <p>
-                Check each monthly proposal within the funded cap. Record
-                changes and holds with public reasons.
+                Change any proposed amount privately within the cap before the
+                monthly cutoff, or leave it to the automatic default.
               </p>
             </li>
             <li>
               <strong>4. Send payment</strong>
               <p>
-                Commit approved awards to the project escrow. Approval alone
-                does not prove payment.
+                Reserve the final awards in the project escrow. A reservation
+                alone does not prove payment.
               </p>
             </li>
           </ol>
@@ -1722,10 +1722,11 @@ function HowItWorksPage() {
             funding is committed.
           </p>
           <p>
-            Monthly proposals have a 14-day public review. A funded award can
-            wait for a wallet; confirming one later does not require another
-            monthly cycle. Historical records keep their recorded fee and
-            authority rules.
+            The owner may change proposed amounts privately before the monthly
+            cutoff; current allocations are then distributed automatically
+            unless the owner turned that off. A funded award can wait for a
+            wallet; confirming one later does not require another monthly cycle.
+            Historical records keep their recorded fee and authority rules.
           </p>
         </details>
       </section>
@@ -1857,12 +1858,12 @@ function HowItWorksPage() {
           </p>
         </details>
         <details>
-          <summary>What is the 14-day review?</summary>
+          <summary>Who decides the monthly amounts?</summary>
           <p>
-            It reviews the monthly allocation, not your code. After the freeze
-            the proposal is public for 14 days, and the maintainer may approve,
-            hold, exclude, reduce, or increase rows, each with a public reason.
-            It is separate from pull request reviews on GitHub.
+            The project owner. After a month closes, the owner may change
+            proposed amounts privately until the monthly cutoff. Slop publishes
+            the final awards and their payment evidence, not the changes. This
+            is separate from pull request reviews on GitHub.
           </p>
         </details>
       </section>
@@ -2290,11 +2291,11 @@ function SponsorsPage({
           <li>
             <strong>03 · You decide and sign</strong>
             <p>
-              Maintainers review proposed awards within the cap and record
-              changes with a public reason. The project owner commits approved
-              awards to the project escrow, which pays them from reserved funds.
-              Slop marks an award paid only when finalized on-chain evidence
-              reconciles the award and the fee.
+              The project owner may change proposed awards privately within the
+              cap until the monthly cutoff, when the current allocations are
+              finalized. The owner reserves them in the project escrow, which
+              pays them from reserved funds. Slop marks an award paid only when
+              finalized on-chain evidence reconciles the award and the fee.
             </p>
           </li>
         </ol>
@@ -2304,8 +2305,9 @@ function SponsorsPage({
             <ul>
               <li>The monthly cap, with exact-cycle overrides.</li>
               <li>
-                Maintainers may adjust proposed awards within the cap, with a
-                public reason. Amount changes restart the 14-day review.
+                Proposed awards may change privately within the cap before the
+                monthly cutoff. Automatic monthly payment is on by default and
+                can be turned off.
               </li>
               <li>
                 Whether to add a named review budget as a second cash line.

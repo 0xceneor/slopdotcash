@@ -1,4 +1,13 @@
-# Review and owner commitment gate
+# Historical review and owner commitment gate
+
+This gate no longer applies to new awards. Monthly awards now use private
+allocations, owner finalization or the automatic cutoff, and a frozen
+execution snapshot (see "Monthly allocations and the automatic monthly
+coordinator" in `README.md`). No public decision file, public adjustment
+reason or 14-day review period gates a commitment, and the commitment planner
+that enforced this gate was removed. `cycles:check` still validates any
+historical `escrow-v2` record against the rules below, which were in force
+when such a record was made.
 
 The v2 proposal is not an approval. After a complete source-bound proposal is
 published, maintainers add `decisions.json` in the same `escrow-v2` directory.
@@ -28,8 +37,8 @@ amounts cannot exceed the proposal's gross cap in total. The project steward
 must be marked related-party; maintainers must also identify other actual
 related parties. An actor cannot disappear from the reviewed decisions.
 
-Before emitting unsigned owner transactions, `prepare-escrow-commitments.ts`
-checks exact archive bytes on this application's canonical GitHub origin and
+Before emitting unsigned owner transactions, the former commitment planner
+checked exact archive bytes on this application's canonical GitHub origin and
 `main`. It verifies the merged PR which published each file and uses GitHub's
 `merged_at` timestamp for the review clock. The last publication among the
 snapshot, identities, archived project policy, proposal, and financial decisions

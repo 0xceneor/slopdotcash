@@ -1,0 +1,147 @@
+import { expect, test } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { escrowAwardOrigin } from "../src/lib/payments/escrow-cycle";
+import { sqliteD1 } from "../tests/sqlite-d1";
+import {
+  buildMonthlyBase,
+  hasMonthlyAllocation,
+  monthlyBasesSql,
+} from "./prepare-monthly-rewards";
+
+const snapshotBytes = readFileSync(
+  "tests/fixtures/history/cycles/eliza/2026-09/source-snapshot.json",
+);
+function fundedProject() {
+  const project = JSON.parse(
+    readFileSync("tests/fixtures/projects/eliza.json", "utf8"),
+  );
+  project.reward.feeBasisPoints = 200;
+  project.escrow = {
+    schemaVersion: "1",
+    effectiveCycle: "2026-09",
+    chain: "solana",
+    feeBasisPoints: 200,
+    withdrawalFeeBasisPoints: 200,
+    feeMode: "deduct-from-gross",
+    deployments: [],
+  };
+  return project;
+}
+
+test("a closed month's proposal pays the whole cap by largest remainder to numeric actors with fixed source digests", () => {
+  const project = fundedProject();
+  const policyBytes = Buffer.from(JSON.stringify(project));
+  const base = buildMonthlyBase(
+    {
+      projectId: "eliza",
+      period: "2026-09",
+      generatedAt: "2026-10-01T00:00:00.000Z",
+    },
+    snapshotBytes,
+    policyBytes,
+    project,
+  );
+  expect(base.rows).toHaveLength(41);
+  expect(base.rows.reduce((sum, row) => sum + BigInt(row.grossBase), 0n)).toBe(
+    BigInt(base.capBase),
+  );
+  for (const row of base.rows) {
+    expect(row.githubUserId).toMatch(/^[1-9][0-9]*$/);
+    // The digest names the project month and actor, never the amount, so a
+    // changed allocation cannot be reserved a second time.
+    expect(row.sourceDigest).toBe(
+      escrowAwardOrigin("eliza", "2026-09", row.githubUserId),
+    );
+  }
+  // An open month has no complete evidence to propose from.
+  expect(() =>
+    buildMonthlyBase(
+      {
+        projectId: "eliza",
+        period: "2026-09",
+        generatedAt: "2026-09-30T23:59:59.999Z",
+      },
+      snapshotBytes,
+      policyBytes,
+      project,
+    ),
+  ).toThrow();
+});
+
+test("unfunded, paused and not-yet-effective projects get no monthly proposal", () => {
+  const project = fundedProject();
+  expect(hasMonthlyAllocation(project, "2026-09")).toBe(true);
+  expect(hasMonthlyAllocation(project, "2026-08")).toBe(false);
+  expect(
+    hasMonthlyAllocation({ ...project, status: "paused" }, "2026-09"),
+  ).toBe(false);
+  expect(
+    hasMonthlyAllocation({ ...project, escrow: undefined }, "2026-09"),
+  ).toBe(false);
+});
+
+test("a month's proposal is stored once; a later ledger never adds or replaces rows", async () => {
+  const { db, sqlite } = sqliteD1(
+    readdirSync("migrations")
+      .filter((name) => name.endsWith(".sql"))
+      .sort(),
+  );
+  try {
+    const project = fundedProject();
+    const policyBytes = Buffer.from(JSON.stringify(project));
+    const base = buildMonthlyBase(
+      {
+        projectId: "eliza",
+        period: "2026-09",
+        generatedAt: "2026-10-01T00:00:00.000Z",
+      },
+      snapshotBytes,
+      policyBytes,
+      project,
+    );
+    const result = {
+      period: "2026-09",
+      skipped: [],
+      bases: [{ ...base, manifest: policyBytes.toString() }],
+    };
+    const sql = monthlyBasesSql(result, "2026-10-01T00:11:00.000Z");
+    sqlite.exec(sql);
+    sqlite.exec(sql);
+    const later = {
+      ...result,
+      bases: [
+        {
+          ...result.bases[0],
+          sourceSnapshotSha256: "f".repeat(64),
+          rows: [
+            ...base.rows.map((row) => ({ ...row, grossBase: "1" })),
+            {
+              githubUserId: "999999999",
+              login: "late-actor",
+              grossBase: "5",
+              sourceDigest: "e".repeat(64),
+            },
+          ],
+        },
+      ],
+    };
+    sqlite.exec(monthlyBasesSql(later, "2026-10-02T00:11:00.000Z"));
+    const stored = await db
+      .prepare(
+        "SELECT b.source_snapshot_sha256 digest,b.recipient_count count,(SELECT COUNT(*) FROM monthly_reward_base_rows) rows,(SELECT SUM(CAST(gross_base AS INTEGER)) FROM monthly_reward_base_rows) total FROM monthly_reward_bases b",
+      )
+      .first<{ digest: string; count: number; rows: number; total: number }>();
+    expect(stored).toEqual({
+      digest: base.sourceSnapshotSha256,
+      count: 41,
+      rows: 41,
+      total: Number(base.capBase),
+    });
+    expect(() => sqlite.exec("DELETE FROM monthly_reward_base_rows")).toThrow(
+      "monthly base permanent",
+    );
+    expect(monthlyBasesSql({ ...result, bases: [] }, "x")).toBe("");
+  } finally {
+    sqlite.close();
+  }
+});

@@ -10,7 +10,7 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-test("organization maintainers reach published award lookup through their own session; other actors and transferred repositories do not", async () => {
+test("organization maintainers reach private monthly awards through their own session; other actors and transferred repositories do not", async () => {
   const { db, sqlite } = sqliteD1(
     readdirSync("migrations")
       .filter((name) => name.endsWith(".sql"))
@@ -93,7 +93,7 @@ test("organization maintainers reach published award lookup through their own se
     const request = (signedIn = true) =>
       onRequest({
         request: new Request(
-          `https://slop.cash/api/v1/payments/projects/${project.id}/awards/2026-11`,
+          `https://slop.cash/api/v1/payments/projects/${project.id}/monthly/2026-11`,
           {
             headers: signedIn ? { cookie: `__Host-slop_points=${token}` } : {},
           },
@@ -103,17 +103,26 @@ test("organization maintainers reach published award lookup through their own se
     expect((await request(false)).status).toBe(401);
     expect(requests).toEqual([]);
     const authorized = await request();
-    expect(authorized.status).toBe(404);
+    expect(authorized.status).toBe(200);
+    // No proposal exists yet; authority was checked on GitHub, not inferred
+    // from the stored steward.
     expect(await authorized.json()).toMatchObject({
-      message: "The published cycle record is not available.",
+      projectId: project.id,
+      period: "2026-11",
+      automatic: true,
+      proposal: null,
+      run: null,
     });
-    expect(requests.some((path) => path.endsWith("/commits/main"))).toBe(true);
-    // An active vault project (legacy paymentMode is always "disabled") reaches
-    // the same published-review checks before any commitment plan.
+    expect(requests).toEqual([
+      `/repos/${project.repositories[0].id}`,
+      `/repos/${project.repositories[0].id}/collaborators/human-maintainer/permission`,
+    ]);
+    // An active vault project (legacy paymentMode is always "disabled")
+    // reaches the same authority checks before any reservation plan.
     requests.length = 0;
     const commitment = await onRequest({
       request: new Request(
-        `https://slop.cash/api/v1/payments/projects/${project.id}/awards/2026-11/commitment`,
+        `https://slop.cash/api/v1/payments/projects/${project.id}/monthly/2026-11/commitment`,
         {
           method: "POST",
           headers: {
@@ -124,8 +133,7 @@ test("organization maintainers reach published award lookup through their own se
           body: JSON.stringify({
             network: "base-mainnet",
             githubUserId: "123",
-            proposalSha256: "d".repeat(64),
-            decisionsSha256: "e".repeat(64),
+            snapshotSha256: "d".repeat(64),
             manifestSha256: "c".repeat(64),
           }),
         },
@@ -133,11 +141,11 @@ test("organization maintainers reach published award lookup through their own se
       env: { SLOP_DB: db, PAYMENT_NETWORKS: '["base-mainnet"]' } as never,
     });
     expect(project.reward.paymentMode).toBe("disabled");
-    expect(commitment.status).toBe(404);
+    expect(commitment.status).toBe(409);
     expect(await commitment.json()).toMatchObject({
-      message: "The published cycle record is not available.",
+      error: "project_changed",
     });
-    expect(requests.some((path) => path.endsWith("/commits/main"))).toBe(true);
+    expect(requests).toHaveLength(2);
     for (const failure of [
       "read-only",
       "different-human",
@@ -153,9 +161,8 @@ test("organization maintainers reach published award lookup through their own se
       expect((await request()).status).toBe(
         failure === "transferred-owner" ? 409 : 403,
       );
-      expect(requests.some((path) => path.endsWith("/commits/main"))).toBe(
-        false,
-      );
+      // A failed authority check stops before any further GitHub read.
+      expect(requests.length).toBeLessThanOrEqual(2);
     }
   } finally {
     sqlite.close();
