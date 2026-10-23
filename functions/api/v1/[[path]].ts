@@ -43,6 +43,11 @@ import {
   githubAdvisoryClient,
   githubInstallationCheck,
 } from "../../../backend/security/github-advisories";
+import { githubAdvisoryReader } from "../../../backend/security/advisories";
+import {
+  analysisProfileFromEnv,
+  providerSecurityAnalyzer,
+} from "../../../backend/security/analysis";
 import { handleSecurityApi } from "../../../backend/security/handler";
 import {
   githubIntakeOAuth,
@@ -136,6 +141,19 @@ type Env = {
   SLOP_INTAKE_GRANT_KEY?: string;
   /** Local browser tests only: a loopback GitHub OAuth fixture origin. */
   SLOP_GITHUB_OAUTH_ORIGIN?: string;
+  /**
+   * Read-only token with the "Repository security advisories" read permission
+   * on security program repositories. It verifies private report receipts.
+   * Unset keeps receipt checks unavailable; nothing is verified by hand.
+   */
+  SECURITY_ADVISORY_READ_TOKEN?: string;
+  /**
+   * The operator's private case-analysis provider: JSON
+   * {"transport","model","maxOutputTokens"} and its key. Unset records every
+   * analysis as unavailable.
+   */
+  SECURITY_ANALYSIS_PROFILE?: string;
+  SECURITY_ANALYSIS_API_KEY?: string;
   /** Admin email Worker; absent where no notifier is deployed. */
   SLOP_NOTIFY?: { fetch(request: Request): Promise<Response> };
   SLOPBOT_VALUE_IMPORT?: HistoricalValueBinding;
@@ -616,6 +634,22 @@ export async function onRequest(context: PagesContext): Promise<Response> {
       token: context.env.SLOP_GITHUB_READ_TOKEN,
       apiOrigin: githubApiOrigin(context.env.SLOP_GITHUB_API_ORIGIN),
     },
+    advisories: context.env.SECURITY_ADVISORY_READ_TOKEN
+      ? githubAdvisoryReader({
+          fetch: (url, init) => fetch(url, init),
+          apiOrigin: githubApiOrigin(context.env.SLOP_GITHUB_API_ORIGIN),
+          token: context.env.SECURITY_ADVISORY_READ_TOKEN,
+        })
+      : null,
+    analyzer: (() => {
+      const profile = analysisProfileFromEnv(
+        context.env.SECURITY_ANALYSIS_PROFILE,
+        context.env.SECURITY_ANALYSIS_API_KEY,
+      );
+      return profile
+        ? providerSecurityAnalyzer(profile, (url, init) => fetch(url, init))
+        : null;
+    })(),
     cache: edgeCache(),
     waitUntil: context.waitUntil?.bind(context),
     intake: privateIntake(context.env),

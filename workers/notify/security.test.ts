@@ -68,18 +68,48 @@ async function setup(beforeMailMigration = false) {
         now: () => current,
         randomId: () => `noticecase${++sequence}`,
         sessionActor: async () => actor,
-        github: { fetch, apiOrigin: "https://github.invalid" },
+        github: {
+          fetch: async () => Response.json({ enabled: true }),
+          apiOrigin: "https://github.invalid",
+        },
+        // GitHub holds the reporter's private report; Slop verifies it.
+        advisories: {
+          privateReports: async () => ({
+            state: "ok" as const,
+            reports: [
+              {
+                ghsa: "GHSA-7c8f-9g2h-3j4m",
+                createdAt: at,
+                state: "triage",
+                author: reporter,
+                summary: "Synthetic report",
+                description: "Synthetic report body",
+                severity: null,
+                cweIds: [],
+                packages: [],
+              },
+            ],
+          }),
+          privateReport: async () => ({ state: "unavailable" as const }),
+        },
       },
     );
-  const claim = await call(reporter, "security-cases", {
-    mode: "claim",
+  const started = await call(reporter, "security-submissions", {
     projectId: "bounty",
-    advisory: "GHSA-7c8f-9g2h-3j4m",
-    idempotencyKey: "security-mail-claim-1",
   });
-  expect(claim?.status).toBe(201);
-  if (claim === null) throw new Error("Case route missing");
-  const caseId = ((await claim.json()) as { case: { id: string } }).case.id;
+  expect(started?.status).toBe(201);
+  if (started === null) throw new Error("Submission route missing");
+  const submissionId = (
+    (await started.json()) as { submission: { id: string } }
+  ).submission.id;
+  const checked = await call(
+    reporter,
+    `security-submissions/${submissionId}/check`,
+    {},
+  );
+  if (checked === null) throw new Error("Submission check route missing");
+  const caseId = ((await checked.json()) as { submission: { caseId: string } })
+    .submission.caseId;
   const recipients = Object.fromEntries(
     [
       [owner, backup],
@@ -273,7 +303,7 @@ test("role revocation suppresses queued mail; missing verified destinations exha
     h.sqlite
       .query("SELECT submission_state FROM security_cases WHERE id = ?")
       .get(h.caseId),
-  ).toEqual({ submission_state: "claimed" });
+  ).toEqual({ submission_state: "verified" });
   h.sqlite.close();
 });
 
