@@ -331,13 +331,14 @@ function githubIdSet(value: string | undefined): Set<string> {
 async function slopbotRepositoryAccess(
   slopbot: Env["SLOPBOT"],
   repository: { path: string; githubId: string },
-  actor: { githubLogin: string },
+  actor: { githubId: string; githubLogin: string },
 ) {
   if (slopbot === undefined) throw new Error("Slopbot is not connected");
   const url = new URL("https://slopbot.internal/v1/repository-access");
   url.searchParams.set("repository", repository.path);
   url.searchParams.set("repositoryId", repository.githubId);
   url.searchParams.set("login", actor.githubLogin);
+  url.searchParams.set("githubId", actor.githubId);
   const response = await slopbot.fetch(
     new Request(url, { headers: { accept: "application/json" } }),
   );

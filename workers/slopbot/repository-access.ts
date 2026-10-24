@@ -18,7 +18,13 @@ type AccessEnv = { SLOPBOT_APP_ID: string; SLOPBOT_APP_PRIVATE_KEY: string };
 /** Reads installation and permission from GitHub; throws when unavailable. */
 export async function readRepositoryAccess(
   env: AccessEnv,
-  query: { owner: string; repo: string; repositoryId: string; login: string },
+  query: {
+    owner: string;
+    repo: string;
+    repositoryId: string;
+    login: string;
+    githubId: string;
+  },
   fetcher: typeof fetch = fetch,
 ): Promise<RepositoryAccess> {
   const jwt = await appJwt(env.SLOPBOT_APP_ID, env.SLOPBOT_APP_PRIVATE_KEY);
@@ -84,7 +90,12 @@ export async function readRepositoryAccess(
       : ((await answer.json()) as {
           permission?: unknown;
           role_name?: unknown;
+          user?: { id?: unknown };
         });
+  // A session can retain a login after GitHub renames or reuses it.
+  // Only the permanent account ID can bind this permission to that session.
+  if (permission !== null && String(permission.user?.id) !== query.githubId)
+    throw new Error("GitHub account identity does not match");
   // GitHub maps maintain to write; custom role names are not access levels.
   const level =
     permission === null
@@ -117,9 +128,11 @@ export async function handleRepositoryAccess(
   const match = REPOSITORY.exec(url.searchParams.get("repository") ?? "");
   const repositoryId = url.searchParams.get("repositoryId") ?? "";
   const login = url.searchParams.get("login") ?? "";
+  const githubId = url.searchParams.get("githubId") ?? "";
   if (
     match === null ||
     !/^[1-9][0-9]{0,19}$/u.test(repositoryId) ||
+    !/^[1-9][0-9]{0,19}$/u.test(githubId) ||
     !LOGIN.test(login)
   )
     return Response.json(
@@ -130,7 +143,7 @@ export async function handleRepositoryAccess(
     return Response.json(
       await readRepositoryAccess(
         env,
-        { owner: match[1], repo: match[2], repositoryId, login },
+        { owner: match[1], repo: match[2], repositoryId, login, githubId },
         fetcher,
       ),
       { headers: { "cache-control": "no-store" } },

@@ -45,6 +45,7 @@ async function read(fetcher: typeof fetch, query: Record<string, string> = {}) {
     repository: "example/open-registry",
     repositoryId: "123456789",
     login: "owner",
+    githubId: "900000003",
     ...query,
   }))
     url.searchParams.set(name, value);
@@ -61,6 +62,7 @@ test("reports the installation and the account's base permission", async () => {
         [`${API}/collaborators/owner/permission`]: Response.json({
           permission: "write",
           role_name: "maintain",
+          user: { id: 900000003 },
         }),
       },
       calls,
@@ -126,4 +128,18 @@ test("GitHub failures and malformed queries fail closed", async () => {
     { repositoryId: "0" },
   ])
     expect((await read(github(installed), query)).status).toBe(400);
+});
+
+test("a reused username cannot inherit another account's repository authority", async () => {
+  const response = await read(
+    github({
+      ...installed,
+      [`${API}/collaborators/owner/permission`]: Response.json({
+        permission: "admin",
+        role_name: "admin",
+        user: { id: 999 },
+      }),
+    }),
+  );
+  expect(response).toEqual({ status: 503, body: { error: "unavailable" } });
 });
