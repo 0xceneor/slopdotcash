@@ -1,0 +1,38 @@
+name = "slop-staging-vetting-backup"
+main = "index.ts"
+compatibility_date = "2026-07-30"
+workers_dev = false
+preview_urls = false
+
+[vars]
+EVIDENCE_BACKUP_MODE = "off"
+
+[triggers]
+crons = ["17 2 * * *"]
+
+[[r2_buckets]]
+binding = "EVIDENCE_SOURCE"
+bucket_name = "slop-staging-vetting-evidence"
+
+[[r2_buckets]]
+binding = "EVIDENCE_BACKUPS"
+bucket_name = "slop-staging-vetting-evidence-backups"
+
+[[queues.producers]]
+binding = "EVIDENCE_BACKUP_QUEUE"
+queue = "slop-staging-vetting-backup"
+
+[[queues.consumers]]
+queue = "slop-staging-vetting-backup"
+max_batch_size = 1
+max_batch_timeout = 0
+max_retries = 5
+retry_delay = 60
+dead_letter_queue = "slop-staging-vetting-backup-failed"
+max_concurrency = 1
+
+[observability]
+enabled = true
+
+[observability.logs]
+invocation_logs = false
