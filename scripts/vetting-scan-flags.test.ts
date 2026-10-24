@@ -115,7 +115,7 @@ function projectApi(request: Request) {
     now: () => clock,
     randomId,
     sessionActor: async (value) => actorOf(value),
-    notifyAdmins: async () => true,
+    repositoryAccess: async () => ({ installation: "missing" }),
     repositoryControl: async () => ({ state: "proven", reason: "fixture" }),
     readTokenMetadata: async () => {
       throw new Error("no token reads in this suite");
@@ -189,21 +189,11 @@ async function signed(method: string, path: string, body = "") {
 
 async function listPausedProject() {
   const submitted = await projectApi(
-    sessionRequest("POST", "project-applications", "applicant", {
+    sessionRequest("POST", "projects", "applicant", {
       manifest: applicationManifest("open-registry", "example/open-registry"),
     }),
   );
   expect(submitted.status).toBe(201);
-  const { application } = await submitted.json();
-  const approved = await projectApi(
-    sessionRequest(
-      "POST",
-      `admin/project-applications/${application.id}/approve`,
-      "admin",
-      {},
-    ),
-  );
-  expect(approved.status).toBe(200);
 }
 
 /** The signed scanner service asks Slop to queue what changed. */

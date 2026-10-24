@@ -1500,19 +1500,16 @@ test("two contributors flag through the form, pause the project and notify moder
   const firstErrors = observe(first);
   await signIn(first, APPLICANT_TOKEN);
   await draftApplication(first, project);
-  await first.getByRole("button", { name: /Submit for review/u }).click();
+  await first
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
   await expect(
-    first.getByRole("status").filter({ hasText: "Application submitted" }),
+    first.getByRole("heading", { name: "Project created" }),
   ).toBeVisible();
 
   const adminContext = await browser.newContext(walkthroughOptions());
   const admin = await adminContext.newPage();
   await signIn(admin, ADMIN_TOKEN);
-  await admin.goto("/admin", { waitUntil: "networkidle" });
-  await admin
-    .locator(".admin-card", { hasText: project.repository })
-    .getByRole("button", { name: "Approve as paused project" })
-    .click();
   await expect
     .poll(async () => (await listedProject(admin, project.id))?.status)
     .toBe("paused");
