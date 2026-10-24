@@ -1433,7 +1433,7 @@ test("owner funds a separate bounty vault with private balances and no monthly r
   const zeroReward = {
     ...project.reward,
     monthlyCapMinor: "0",
-    monthlyCapDisplay: "$0",
+    monthlyCapDisplay: "0 TEST",
     committedMinor: "0",
     paymentMode: "disabled",
   };
@@ -1443,6 +1443,7 @@ test("owner funds a separate bounty vault with private balances and no monthly r
   const target = applicationManifest(id, repository, {
     reward: zeroReward,
     rewardAsset: project.rewardAsset,
+    escrow: { ...project.escrow, deployments: [] },
     securityBounty: {
       version: "1",
       status: "paused",
@@ -1633,7 +1634,7 @@ test("owner funds a separate bounty vault with private balances and no monthly r
     const state = await (await page.request.get(`${origin}/__fixture`)).json();
     const created =
       state.project.manifest.securityBounty.settlement.deployments[0];
-    expect(state.project.manifest.escrow).toBeUndefined();
+    expect(state.project.manifest.escrow.deployments).toEqual([]);
     expect(
       state.project.manifest.securityBounty.settlement.feeBasisPoints,
     ).toBe(2500);
