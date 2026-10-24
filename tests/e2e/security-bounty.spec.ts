@@ -504,7 +504,10 @@ test("private security bounty programs keep cases restricted from intake to awar
   await expect.poll(() => Date.now() > Date.parse(afterOpen) + 5).toBe(true);
 
   await test.step("public terms and amounts", async () => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: test.info().project.use.viewport,
+      recordVideo: { dir: test.info().outputPath("workflow-video") },
+    });
     const page = await context.newPage();
     const errors = observe(page);
     await page.goto(`/projects/${a.id}/security`, { waitUntil: "networkidle" });
@@ -543,7 +546,10 @@ test("private security bounty programs keep cases restricted from intake to awar
 
   await test.step("intake readiness gates the GitHub handoff", async () => {
     await setIntake(request, b.repository, "disabled");
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: test.info().project.use.viewport,
+      recordVideo: { dir: test.info().outputPath("workflow-video") },
+    });
     const page = await context.newPage();
     const errors = observe(page);
     await page.clock.install();
@@ -985,7 +991,10 @@ test("private security bounty programs keep cases restricted from intake to awar
     });
 
     // The dispute reviewer approves in the real UI.
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: test.info().project.use.viewport,
+      recordVideo: { dir: test.info().outputPath("workflow-video") },
+    });
     const page = await context.newPage();
     const errors = observe(page);
     await signIn(page, TOKENS.dispute);
@@ -1375,7 +1384,10 @@ test("private security bounty programs keep cases restricted from intake to awar
   });
 
   await test.step("the reporter sees the case in the inbox UI", async () => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: test.info().project.use.viewport,
+      recordVideo: { dir: test.info().outputPath("workflow-video") },
+    });
     const page = await context.newPage();
     const errors = observe(page);
     await signIn(page, TOKENS["reporter-a"]);
@@ -1748,7 +1760,10 @@ test("automatic private intake files as the reporter and verifies receipt @regis
   });
 
   await test.step("the program page offers the private form with consent", async () => {
-    const context = await browser.newContext();
+    const context = await browser.newContext({
+      viewport: test.info().project.use.viewport,
+      recordVideo: { dir: test.info().outputPath("workflow-video") },
+    });
     const page = await context.newPage();
     const errors = observe(page);
     await signIn(page, TOKENS["reporter-a"]);
