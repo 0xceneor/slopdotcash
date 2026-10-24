@@ -4,6 +4,12 @@ import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { mnemonicToAccount } from "viem/accounts";
+import {
+  type JournalStore,
+  submitEvmMonthly,
+} from "../../workers/payment-executor/core";
+import type { MonthlyAuthorization } from "../../workers/payment-executor/monthly";
 import {
   type BindingInput,
   buildBindCalldata,
@@ -808,9 +814,95 @@ try {
     },
   ]);
   await rpc("anvil_mine", ["0x1"]);
-  const monthlyTx = await rpc("eth_sendTransaction", [
-    { from: donor, to: vault, gas: "0x7a1200", data: monthly },
-  ]);
+  const records = new Map<string, unknown>();
+  const monthlyJournal: JournalStore = {
+    async get<T>(key: string) {
+      return records.get(key) as T | undefined;
+    },
+    async put<T>(key: string, value: T) {
+      records.set(key, structuredClone(value));
+    },
+    async transaction<T>(fn: (store: JournalStore) => Promise<T>) {
+      return fn(monthlyJournal);
+    },
+  };
+  const gasAccount = mnemonicToAccount(
+    "test test test test test test test test test test test junk",
+    { addressIndex: 4 },
+  );
+  const monthlyEnv = {
+    PAYMENTS_DB: {
+      prepare() {
+        throw new Error("Monthly execution must not read wallet consents");
+      },
+      async batch() {
+        throw new Error("Unexpected database mutation");
+      },
+    },
+    PAYMENT_DEPLOYMENTS: JSON.stringify([
+      {
+        ...config,
+        chain: "base",
+        chainId: "31337",
+        network: "anvil",
+        projectId,
+        gasCeiling: "8000000",
+      },
+    ]),
+    PAYMENT_RPC_URLS: JSON.stringify({ anvil: rpcUrl }),
+    SIGNER: gasAccount,
+    JOURNAL: monthlyJournal,
+    ALLOW_LOCAL_TEST_CHAIN: true,
+  };
+  // The existing explicit local-chain override is used only by this harness.
+  const monthlyAuthorization = {
+    plan: {
+      request: {
+        projectId,
+        period,
+        network: "anvil",
+        snapshotSha256: "a".repeat(64),
+      },
+      deployment: { ...config, network: "anvil" },
+      family: "evm",
+      allocationRoot: root,
+      messageHex: digest.slice(2),
+      totalGrossBase: "60000000",
+      entries: entries.map((entry) => ({
+        ...entry,
+        grossMicro: entry.grossMicro.toString(),
+      })),
+    },
+    signatureHex: signDigest(digest, attesterKey).slice(2),
+  } as unknown as MonthlyAuthorization;
+  await assert.rejects(
+    submitEvmMonthly(monthlyEnv, {
+      ...monthlyAuthorization,
+      signatureHex: signDigest(digest, recipientKey).slice(2),
+    }),
+    /authority signature/,
+  );
+  const submitted = await submitEvmMonthly(monthlyEnv, monthlyAuthorization);
+  assert.equal(submitted.alreadyCommitted, false);
+  assert.ok(submitted.transactionId);
+  const monthlyTx = submitted.transactionId;
+  await rpc("anvil_mine", ["0x1"]);
+  const nonceAfter = await rpc("eth_getTransactionCount", [donor, "latest"]);
+  assert.deepEqual(
+    await submitEvmMonthly(monthlyEnv, monthlyAuthorization),
+    submitted,
+    "an unfinalized retry returns the same journaled transaction",
+  );
+  await rpc("anvil_mine", ["0x40"]);
+  assert.deepEqual(await submitEvmMonthly(monthlyEnv, monthlyAuthorization), {
+    transactionId: null,
+    alreadyCommitted: true,
+  });
+  assert.equal(
+    await rpc("eth_getTransactionCount", [donor, "latest"]),
+    nonceAfter,
+    "a committed monthly retry spends no gas",
+  );
   await rpc("anvil_mine", ["0x40"]);
   assert.equal(
     onChain("monthlyRoots(uint32)(bytes32)", [periodNumber]),

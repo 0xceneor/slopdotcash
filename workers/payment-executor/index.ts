@@ -26,6 +26,7 @@ import {
   preflightEvmDeployment,
   retireUnsignedAttempt,
   type Signer,
+  submitEvmMonthly,
 } from "./core";
 import type { MonthlyAuthorization } from "./monthly";
 import { signMonthlyAllocation } from "./monthly";
@@ -91,6 +92,7 @@ export class PaymentSignerJournal {
       ![
         "/v1/pay",
         "/v1/monthly-authorization",
+        "/v1/commit-monthly",
         "/v1/complete-bind",
         "/v1/attempt-status",
         "/v1/cancel-unsubmitted",
@@ -98,6 +100,44 @@ export class PaymentSignerJournal {
     )
       return new Response("Not found", { status: 404 });
     try {
+      if (pathname === "/v1/commit-monthly") {
+        // Hosted relayers are test-only. Production submission belongs to a
+        // project-operated or permissionless executor, never this attester.
+        const stack = signerStack(this.env.SIGNER_STACK);
+        if (
+          stack !== "test" ||
+          this.env.SIGNER_ROLE !== "relayer" ||
+          this.env.CHAIN_FAMILY !== "evm" ||
+          this.env.PAYMENT_SCOPE === "security-bounty"
+        )
+          return new Response("Not found", { status: 404 });
+        const authorization = (await readBoundedJson(
+          request,
+          4 * 1024 * 1024,
+          "monthly commitment",
+        )) as MonthlyAuthorization;
+        const target = {
+          network: authorization.plan.request.network,
+          vault: authorization.plan.deployment.vault,
+        };
+        if (!stackServesNetwork(stack, target.network))
+          throw new Error("Wrong signer stack");
+        await preflightEvmDeployment(this.env, target);
+        const key = this.env[SIGNER_STACKS[stack].evmSecret];
+        if (!key) throw new Error("Signer unavailable");
+        return Response.json(
+          await submitEvmMonthly(
+            {
+              PAYMENTS_DB: database,
+              PAYMENT_DEPLOYMENTS: this.env.PAYMENT_DEPLOYMENTS,
+              PAYMENT_RPC_URLS: this.env.PAYMENT_RPC_URLS,
+              JOURNAL: this.state.storage,
+              SIGNER: privateKeyToAccount(key),
+            },
+            authorization,
+          ),
+        );
+      }
       if (pathname === "/v1/monthly-authorization") {
         if (
           this.env.SIGNER_ROLE !== "attester" ||

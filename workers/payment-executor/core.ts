@@ -1,4 +1,5 @@
 import { keccak_256 } from "@noble/hashes/sha3.js";
+import { recoverAddress } from "viem";
 import type { D1TransactionalDatabase as D1Database } from "../../backend/d1";
 import type {
   DispatchPayment,
@@ -11,7 +12,10 @@ import {
 } from "../../backend/payments/possession";
 import {
   buildBindCalldata,
+  buildCommitMonthlyCalldata,
   buildPayCalldata,
+  evmAllocationRoot,
+  evmMonthlyDigest,
   verifyEvmDeployment,
 } from "../../contracts/evm/adapter";
 import {
@@ -23,6 +27,7 @@ import {
 import { type PayoutPolicy, payoutFee } from "../../src/lib/payments/contracts";
 import { finalizedEvmRevert } from "../payments/reconcile";
 import { mainnetExecutionEnabled } from "./mainnet-execution.mjs";
+import type { MonthlyAuthorization } from "./monthly";
 
 type Hex = `0x${string}`;
 export interface Signer {
@@ -86,7 +91,9 @@ export interface Authorization extends DispatchPayment {
   expiresAt: string;
 }
 interface Attempt {
-  obligationId: string;
+  /** Payment attempts name an obligation; monthly attempts name a period. */
+  obligationId?: string;
+  monthlyPeriod?: string;
   network: string;
   vault: string;
   fingerprint: string;
@@ -363,8 +370,8 @@ async function assertPayable(
       `Award is inside its commit delay until ${new Date(Number(payableAt) * 1000).toISOString()}; retry after it ends`,
     );
 }
-/** A reverted bind changed nothing on-chain, so a fresh bind may replace it. */
-async function retireRevertedBind(
+/** A finalized reverted attempt changed nothing, so a fresh attempt may replace it. */
+async function retireRevertedAttempt(
   env: ExecutorEnvironment,
   config: Deployment,
   key: string,
@@ -396,7 +403,10 @@ async function signAndSubmit(
   key: string,
   fingerprint: string,
   data: string,
-  input: Input,
+  input: Pick<Input, "network" | "vault" | "idempotencyKey"> & {
+    obligationId?: string;
+    monthlyPeriod?: string;
+  },
 ) {
   let attempt = await env.JOURNAL.get<Attempt>(key);
   if (attempt && attempt.fingerprint !== fingerprint)
@@ -455,7 +465,9 @@ async function signAndSubmit(
         value: 0n,
       });
       const next = {
-        obligationId: input.obligationId,
+        ...(input.obligationId
+          ? { obligationId: input.obligationId }
+          : { monthlyPeriod: input.monthlyPeriod }),
         network: input.network,
         vault: input.vault,
         fingerprint,
@@ -493,6 +505,94 @@ async function signAndSubmit(
   return { transactionId: attempt.transactionId };
 }
 
+/** Permissionless monthly commitment using the executor's gas key, not the attester key.
+ * Signature, pinned deployment and existing on-chain root are checked on every retry.
+ * A submitted transaction is not proof of finalized reservation or payment.
+ */
+export async function submitEvmMonthly(
+  env: ExecutorEnvironment,
+  authorization: MonthlyAuthorization,
+) {
+  const { plan, signatureHex } = authorization;
+  if (
+    plan.family !== "evm" ||
+    !/^[2-9][0-9]{3}-(0[1-9]|1[0-2])$/.test(plan.request.period)
+  )
+    throw new Error("Invalid monthly authorization");
+  const target = {
+    network: plan.request.network,
+    vault: plan.deployment.vault,
+  };
+  const deployment = await preflightEvmDeployment(env, target);
+  if (
+    deployment.projectId !== plan.request.projectId ||
+    !same(deployment.asset, plan.deployment.asset) ||
+    same(env.SIGNER.address, deployment.identityAuthority)
+  )
+    throw new Error("Monthly executor or deployment mismatch");
+  const root = evmAllocationRoot(plan.entries);
+  const expected = evmMonthlyDigest(
+    BigInt(deployment.chainId),
+    deployment.vault,
+    plan.request.period,
+    root,
+  );
+  if (
+    root !== plan.allocationRoot ||
+    expected.slice(2) !== plan.messageHex ||
+    !/^[a-f0-9]{130}$/.test(signatureHex) ||
+    !same(
+      await recoverAddress({
+        hash: expected as Hex,
+        signature: `0x${signatureHex}`,
+      }),
+      deployment.identityAuthority,
+    )
+  )
+    throw new Error("Invalid monthly authority signature");
+  const period = Number(plan.request.period.replace("-", ""));
+  const currentRoot = (
+    await call(
+      deployment,
+      `${digest("monthlyRoots(uint32)").slice(0, 10)}${period.toString(16).padStart(64, "0")}`,
+      1,
+    )
+  )[0];
+  if (BigInt(`0x${currentRoot}`) !== 0n) {
+    if (`0x${currentRoot}` !== root)
+      throw new Error("Another monthly root is already committed");
+    return { transactionId: null, alreadyCommitted: true };
+  }
+  const key = `monthly:${target.network}:${target.vault.toLowerCase()}:${plan.request.period}`;
+  const fingerprint = digest(
+    JSON.stringify([
+      deployment.chainId,
+      target.vault.toLowerCase(),
+      plan.request.period,
+      root,
+    ]),
+  );
+  const previous = await env.JOURNAL.get<Attempt>(key);
+  if (previous) await retireRevertedAttempt(env, deployment, key, previous);
+  const result = await signAndSubmit(
+    env,
+    deployment,
+    key,
+    fingerprint,
+    buildCommitMonthlyCalldata(
+      plan.request.period,
+      plan.entries,
+      `0x${signatureHex}`,
+    ),
+    {
+      ...target,
+      idempotencyKey: digest(key).slice(2),
+      monthlyPeriod: plan.request.period,
+    },
+  );
+  return { ...result, alreadyCommitted: false };
+}
+
 export function createEvmAttester(env: ExecutorEnvironment): PaymentExecutor {
   return {
     async submit(input) {
@@ -516,7 +616,7 @@ export function createEvmAttester(env: ExecutorEnvironment): PaymentExecutor {
       const existing = await env.JOURNAL.get<Attempt | null>(key);
       if (
         existing &&
-        !(await retireRevertedBind(env, deployment, key, existing))
+        !(await retireRevertedAttempt(env, deployment, key, existing))
       )
         return signAndSubmit(env, deployment, key, fingerprint, "", input);
       if ((await obligation(deployment, authorization)).paid)
