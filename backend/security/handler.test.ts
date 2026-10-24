@@ -339,138 +339,8 @@ function open(securityBounty: Record<string, unknown> = OPEN_PROGRAM) {
 }
 
 describe("automatic private intake", () => {
-  test("a reporter's private report becomes a verified case from GitHub's own receipt", async () => {
-    const env = open();
-    const start = () =>
-      env.call(REPORTER, "POST", "security-submissions", {
-        projectId: PROJECT,
-      });
-    const started = await start();
-    expect(started.status).toBe(201);
-    const submission = started.body.submission as { id: string };
-    expect(started.body.submission).toMatchObject({
-      state: "awaiting-report",
-      lastCheck: null,
-      caseId: null,
-    });
-    // An interrupted submission is found again, never duplicated.
-    const again = await start();
-    expect(again.status).toBe(200);
-    expect(again.body.submission?.id).toBe(submission.id);
-    const check = () =>
-      env.call(
-        REPORTER,
-        "POST",
-        `security-submissions/${submission.id}/check`,
-        {},
-      );
-    // GitHub cannot be read: that is not "no report".
-    env.setReportsAvailable(false);
-    expect((await check()).body.submission).toMatchObject({
-      state: "awaiting-report",
-      lastCheck: "unavailable",
-    });
-    env.setReportsAvailable(true);
-    env.advance(11_000);
-    expect((await check()).body.submission).toMatchObject({
-      state: "awaiting-report",
-      lastCheck: "none-found",
-    });
-    // Another researcher's report is not this reporter's receipt.
-    env.reports.push(report(OTHER, "2026-10-19T10:00:05.000Z"));
-    const mine = report(REPORTER, "2026-10-19T10:00:07.000Z");
-    env.reports.push(mine);
-    // A repeated check within the transport bound reuses the last answer.
-    expect((await check()).body.submission?.lastCheck).toBe("none-found");
-    env.advance(11_000);
-    const found = await check();
-    expect(found.body.submission).toMatchObject({
-      state: "received",
-      lastCheck: "received",
-    });
-    const caseId = found.body.submission?.caseId as string;
-    const reporterView = await env.call(
-      REPORTER,
-      "GET",
-      `security-cases/${caseId}`,
-    );
-    expect(reporterView.body.case).toMatchObject({
-      submissionState: "verified",
-      receivedAt: mine.createdAt,
-      receivedAtSource: "github-advisory",
-      awardState: "pending",
-      receiptState: "received",
-      nextStep: "Waiting for the project owner's response.",
-    });
-    // The reporter sees receipt, response and payout, never the analysis.
-    expect(reporterView.body.case).not.toHaveProperty("analysis");
-    expect(
-      env.sqlite
-        .query(
-          "SELECT verified_by_github_id, reporter_github_login FROM security_cases WHERE id = ?",
-        )
-        .get(caseId),
-    ).toEqual({
-      verified_by_github_id: "github",
-      reporter_github_login: "reporter",
-    });
-    // Only this reporter's report was recorded by their own check.
-    expect(
-      env.sqlite.query("SELECT COUNT(*) AS n FROM security_cases").get(),
-    ).toEqual({ n: 1 });
-    // The maintainer is notified of the receipt; the reporter acted.
-    expect(env.inbox(MAINTAINER, caseId)).toEqual([
-      `security-case:${caseId}:1`,
-    ]);
-    expect(env.inbox(REPORTER, caseId)).toEqual([]);
-    // The private analysis read the report; D1 keeps only the proposal.
-    expect(env.analyzed).toHaveLength(1);
-    expect(env.analyzed[0].report.description).toBe(SECRET_DETAIL);
-    const ownerView = await env.call(
-      MAINTAINER,
-      "GET",
-      `security-cases/${caseId}`,
-    );
-    expect(ownerView.body.case.analysis).toMatchObject({
-      state: "complete",
-      summary: "Rounding lets a depositor withdraw more than deposited.",
-      retryable: false,
-    });
-    expect(ownerView.body.case.allowedActions).toEqual(
-      expect.arrayContaining(["request-information", "decide"]),
-    );
-    expect(ownerView.body.case.allowedActions).not.toContain("analyze");
-    const stored = JSON.stringify(
-      env.sqlite.query("SELECT * FROM security_case_analyses").all(),
-    );
-    expect(stored).not.toContain(SECRET_DETAIL);
-    // A new report starts a new submission.
-    expect((await start()).status).toBe(201);
-  });
-
-  test("starting a report needs private reporting on, with no public fallback", async () => {
-    const env = open();
-    for (const [state, code] of [
-      ["disabled", "intake_disabled"],
-      ["forbidden", "intake_forbidden"],
-    ] as const) {
-      env.setIntake(state);
-      const refused = await env.call(REPORTER, "POST", "security-submissions", {
-        projectId: PROJECT,
-      });
-      expect(refused.status).toBe(409);
-      expect(refused.body.error).toBe(code);
-    }
-    expect(
-      env.sqlite.query("SELECT COUNT(*) AS n FROM security_submissions").get(),
-    ).toEqual({ n: 0 });
-    // Signed out, nothing starts.
-    const unknown = await env.call(REPORTER, "POST", "security-submissions", {
-      projectId: "missing-project",
-    });
-    expect(unknown.status).toBe(404);
-  });
-
+  // Reporter submission, OAuth and uncertain-send recovery are exercised
+  // by submissions.test.ts against the canonical automatic intake route.
   test("a maintainer imports direct GitHub reports and settles older links", async () => {
     const env = open();
     const linked = report(REPORTER, "2026-10-19T09:10:00.000Z");
@@ -532,7 +402,7 @@ describe("automatic private intake", () => {
     expect(rows.find((row) => row.id === "sc_legacyclaim1")).toMatchObject({
       submission_state: "verified",
       received_at: linked.createdAt,
-      received_at_source: "github-advisory",
+      received_at_source: "github-verified",
       revision: 2,
     });
     // GitHub names someone else, or no such private report exists.
@@ -582,7 +452,7 @@ describe("automatic private intake", () => {
         .all();
     const listed = await env.call(REPORTER, "GET", "security-cases");
     expect(listed.status).toBe(200);
-    expect(listed.body.submissions).toEqual([]);
+    expect(listed.body.cases).toHaveLength(2);
     expect(reads()).toEqual(
       [first, second].sort().map((id) => ({
         case_id: id,

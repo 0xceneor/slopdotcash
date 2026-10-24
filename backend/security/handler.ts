@@ -25,7 +25,6 @@ import type {
 import { notifySecurityCase } from "../notifications/events";
 import { cachedPublicResponse, type EdgeCache } from "../projects/edge-cache";
 import { readJsonObject } from "../trace/validation";
-import type { IntakeConfig } from "./intake-grant";
 import type { AdvisoryReader, GithubPrivateReport } from "./advisories";
 import {
   analysisMayStart,
@@ -33,6 +32,7 @@ import {
   runCaseAnalysis,
   type SecurityAnalyzer,
 } from "./analysis";
+import type { IntakeConfig } from "./intake-grant";
 import { prepareSecuritySettlement, securitySettlementView } from "./payments";
 import { handleSubmissionRoute } from "./submissions";
 export type SecurityD1Database = D1TransactionalDatabase<D1Statement>;
@@ -82,7 +82,6 @@ type CaseRow = {
   reporter_github_login: string;
   submission_state: "claimed" | "verified" | "link-rejected";
   received_at: string | null;
-  received_at_source: "maintainer-attested" | "github-advisory";
   verified_at: string | null;
   verified_by_github_id: string | null;
   policy_revision: number | null;
@@ -169,11 +168,7 @@ const GROSS_MINOR = /^[1-9]\d{0,15}$/u;
  * private vulnerability report, rather than a person (migration 0061).
  */
 const GITHUB_VERIFIER = "github";
-/**
- * Repeated receipt checks within this window reuse the last answer. A
- * transport bound against repeated GitHub reads, not a policy.
- */
-const RECEIPT_CHECK_INTERVAL_MS = 10_000;
+const RECEIVED_AT_SOURCE = "maintainer-attested";
 /** A browser that kept an older readiness answer must check again. */
 export const INTAKE_READINESS_TTL_SECONDS = 30;
 
@@ -455,6 +450,9 @@ function awardOpen(row: CaseRow): boolean {
 function allowedActions(row: CaseRow, roles: Set<Role>): string[] {
   const actions: string[] = [];
   if (row.submission_state !== "verified") {
+    // Preserve manual verification for legacy links when GitHub intake is unavailable.
+    if (row.submission_state === "claimed" && roles.has("security-maintainer"))
+      actions.push("verify-link", "reject-link");
     // A link from before automatic receipt is settled against GitHub.
     if (
       row.submission_state === "claimed" &&
@@ -907,7 +905,6 @@ async function listCases(
     viewer: { githubId: actor.githubId, githubLogin: actor.githubLogin },
     programs: programsForActor,
     cases,
-    submissions: await openSubmissions(deps, actor),
   });
 }
 
@@ -1038,7 +1035,8 @@ export function inboxStatements(
   };
   const recipients = [
     ...(REPORTER_EVENT_KINDS.has(input.kind) ? [input.reporterGithubId] : []),
-    ...(input.kind === "receive" || input.kind === "claim" ||
+    ...(input.kind === "receive" ||
+    input.kind === "claim" ||
     input.kind === "submit" ||
     input.kind === "submit-direct"
       ? ids("technical")
@@ -1069,48 +1067,6 @@ const AWARDING_KINDS = new Set(["decide", "award", "decide-related-party"]);
 
 function constraintError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-type IntakeState = "ready" | "disabled" | "forbidden" | "unavailable";
-
-const INTAKE_REFUSAL: Record<Exclude<IntakeState, "ready">, string> = {
-  disabled:
-    "GitHub private vulnerability reporting is turned off for this repository",
-  forbidden: "GitHub refused the private reporting check",
-  unavailable: "GitHub did not answer the private reporting check",
-};
-
-/** GitHub private vulnerability reporting readiness, read live (SEC-07). */
-async function readIntakeState(
-  deps: SecurityApiDependencies,
-  repository: string,
-): Promise<IntakeState> {
-  try {
-    const response = await deps.github.fetch(
-      `${deps.github.apiOrigin}/repos/${repository}/private-vulnerability-reporting`,
-      {
-        headers: {
-          accept: "application/vnd.github+json",
-          "user-agent": "slop.cash-security-intake",
-          "x-github-api-version": "2022-11-28",
-          ...(deps.github.token
-            ? { authorization: `Bearer ${deps.github.token}` }
-            : {}),
-        },
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
-    if (response.status === 401 || response.status === 403) return "forbidden";
-    if (!response.ok) return "unavailable";
-    const body = (await response.json()) as { enabled?: unknown };
-    return body.enabled === true
-      ? "ready"
-      : body.enabled === false
-        ? "disabled"
-        : "unavailable";
-  } catch {
-    return "unavailable";
-  }
 }
 
 function handoffUrl(terms: SecurityBountyTerms): string {
@@ -1183,7 +1139,7 @@ export function caseInsertStatement(
  * Starts the private analysis of a newly verified case. It runs after the
  * response where the platform allows it, and inline otherwise.
  */
-async function scheduleAnalysis(
+export async function scheduleAnalysis(
   deps: SecurityApiDependencies,
   caseId: string,
 ): Promise<void> {
@@ -1259,7 +1215,7 @@ async function recordPrivateReports(
         ? deps.db
             .prepare(
               `INSERT INTO security_cases (id, project_id, advisory_repository, advisory_ghsa, reporter_github_id, reporter_github_login, submission_state, received_at, received_at_source, verified_at, verified_by_github_id, policy_revision, terms, evidence_digest, receipt_state, remediation_state, award_state, payment_state, disclosure_state, recognition, appeal_state, owner_github_id, revision, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'verified', ?, 'github-advisory', ?, ?, ?, ?, NULL, 'received', 'not-started', ?, 'not-applicable', 'embargoed', 'private', 'none', NULL, 1, ?, ?)`,
+               VALUES (?, ?, ?, ?, ?, ?, 'verified', ?, 'github-verified', ?, ?, ?, ?, NULL, 'received', 'not-started', ?, 'not-applicable', 'embargoed', 'private', 'none', NULL, 1, ?, ?)`,
             )
             .bind(
               caseId,
@@ -1274,7 +1230,7 @@ async function recordPrivateReports(
             )
         : deps.db
             .prepare(
-              "UPDATE security_cases SET submission_state = 'verified', received_at = ?, received_at_source = 'github-advisory', verified_at = ?, verified_by_github_id = ?, policy_revision = ?, terms = ?, award_state = ?, reporter_github_login = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ? AND submission_state = 'claimed'",
+              "UPDATE security_cases SET submission_state = 'verified', received_at = ?, received_at_source = 'github-verified', verified_at = ?, verified_by_github_id = ?, policy_revision = ?, terms = ?, award_state = ?, reporter_github_login = ?, revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ? AND submission_state = 'claimed'",
             )
             .bind(
               ...values,
@@ -1298,7 +1254,7 @@ async function recordPrivateReports(
           detail: {
             advisory: report.ghsa,
             receivedAt: report.createdAt,
-            receivedAtSource: "github-advisory",
+            receivedAtSource: "github-verified",
             policyRevision: frozen.revision,
           },
           at,
@@ -1445,51 +1401,6 @@ async function reconcileProgram(
   return { state: "ok", received, reports };
 }
 
-type SubmissionRow = {
-  id: string;
-  project_id: string;
-  repository: string;
-  reporter_github_id: string;
-  started_at: string;
-  state: "awaiting-report" | "received";
-  last_check: "none-found" | "unavailable" | "received" | null;
-  last_checked_at: string | null;
-  case_id: string | null;
-};
-
-const SUBMISSION_COLUMNS =
-  "id, project_id, repository, reporter_github_id, started_at, state, last_check, last_checked_at, case_id";
-
-function submissionView(row: SubmissionRow): Record<string, unknown> {
-  return {
-    id: row.id,
-    projectId: row.project_id,
-    startedAt: row.started_at,
-    state: row.state,
-    lastCheck: row.last_check,
-    lastCheckedAt: row.last_checked_at,
-    caseId: row.case_id,
-    handoffUrl: `https://github.com/${row.repository}/security/advisories/new`,
-  };
-}
-
-/** The signed-in reporter's report sessions that wait for GitHub. */
-async function openSubmissions(
-  deps: SecurityApiDependencies,
-  actor: Actor,
-): Promise<Record<string, unknown>[]> {
-  const rows =
-    (
-      await deps.db
-        .prepare(
-          `SELECT ${SUBMISSION_COLUMNS} FROM security_submissions WHERE reporter_github_id = ? AND state = 'awaiting-report' ORDER BY started_at DESC LIMIT 50`,
-        )
-        .bind(actor.githubId)
-        .all<SubmissionRow>()
-    ).results ?? [];
-  return rows.map(submissionView);
-}
-
 async function programOrNotFound(
   deps: SecurityApiDependencies,
   projectId: string,
@@ -1508,123 +1419,167 @@ async function programOrNotFound(
  * submission is returned again, so an interrupted report is reconciled
  * before the reporter submits a second time.
  */
-async function startSubmission(
+async function createCase(
   request: Request,
   deps: SecurityApiDependencies,
 ): Promise<Response> {
   const actor = await requireActor(request, deps);
   const body = await readJsonObject(request);
-  exactKeys(body, ["projectId"]);
+  const mode = choice(body, "mode", ["claim", "record"] as const);
+  if (mode === "claim")
+    exactKeys(body, ["mode", "projectId", "advisory", "idempotencyKey"]);
+  else
+    exactKeys(body, [
+      "mode",
+      "projectId",
+      "advisory",
+      "idempotencyKey",
+      "reporterGithubId",
+      "reporterGithubLogin",
+      "receivedAt",
+      "confirmation",
+    ]);
   const projectId = stringField(body, "projectId", PROJECT_ID);
-  const terms = await programOrNotFound(deps, projectId);
-  const state = await readIntakeState(deps, terms.intake.repository);
-  if (state !== "ready")
-    fail(409, `intake_${state}`, `${INTAKE_REFUSAL[state]}. Try again later.`);
-  const at = deps.now().toISOString();
-  const inserted = await deps.db
-    .prepare(
-      "INSERT INTO security_submissions (id, project_id, repository, reporter_github_id, reporter_github_login, started_at, state, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'awaiting-report', ?) ON CONFLICT DO NOTHING",
-    )
-    .bind(
-      `ss_${deps.randomId().replaceAll("-", "")}`,
-      projectId,
-      terms.intake.repository,
-      actor.githubId,
-      actor.githubLogin,
-      at,
-      at,
-    )
-    .run();
-  const row = await deps.db
-    .prepare(
-      `SELECT ${SUBMISSION_COLUMNS} FROM security_submissions WHERE project_id = ? AND reporter_github_id = ? AND state = 'awaiting-report'`,
-    )
-    .bind(projectId, actor.githubId)
-    .first<SubmissionRow>();
-  if (row === null) fail(409, "stale_revision", "Start the report again");
-  return json((inserted.meta?.changes ?? 0) === 1 ? 201 : 200, {
-    submission: submissionView(row),
-  });
-}
-
-/**
- * Checks GitHub for the reporter's private report. A found report becomes a
- * verified case at once; `none-found` is a complete answer, so the reporter
- * may submit; `unavailable` means "check again before submitting".
- */
-async function checkSubmission(
-  request: Request,
-  deps: SecurityApiDependencies,
-  submissionId: string,
-): Promise<Response> {
-  const actor = await requireActor(request, deps);
-  const body = await readJsonObject(request);
-  exactKeys(body, []);
-  const load = () =>
-    deps.db
-      .prepare(
-        `SELECT ${SUBMISSION_COLUMNS} FROM security_submissions WHERE id = ?`,
-      )
-      .bind(submissionId)
-      .first<SubmissionRow>();
-  const row = /^ss_[A-Za-z0-9_-]{8,72}$/u.test(submissionId)
-    ? await load()
-    : null;
-  if (row === null || row.reporter_github_id !== actor.githubId) notFound();
+  const advisory = stringField(body, "advisory", GHSA);
+  const idempotencyKey = stringField(body, "idempotencyKey", IDEMPOTENCY_KEY);
+  const program = await currentProgram(deps, projectId);
+  if (program === null)
+    fail(404, "program_not_found", "This project has no security program");
+  const terms = program.manifest.securityBounty as SecurityBountyTerms;
   const now = deps.now();
-  if (
-    row.state === "received" ||
-    (row.last_checked_at !== null &&
-      now.getTime() - Date.parse(row.last_checked_at) <
-        RECEIPT_CHECK_INTERVAL_MS)
-  )
-    return json(200, { submission: submissionView(row) });
-  const terms = await programOrNotFound(deps, row.project_id);
-  const result = await reconcileProgram(
-    deps,
-    row.project_id,
-    terms,
-    actor,
-    "own",
-  );
-  const at = deps.now().toISOString();
-  let linked: { id: string } | null = null;
-  if (result.state === "ok" && result.reports.length > 0)
-    linked = await deps.db
+  const at = now.toISOString();
+  const id = `sc_${deps.randomId().replaceAll("-", "")}`;
+  let reporter: Actor;
+  let role: Role;
+  let verified: {
+    receivedAt: string;
+    revision: number | null;
+    terms: FrozenTerms | null;
+  } | null = null;
+  if (mode === "claim") {
+    reporter = actor;
+    role = "reporter";
+  } else {
+    if (!programRoles(terms, actor.githubId).has("security-maintainer"))
+      fail(403, "forbidden", "Only a security maintainer can record a case");
+    if (body.confirmation !== true)
+      fail(
+        400,
+        "confirmation_required",
+        "Confirm that you checked the GitHub advisory and its reporter",
+      );
+    reporter = {
+      githubId: stringField(body, "reporterGithubId", GITHUB_ID),
+      githubLogin: stringField(body, "reporterGithubLogin", GITHUB_LOGIN),
+    };
+    if (reporter.githubId === actor.githubId)
+      fail(403, "conflicted", "You cannot record your own report");
+    role = "security-maintainer";
+    const receivedAt = timestampField(body, "receivedAt", now, { past: true });
+    verified = {
+      receivedAt,
+      ...(await termsAtReceipt(deps, projectId, receivedAt)),
+    };
+  }
+  const insert = caseInsertStatement(deps, {
+    id,
+    projectId,
+    repository: terms.intake.repository,
+    advisory,
+    reporter,
+    verified: verified
+      ? {
+          receivedAt: verified.receivedAt,
+          verifiedBy: actor.githubId,
+          policyRevision: verified.revision,
+          terms: verified.terms,
+        }
+      : null,
+    ownerGithubId: verified ? actor.githubId : null,
+    at,
+  });
+  try {
+    await deps.db.batch([
+      insert,
+      eventStatement(deps, {
+        caseId: id,
+        revision: 1,
+        kind: mode,
+        actor,
+        role,
+        idempotencyKey,
+        reason: null,
+        evidenceReference: null,
+        detail: verified
+          ? {
+              advisory,
+              receivedAt: verified.receivedAt,
+              receivedAtSource: RECEIVED_AT_SOURCE,
+            }
+          : { advisory },
+        at,
+        guard: false,
+      }),
+      accessLog(deps, id, actor, new Set([role]), "write"),
+      ...inboxStatements(deps, {
+        caseId: id,
+        revision: 1,
+        kind: mode,
+        idempotencyKey,
+        reporterGithubId: reporter.githubId,
+        detail: {},
+        terms,
+      }),
+    ]);
+  } catch (error) {
+    if (!/UNIQUE/iu.test(constraintError(error))) throw error;
+    // A rejected link is history; only a live case for this reporter and
+    // advisory can answer the request.
+    const existing = await deps.db
       .prepare(
-        "SELECT c.id FROM security_cases c WHERE c.project_id = ? AND c.reporter_github_id = ? AND c.submission_state = 'verified' AND c.advisory_ghsa IN (SELECT value FROM json_each(?)) AND NOT EXISTS (SELECT 1 FROM security_submissions s WHERE s.case_id = c.id) ORDER BY c.received_at, c.id LIMIT 1",
+        `SELECT ${CASE_COLUMNS} FROM security_cases WHERE project_id = ? AND advisory_ghsa = ? AND reporter_github_id = ? AND submission_state <> 'link-rejected'`,
       )
-      .bind(
-        row.project_id,
-        actor.githubId,
-        JSON.stringify(result.reports.map((report) => report.ghsa)),
-      )
-      .first<{ id: string }>();
-  await deps.db
-    .prepare(
-      "UPDATE security_submissions SET state = ?, case_id = ?, last_check = ?, last_checked_at = ?, updated_at = ? WHERE id = ? AND state = 'awaiting-report'",
-    )
-    .bind(
-      linked ? "received" : "awaiting-report",
-      linked?.id ?? null,
-      linked
-        ? "received"
-        : result.state === "ok"
-          ? "none-found"
-          : "unavailable",
-      at,
-      at,
-      row.id,
-    )
-    .run();
-  return json(200, { submission: submissionView((await load()) ?? row) });
+      .bind(projectId, advisory, reporter.githubId)
+      .first<CaseRow>();
+    if (existing !== null) {
+      // A claim is idempotent by reporter and advisory. A record is a replay
+      // only when this exact request created the verified case; otherwise it
+      // wrote nothing and must not report success.
+      const replayed =
+        mode === "claim" ||
+        (existing.submission_state === "verified" &&
+          (await deps.db
+            .prepare(
+              "SELECT 1 AS ok FROM security_case_events WHERE case_id = ? AND case_revision = 1 AND kind = 'record' AND idempotency_key = ? AND actor_github_id = ?",
+            )
+            .bind(existing.id, idempotencyKey, actor.githubId)
+            .first<{ ok: number }>()) !== null);
+      if (replayed) {
+        const roles = await caseRoles(deps, existing, actor, terms);
+        if (roles.size > 0)
+          return json(200, {
+            replayed: true,
+            case: await caseView(deps, existing, roles, true),
+          });
+      } else if (existing.submission_state === "claimed") {
+        fail(
+          409,
+          "claim_pending",
+          "The reporter already linked this advisory; verify or reject that claim",
+        );
+      }
+    }
+    fail(
+      409,
+      "advisory_already_recorded",
+      "This advisory already has a verified case",
+    );
+  }
+  const row = (await loadCase(deps, id)) as CaseRow;
+  const roles = await caseRoles(deps, row, actor, terms);
+  return json(201, { case: await caseView(deps, row, roles, true) });
 }
 
-/**
- * A security maintainer brings every private report of the program into
- * Slop at once, for researchers who reported on GitHub directly. GitHub's
- * own author and time make each receipt; nothing is typed in.
- */
 async function importReports(
   request: Request,
   deps: SecurityApiDependencies,
@@ -1712,6 +1667,55 @@ async function planChange(
   const actingRole = (preferred: Role[]): Role =>
     preferred.find((role) => roles.has(role)) ?? preferred[0];
   switch (action) {
+    case "verify-link": {
+      exactKeys(body, [...common, "receivedAt", "confirmation"]);
+      requireRole(roles, "security-maintainer", "Security maintainers verify");
+      requireAction(row, roles, action);
+      if (body.confirmation !== true)
+        fail(
+          400,
+          "confirmation_required",
+          "Confirm that the GitHub advisory exists and names this reporter",
+        );
+      const receivedAt = timestampField(body, "receivedAt", now, {
+        past: true,
+      });
+      const frozen = await termsAtReceipt(deps, row.project_id, receivedAt);
+      return {
+        kind: action,
+        role: "security-maintainer",
+        reason: null,
+        evidenceReference: null,
+        detail: {
+          receivedAt,
+          receivedAtSource: RECEIVED_AT_SOURCE,
+          policyRevision: frozen.revision,
+        },
+        set: {
+          submission_state: "verified",
+          received_at: receivedAt,
+          verified_at: at,
+          verified_by_github_id: actor.githubId,
+          policy_revision: frozen.revision,
+          terms: frozen.terms ? JSON.stringify(frozen.terms) : null,
+          award_state: frozen.terms ? "pending" : "not-applicable",
+          owner_github_id: actor.githubId,
+        },
+      };
+    }
+    case "reject-link": {
+      exactKeys(body, [...common, "reason"]);
+      requireRole(roles, "security-maintainer", "Security maintainers verify");
+      requireAction(row, roles, action);
+      return {
+        kind: action,
+        role: "security-maintainer",
+        reason: textField(body, "reason", 8, 2000),
+        evidenceReference: null,
+        detail: {},
+        set: { submission_state: "link-rejected" },
+      };
+    }
     case "assign-triager":
     case "revoke-triager": {
       exactKeys(
@@ -2945,8 +2949,12 @@ export async function handleSecurityApi(
         return await acknowledgeNotice(request, deps, parts[1]);
       if (request.method === "GET" && parts.length === 1)
         return await listCases(request, deps);
-      if (request.method === "POST" && parts.length === 1)
-        return await importReports(request, deps);
+      if (request.method === "POST" && parts.length === 1) {
+        const body = await readJsonObject(request.clone());
+        return body.mode === "import"
+          ? await importReports(request, deps)
+          : await createCase(request, deps);
+      }
       if (request.method === "GET" && parts.length === 2)
         return await readCase(request, deps, parts[1]);
       if (

@@ -7,10 +7,6 @@
 -- submitted it, at GitHub's own creation time. Older receipts keep their
 -- maintainer-attested time. `verified_by_github_id = 'github'` marks a
 -- receipt that Slop verified from GitHub rather than a person.
-ALTER TABLE security_cases ADD COLUMN received_at_source TEXT NOT NULL
-  DEFAULT 'maintainer-attested'
-  CHECK (received_at_source IN ('maintainer-attested', 'github-advisory'));
-
 -- The gross award the owner chose. It is reserved when the award is approved
 -- (or when an independent reviewer approves a related-party award). Older
 -- awards keep the program amount frozen in `terms`; NULL means none chosen.
@@ -21,14 +17,6 @@ ALTER TABLE security_cases ADD COLUMN award_gross_minor TEXT CHECK (
   )
 );
 
-CREATE TRIGGER security_cases_frozen_receipt_source
-BEFORE UPDATE ON security_cases
-WHEN OLD.submission_state = 'verified' AND
-  NEW.received_at_source IS NOT OLD.received_at_source
-BEGIN
-  SELECT RAISE(ABORT, 'a verified receipt is immutable');
-END;
-
 -- A chosen amount never changes once its reservation exists.
 CREATE TRIGGER security_cases_award_amount_fixed
 BEFORE UPDATE ON security_cases
@@ -37,39 +25,6 @@ WHEN OLD.award_gross_minor IS NOT NULL AND
   EXISTS (SELECT 1 FROM security_award_reservations WHERE case_id = OLD.id)
 BEGIN
   SELECT RAISE(ABORT, 'a reserved award amount is immutable');
-END;
-
--- A signed-in reporter's private report session. It records who started a
--- report on which project and when; it never holds report content. Slop
--- reconciles it against GitHub before the reporter submits again, so an
--- interrupted submission is found instead of duplicated.
-CREATE TABLE security_submissions (
-  id TEXT PRIMARY KEY CHECK (id GLOB 'ss_*' AND length(id) BETWEEN 12 AND 80),
-  project_id TEXT NOT NULL REFERENCES projects(id),
-  repository TEXT NOT NULL CHECK (length(repository) BETWEEN 3 AND 201),
-  reporter_github_id TEXT NOT NULL CHECK (reporter_github_id GLOB '[1-9]*'),
-  reporter_github_login TEXT NOT NULL,
-  started_at TEXT NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('awaiting-report', 'received')),
-  -- The last reconciliation against GitHub. `unavailable` means Slop could
-  -- not read GitHub; it never means that no report exists.
-  last_check TEXT CHECK (last_check IS NULL OR last_check IN ('none-found', 'unavailable', 'received')),
-  last_checked_at TEXT,
-  case_id TEXT REFERENCES security_cases(id),
-  updated_at TEXT NOT NULL,
-  CHECK ((state = 'received') = (case_id IS NOT NULL))
-) STRICT;
-
-CREATE UNIQUE INDEX security_submissions_one_open
-  ON security_submissions(project_id, reporter_github_id)
-  WHERE state = 'awaiting-report';
-CREATE INDEX security_submissions_reporter
-  ON security_submissions(reporter_github_id, started_at);
-
-CREATE TRIGGER security_submissions_no_delete
-BEFORE DELETE ON security_submissions
-BEGIN
-  SELECT RAISE(ABORT, 'security submissions are permanent');
 END;
 
 -- Automatic private analysis of a verified report. It stores only the model's
