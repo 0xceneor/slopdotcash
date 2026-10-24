@@ -190,6 +190,21 @@ describe("exception-only notification events", () => {
     const { db, sqlite, rows, project } = open();
     project("alpha", "active", "example/alpha");
     project("beta", "active", "elsewhere/beta");
+    // Self-service organization setup has no application row. Its human
+    // creator must still receive the installation failure, once on replay.
+    const manifest = JSON.stringify({
+      id: "gamma",
+      status: "active",
+      repositories: [{ id: "example/gamma" }],
+      steward: { github: { actorId: STEWARD } },
+    });
+    sqlite.exec(
+      `INSERT INTO project_revisions (project_id,revision,manifest,manifest_sha256,reason,actor_github_id,actor_github_login,created_at)
+         VALUES ('gamma',1,'${manifest}','${"b".repeat(64)}','Owner setup','${APPLICANT}','creator','${T}');
+       INSERT INTO projects (id,status,revision,manifest,manifest_sha256,created_at,updated_at,source_application_id)
+         VALUES ('gamma','active',1,'${manifest}','${"b".repeat(64)}','${T}','${T}',NULL);
+       INSERT INTO project_repositories (repository_key,project_id) VALUES ('example/gamma','gamma');`,
+    );
     sqlite.exec(
       `INSERT INTO slopbot_installations (installation_id,account_id,account_login,account_type,created_at,removed_at)
          VALUES (55,77,'Example','Organization','${T}','${R}'),
@@ -211,6 +226,13 @@ describe("exception-only notification events", () => {
         action_path: "/projects/alpha",
       },
     ];
+    lost.push({
+      event_key: `slopbot-installation:55:${R}:gamma`,
+      kind: "project_installation_lost",
+      subject: "gamma",
+      detail: null,
+      action_path: "/projects/gamma",
+    });
     expect(rows(APPLICANT)).toEqual(lost);
     expect(rows(STEWARD)).toEqual(lost);
   });

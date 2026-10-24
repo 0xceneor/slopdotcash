@@ -166,6 +166,13 @@ export function notifySlopbotInstallationLost<S>(
              FROM projects p2
              JOIN project_applications a ON a.id = p2.source_application_id
            UNION
+           SELECT p2.id, first.actor_github_id
+             FROM projects p2
+             JOIN project_revisions first
+               ON first.project_id = p2.id AND first.revision = 1
+            WHERE p2.source_application_id IS NULL
+              AND first.actor_github_id IS NOT NULL
+           UNION
            SELECT id, json_extract(manifest, '$.steward.github.actorId')
              FROM projects
          ) owners ON owners.project_id = p.id
