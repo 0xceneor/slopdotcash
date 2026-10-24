@@ -1209,7 +1209,7 @@ test("serves byte-consistent bootstrap and read-only site artifacts", {
   expect(await discoverySkillResponse.body()).toEqual(bootstrap);
   expect(await llmsResponse.text()).toContain(`SHA-256: ${bootstrapDigest}`);
   expect(bootstrap.toString()).toContain(
-    "optional permanent minimized trace upload",
+    "separate informed consent and inspection; failure never blocks submission.",
   );
 });
 

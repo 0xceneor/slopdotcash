@@ -5,7 +5,11 @@
  * reinstates it. The member sees only their own flag.
  */
 import { type FormEvent, useCallback, useEffect, useState } from "react";
-import { ProjectApiError, projectApiRequest } from "./lib/project-api";
+import {
+  currentProjectSession,
+  ProjectApiError,
+  projectApiRequest,
+} from "./lib/project-api";
 import { loginHref } from "./Points";
 import { formatDateTime } from "./Presentation";
 
@@ -57,19 +61,28 @@ export function ProjectRiskFlag({ projectId }: { projectId: string }) {
 
   const load = useCallback(() => {
     let active = true;
-    projectApiRequest<FlagStatus>("GET", path).then(
-      (value) => {
-        if (active) setState({ status: "ready", value });
-      },
-      (caught: unknown) => {
-        if (!active) return;
-        setState(
-          caught instanceof ProjectApiError && caught.status === 401
-            ? { status: "signed-out" }
-            : { status: "error", message: UNAVAILABLE },
-        );
-      },
-    );
+    currentProjectSession()
+      .then((session) =>
+        session === null ? null : projectApiRequest<FlagStatus>("GET", path),
+      )
+      .then(
+        (value) => {
+          if (active)
+            setState(
+              value === null
+                ? { status: "signed-out" }
+                : { status: "ready", value },
+            );
+        },
+        (caught: unknown) => {
+          if (!active) return;
+          setState(
+            caught instanceof ProjectApiError && caught.status === 401
+              ? { status: "signed-out" }
+              : { status: "error", message: UNAVAILABLE },
+          );
+        },
+      );
     return () => {
       active = false;
     };
