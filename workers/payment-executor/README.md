@@ -73,8 +73,11 @@ endpoint is documented in `backend/payments/README.md`.
 `POST /v1/commit-monthly` accepts that authorization on a test relayer. It verifies
 the pinned deployment, allocation root and attestation before admission. EVM
 reserves all entries atomically. Solana submits the root and then one Merkle-proven
-leaf per call. Finalized on-chain counters determine completion. A previously
-consumed source releases only that leaf's duplicate reservation. Valid leaves
+leaf per call. Finalized on-chain counters determine completion. A source
+consumed before the signed v3 freeze time releases only its duplicate reservation.
+Another monthly award must cover the same actor and at least the same gross
+to release it. A later conflicting manual award remains reserved and is reported
+for reconciliation while other leaves continue. Valid leaves
 remain funded without an expiry, including after opt-out or authority rotation.
 `?admit=false` resumes admitted Solana allocations without creating a new month;
 an absent month returns `notAdmitted: true`. The scheduler uses this for older

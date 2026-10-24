@@ -18,6 +18,7 @@ interface Intent {
   snapshotSha256: string;
   messageHex: string;
   authority: string;
+  frozenAt?: string;
   authorization?: MonthlyAuthorization;
 }
 const bytes = (hex: string) => {
@@ -44,7 +45,7 @@ export async function signMonthlyAllocation(
   },
   request: MonthlyAttestationRequest,
 ): Promise<MonthlyAuthorization> {
-  const plan = await prepareMonthlyAttestation(
+  let plan = await prepareMonthlyAttestation(
     { ...deps, now: deps.now() },
     request,
   );
@@ -54,13 +55,13 @@ export async function signMonthlyAllocation(
     snapshotSha256: request.snapshotSha256,
     messageHex: plan.messageHex,
     authority: plan.deployment.identityAuthority,
+    ...(plan.frozenAt === undefined ? {} : { frozenAt: plan.frozenAt }),
   };
   const intent = await deps.journal.transaction(async (tx) => {
     const previous = await tx.get<Intent>(key);
     if (previous) {
       if (
         previous.snapshotSha256 !== expected.snapshotSha256 ||
-        previous.messageHex !== expected.messageHex ||
         previous.authority !== expected.authority
       )
         throw new Error(
@@ -71,6 +72,16 @@ export async function signMonthlyAllocation(
     await tx.put(key, expected);
     return expected;
   });
+  if (intent.frozenAt !== plan.frozenAt) {
+    plan = await prepareMonthlyAttestation(
+      { ...deps, now: deps.now(), frozenAt: intent.frozenAt },
+      request,
+    );
+  }
+  if (intent.messageHex !== plan.messageHex)
+    throw new Error(
+      "Monthly authorization already bound to another allocation or authority",
+    );
   if (intent.authorization) return intent.authorization;
   const signatureHex = await deps.sign(plan);
   const signature = bytes(signatureHex);
@@ -99,7 +110,7 @@ export async function signMonthlyAllocation(
   }
   // A slow signer must not publish after a restriction or opt-out was observed.
   const current = await prepareMonthlyAttestation(
-    { ...deps, now: deps.now() },
+    { ...deps, now: deps.now(), frozenAt: plan.frozenAt },
     request,
   );
   if (

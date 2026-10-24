@@ -298,6 +298,8 @@ sections 6 and 7). Migration `0062` adds its private records.
    each funded month's eligible allocation. The Durable Object records the
    first intent before signing and refuses a different root for that month.
    Funding-time exclusions are omitted; later bans preserve funded awards.
+   Solana v3 binds a freeze timestamp saved with the first signing intent;
+   signer retries keep that timestamp and the same authorization bytes.
    The signed allocation is immutable in `monthly_payment_authorizations`.
    `GET /api/v1/payments/projects/:projectId/monthly/:YYYY-MM/authorization/:network`
    returns only this final authorization and its publication time, without
@@ -309,8 +311,9 @@ sections 6 and 7). Migration `0062` adds its private records.
    accept this only on the test stack; production requires a separately operated
    executor. EVM admission reserves its awards in one transaction. Solana admits
    the total, then commits or releases one proven leaf per invocation. Only a
-   consumed source or zero actor can release its leaf; valid funded awards never
-   expire. An admitted Solana month continues after opt-out or its admission
+   source consumed before freeze, a sufficiently funded matching monthly source,
+   or zero actor can release its leaf. A conflicting manual award after freeze
+   stays reserved; valid funded awards never expire. An admitted Solana month continues after opt-out or its admission
    window closes. `monthly_payment_execution` tracks fair retries and completed
    execution, not public payment state. Signed transactions are journaled before
    broadcast and reused after an uncertain response.

@@ -1511,6 +1511,7 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
   ];
   const root = solanaAllocationRoot(entries);
   const total = solanaAllocationTotal(entries);
+  const frozenAt = String(await chainTime());
   const message = (p = period, r = root, at = project, domain = network) =>
     solanaMonthlyMessage(
       program.programId.toBase58(),
@@ -1518,6 +1519,7 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
       p,
       r,
       total,
+      frozenAt,
       Buffer.from(domain).toString("hex"),
     );
   const attestation = (signer = authority, bytes = message()) =>
@@ -1527,7 +1529,7 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
     });
   const recordAt = (n, r, pre) =>
     program.methods
-      .commitMonthly(n, [...Buffer.from(r, "hex")], bn(total))
+      .commitMonthly(n, [...Buffer.from(r, "hex")], bn(total), bn(frozenAt))
       .accountsStrict({
         payer: stranger.publicKey,
         project,
@@ -1572,6 +1574,11 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
           Buffer.from(entry.sourceDigest, "hex"),
         ),
         obligation: pda(seed("award"), key(project), award(entry)),
+        monthlySource: pda(
+          seed("monthly-source"),
+          key(project),
+          Buffer.from(entry.sourceDigest, "hex"),
+        ),
         settled: pda(
           seed("settled"),
           key(month(period)),
@@ -1651,6 +1658,7 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
           period,
           root,
           "59000000",
+          frozenAt,
           Buffer.from(network).toString("hex"),
         ),
       ),
@@ -1999,12 +2007,15 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
       },
     };
   };
+  const frozenAt = String((await chainTime()) + 1);
+  while ((await chainTime()) < Number(frozenAt)) await sleep(250);
   const signed = solanaMonthlyMessage(
     program.programId.toBase58(),
     project.toBase58(),
     period,
     root,
     total,
+    frozenAt,
     Buffer.from(network).toString("hex"),
   );
   const config = {
@@ -2056,6 +2067,7 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
       deployment: config,
       allocationRoot: root,
       totalGrossBase: total,
+      frozenAt,
       entries,
       messageHex: Buffer.from(signed).toString("hex"),
     },
@@ -2140,6 +2152,7 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
         project,
         month,
         origin: pda(seed("origin"), key(project), digest),
+        monthlySource: pda(seed("monthly-source"), key(project), digest),
         settled: pda(seed("settled"), key(month), digest),
         systemProgram: SystemProgram.programId,
       },
@@ -2155,7 +2168,11 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
             })
         : program.methods
             .releaseMonthlyAward(n, [...digest], ...tail)
-            .accountsStrict(shared)
+            .accountsStrict({
+              ...shared,
+              obligation:
+                index === 1 ? pda(seed("award"), key(project), award) : null,
+            })
     )
       .signers([stranger])
       .rpc();

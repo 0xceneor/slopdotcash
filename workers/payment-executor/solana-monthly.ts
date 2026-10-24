@@ -1,6 +1,8 @@
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import {
+  OBLIGATION_DISCRIMINATOR,
+  OBLIGATION_SIZE,
   PROJECT_SIZE,
   type SolanaEscrowConfig,
   solanaAccount,
@@ -168,12 +170,19 @@ export async function submitSolanaMonthly(
     throw new Error("Wrong monthly deployment");
   const root = solanaAllocationRoot(plan.entries);
   const total = solanaAllocationTotal(plan.entries);
+  if (
+    !plan.frozenAt ||
+    !/^[0-9]+$/.test(plan.frozenAt) ||
+    BigInt(plan.frozenAt) > (1n << 63n) - 1n
+  )
+    throw new Error("Invalid monthly freeze time");
   const signed = solanaMonthlyMessage(
     config.programId,
     config.projectPda,
     plan.request.period,
     root,
     total,
+    plan.frozenAt,
     config.networkDomain,
   );
   if (
@@ -191,7 +200,7 @@ export async function submitSolanaMonthly(
   const record = await readSolanaAccount(
     config,
     month,
-    100,
+    109,
     discriminator("MonthlyAllocation"),
   );
   const payer = { key: env.SOLANA_SIGNER.address, write: true };
@@ -252,6 +261,7 @@ export async function submitSolanaMonthly(
           period,
           solanaDigest(root),
           le(BigInt(total)),
+          le(BigInt(plan.frozenAt)),
         ),
       },
     ]);
@@ -260,13 +270,15 @@ export async function submitSolanaMonthly(
     solanaPubkey(record, 8) !== config.projectPda ||
     hex(record.slice(40, 44)) !== hex(period) ||
     hex(record.slice(44, 76)) !== root ||
-    solanaUint(record, 84) !== BigInt(total)
+    solanaUint(record, 84) !== BigInt(total) ||
+    solanaUint(record, 100) !== BigInt(plan.frozenAt)
   )
     throw new Error("Conflicting monthly reservation");
   if (solanaUint(record, 76) === BigInt(total))
     return { transactionId: null, alreadyCommitted: true };
   // Admission authenticated the whole root. Later authority rotation, opt-out and
   // period changes must not invalidate its already-funded, permissionless leaves.
+  let held = 0;
   let markers: (Uint8Array | null)[] = [];
   for (let index = 0; index < plan.entries.length; index++) {
     if (index % 100 === 0) {
@@ -318,7 +330,41 @@ export async function submitSolanaMonthly(
       40,
       discriminator("Origin"),
     );
+    const monthlySource = pda(config.programId, [
+      encoder.encode("monthly-source"),
+      bytes(config.projectPda),
+      source,
+    ]);
     const release = consumed !== null || BigInt(entry.githubUserId) === 0n;
+    let consumedAddress = config.programId; // Anchor optional account: program id represents None.
+    if (consumed) {
+      consumedAddress = solanaPubkey(consumed, 8);
+      const obligation = await readSolanaAccount(
+        config,
+        consumedAddress,
+        OBLIGATION_SIZE,
+        OBLIGATION_DISCRIMINATOR,
+      );
+      if (!obligation)
+        throw new Error("Consumed monthly source has no obligation");
+      const priorMonthly = await readSolanaAccount(
+        config,
+        monthlySource,
+        8,
+        discriminator("BindingVeto"),
+      );
+      const matchingMonthly =
+        priorMonthly &&
+        solanaUint(obligation, 112) === BigInt(entry.githubUserId) &&
+        solanaUint(obligation, 8) >= BigInt(entry.grossMicro);
+      if (
+        !matchingMonthly &&
+        solanaUint(obligation, 137) >= BigInt(plan.frozenAt)
+      ) {
+        held++;
+        continue;
+      } // The owner's post-freeze conflict stays reserved; other leaves may still progress.
+    }
     const proof = solanaAllocationProof(plan.entries, index);
     const award = solanaDigest(
       solanaAwardId(config.projectPda, entry.sourceDigest),
@@ -345,6 +391,8 @@ export async function submitSolanaMonthly(
                 project,
                 monthMeta,
                 { key: origin, write: false },
+                { key: monthlySource, write: false },
+                { key: consumedAddress, write: false },
                 { key: settled, write: true },
                 system,
               ]
@@ -363,6 +411,7 @@ export async function submitSolanaMonthly(
                   write: true,
                 },
                 { key: settled, write: true },
+                { key: monthlySource, write: true },
                 system,
               ],
           data: release
@@ -372,5 +421,9 @@ export async function submitSolanaMonthly(
       ],
     );
   }
+  if (held > 0)
+    throw new Error(
+      "Post-freeze source conflict remains reserved; reconciliation required",
+    );
   throw new Error("Monthly reservation counters disagree with settled leaves");
 }

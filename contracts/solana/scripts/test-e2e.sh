@@ -15,9 +15,11 @@ validator_pid=""
 trap 'if [[ -n "$validator_pid" ]]; then kill "$validator_pid" 2>/dev/null || true; fi' EXIT
 # The program loads as upgradeable with the local payer as upgrade authority, so
 # ProgramData exists and the payer can sign initialize_config, as on mainnet with the owner-controlled upgrade authority retained.
-upgrade_authority=$(solana-keygen pubkey "$ANCHOR_WALLET")
 start_validator() {
-  solana-test-validator --reset --quiet --ledger .local/ledger --rpc-port "$rpc_port" --faucet-port "$faucet_port" --dynamic-port-range "$dynamic_ports" --upgradeable-program 7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ target/deploy/slop_escrow.so "$upgrade_authority" "$@" >.local/validator.log 2>&1 &
+  local program_arguments
+  program_arguments=$(node integration/program-genesis.mjs)
+  read -ra program_accounts <<<"$program_arguments"
+  solana-test-validator --reset --quiet --ledger .local/ledger --rpc-port "$rpc_port" --faucet-port "$faucet_port" --dynamic-port-range "$dynamic_ports" "${program_accounts[@]}" "$@" >.local/validator.log 2>&1 &
   validator_pid=$!
   for attempt in $(seq 1 40); do
     if ! kill -0 "$validator_pid" 2>/dev/null; then

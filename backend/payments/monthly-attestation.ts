@@ -43,6 +43,8 @@ export interface MonthlyAttestationPlan {
   messageHex: string;
   family: "evm" | "solana";
   totalGrossBase: string;
+  /** Solana v3 attestation freeze time, persisted with the first signing intent. */
+  frozenAt?: string;
   entries: { githubUserId: string; grossMicro: string; sourceDigest: string }[];
 }
 function reject(code: string, message: string): never {
@@ -61,6 +63,7 @@ export async function prepareMonthlyAttestation(
     networks: readonly string[];
     schedule: MonthlySchedule;
     now: Date;
+    frozenAt?: string;
   },
   request: MonthlyAttestationRequest,
 ): Promise<MonthlyAttestationPlan> {
@@ -275,6 +278,20 @@ export async function prepareMonthlyAttestation(
       ? evmAllocationRoot(entries)
       : solanaAllocationRoot(entries);
   let messageHex: string;
+  const frozenAt =
+    network.family === "solana"
+      ? (deps.frozenAt ?? String(Math.floor(deps.now.getTime() / 1000)))
+      : undefined;
+  if (
+    frozenAt !== undefined &&
+    (!/^[0-9]+$/.test(frozenAt) ||
+      BigInt(frozenAt) < BigInt(cutoff.getTime() / 1000) ||
+      BigInt(frozenAt) > BigInt(Math.floor(deps.now.getTime() / 1000)))
+  )
+    reject(
+      "invalid_freeze",
+      "The attestation freeze time is outside its signing window.",
+    );
   if (network.family === "evm") {
     if (!network.chainId)
       reject("invalid_deployment", "EVM chain identity is missing.");
@@ -298,6 +315,7 @@ export async function prepareMonthlyAttestation(
         period,
         allocationRoot,
         totalGrossBase,
+        frozenAt as string,
         deployment.networkDomain,
       ),
       (b) => b.toString(16).padStart(2, "0"),
@@ -310,6 +328,7 @@ export async function prepareMonthlyAttestation(
     allocationRoot,
     messageHex,
     totalGrossBase,
+    ...(frozenAt === undefined ? {} : { frozenAt }),
     entries,
   };
 }

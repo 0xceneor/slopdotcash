@@ -3,7 +3,9 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import { privateKeyToAccount } from "viem/accounts";
+import { solanaBase58 } from "../../contracts/solana/adapter";
 import { monthlyBasesSql } from "../../scripts/prepare-monthly-rewards";
 import type { PaymentsAccount } from "../../src/lib/payments/contracts";
 import { escrowAwardOrigin } from "../../src/lib/payments/escrow-cycle";
@@ -52,6 +54,24 @@ const deployment = {
   factoryCodeSha256: "cd".repeat(32),
   registrar: "0x6000000000000000000000000000000000000006",
 };
+const solanaDeployment = {
+  ...deployment,
+  network: "solana-devnet",
+  vault: "So11111111111111111111111111111111111111112",
+  programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  projectPda: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+  networkDomain: "cd".repeat(32),
+  asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  owner: "11111111111111111111111111111111",
+  identityAuthority: "SysvarRent111111111111111111111111111111111",
+  feeRecipient: "SysvarC1ock11111111111111111111111111111111",
+  rotationAuthority: "Vote111111111111111111111111111111111111111",
+  deploymentTransaction: "1".repeat(64),
+  rotationDelaySeconds: "60",
+  factory: null,
+  factoryCodeSha256: null,
+  registrar: null,
+};
 const OWNER = "900000071";
 const A = "101";
 const B = "202";
@@ -73,7 +93,9 @@ let project: ProjectRecord;
 let restricted = false;
 let clock = afterCutoff;
 
-beforeEach(async () => {
+async function setupFixture(
+  selected: Record<string, string | null> = deployment,
+) {
   ({ db, sqlite } = sqliteD1(
     readdirSync("migrations")
       .filter((name) => name.endsWith(".sql"))
@@ -83,15 +105,16 @@ beforeEach(async () => {
     readFileSync("tests/fixtures/projects/eliza.json", "utf8"),
   );
   manifest.reward.feeBasisPoints = 200;
-  manifest.reward.chain = "base";
+  const chain = selected.network?.startsWith("solana") ? "solana" : "base";
+  manifest.reward.chain = chain;
   manifest.escrow = {
     schemaVersion: "1",
     effectiveCycle: "2026-11",
-    chain: "base",
+    chain,
     feeBasisPoints: 200,
     withdrawalFeeBasisPoints: 200,
     feeMode: "deduct-from-gross",
-    deployments: [deployment],
+    deployments: [selected],
   };
   const text = JSON.stringify(manifest);
   const digest = await sha256Hex(text);
@@ -152,7 +175,8 @@ beforeEach(async () => {
   );
   restricted = false;
   clock = afterCutoff;
-});
+}
+beforeEach(() => setupFixture());
 afterEach(() => sqlite.close());
 
 const projects = () => ({
@@ -164,7 +188,7 @@ const coordinate = (now: Date, configured = schedule) =>
   coordinateMonthlyPayments({
     db,
     projects: projects(),
-    networks: ["base-sepolia"],
+    networks: project.manifest.escrow?.deployments.map((d) => d.network) ?? [],
     schedule: configured,
     now,
   });
@@ -179,16 +203,18 @@ const owner = () =>
   });
 const actor = { githubId: OWNER, githubLogin: "owner" };
 function vault(free: string, observedAt = afterCutoff.toISOString()) {
+  const selected = project.manifest.escrow?.deployments[0];
+  if (!selected) throw new Error("Missing fixture deployment");
   sqlite
     .prepare(
       "INSERT INTO vault_snapshots(project_id,network,chain,vault,asset_address,asset_decimals,total_deposited,total_paid,total_payout_fees,total_gross_withdrawn,total_withdrawal_fees,total_service_fees,free_balance,reserved_principal,reserved_fees,accrued_fees,reserved,block_number,block_time,observed_at) VALUES(?,?,?,?,?,6,'5000','0','0','0','0','0',?,'0','0','0','0','100',?,?) ON CONFLICT(project_id,network,vault) DO UPDATE SET free_balance=excluded.free_balance,observed_at=excluded.observed_at,block_number=CAST(CAST(block_number AS INTEGER)+1 AS TEXT)",
     )
     .run(
       project.id,
-      "base-sepolia",
-      "base",
-      deployment.vault,
-      deployment.asset,
+      selected.network,
+      project.manifest.escrow?.chain,
+      selected.vault,
+      selected.asset,
       free,
       observedAt,
       observedAt,
@@ -1151,24 +1177,7 @@ test("monthly dispatcher resumes an older Solana reservation after opt-out and r
   await owner().setAutomatic(project.id, actor, false);
   // This is the dispatcher transport boundary. Real signature/admission and
   // post-opt-out leaf execution are covered by the Solana validator suite.
-  const solana = {
-    ...deployment,
-    network: "solana-devnet",
-    vault: "So11111111111111111111111111111111111111112",
-    programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
-    projectPda: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
-    networkDomain: "cd".repeat(32),
-    asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
-    owner: "11111111111111111111111111111111",
-    identityAuthority: "SysvarRent111111111111111111111111111111111",
-    feeRecipient: "SysvarC1ock11111111111111111111111111111111",
-    rotationAuthority: "Vote111111111111111111111111111111111111111",
-    deploymentTransaction: "1".repeat(64),
-    rotationDelaySeconds: "60",
-    factory: null,
-    factoryCodeSha256: null,
-    registrar: null,
-  };
+  const solana = solanaDeployment;
   const current = sqlite
     .prepare("SELECT manifest FROM projects WHERE id=?")
     .get(project.id) as { manifest: string };
@@ -1248,4 +1257,67 @@ test("monthly dispatcher resumes an older Solana reservation after opt-out and r
   await runMonthlyCommitments(dispatcher, nextMonth);
   expect(calls).toBe(3);
   expect(count("payment_obligations")).toBe(0);
+});
+
+test("Solana v3 retries preserve the first signed freeze time after a signer outage", async () => {
+  sqlite.close();
+  const seed = new Uint8Array(32).fill(7); // Public synthetic test key.
+  await setupFixture({
+    ...solanaDeployment,
+    identityAuthority: solanaBase58(ed25519.getPublicKey(seed)),
+  });
+  vault("1000");
+  await coordinate(afterCutoff);
+  if (!schedule) throw new Error("Missing fixture schedule");
+  const row = sqlite
+    .prepare("SELECT snapshot_sha256 digest FROM monthly_payment_runs")
+    .get() as { digest: string };
+  const values = new Map<string, unknown>();
+  const journal: JournalStore = {
+    async get<T>(key: string) {
+      return values.get(key) as T | undefined;
+    },
+    async put<T>(key: string, value: T) {
+      values.set(key, structuredClone(value));
+    },
+    async transaction<T>(fn: (store: JournalStore) => Promise<T>) {
+      return fn(journal);
+    },
+  };
+  let now = afterCutoff;
+  let fail = true;
+  const messages: string[] = [];
+  const deps = {
+    db,
+    ...projects(),
+    networks: ["solana-devnet"],
+    schedule,
+    now: () => now,
+    journal,
+    verifyDeployment: async () => {},
+    sign: async (plan: { messageHex: string }) => {
+      messages.push(plan.messageHex);
+      if (fail) throw new Error("test signer outage");
+      return Buffer.from(
+        ed25519.sign(Buffer.from(plan.messageHex, "hex"), seed),
+      ).toString("hex");
+    },
+  };
+  const request = {
+    projectId: project.id,
+    period: "2026-11",
+    network: "solana-devnet" as const,
+    snapshotSha256: row.digest,
+  };
+  await expect(signMonthlyAllocation(deps, request)).rejects.toThrow(
+    "test signer outage",
+  );
+  now = new Date(afterCutoff.getTime() + 60_000);
+  fail = false;
+  const signed = await signMonthlyAllocation(deps, request);
+  expect(signed.plan.frozenAt).toBe(String(afterCutoff.getTime() / 1000));
+  expect(messages[1]).toBe(messages[0]);
+  now = new Date(afterCutoff.getTime() + 120_000);
+  expect(await signMonthlyAllocation(deps, request)).toEqual(signed);
+  expect(messages.length).toBe(2);
 });
