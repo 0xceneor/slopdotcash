@@ -953,19 +953,19 @@ async function runReview(
     return `no action (${category})`;
   }
 
-  let blockedClose: string | null = null;
+  const proof = grounded(verdict, context, deterministic);
+  let blockedClose: string | null = proof.ok ? null : proof.why;
   let confirm: CallRecord | null = null;
   let close = false;
   // An uncertain finding goes to the maintainer first and never closes
   // (PRD section 5). Policy gates such as label-only modes are not uncertainty.
-  let uncertain = verdict.confidence < CLOSE_CONFIDENCE;
+  let uncertain = verdict.confidence < CLOSE_CONFIDENCE || !proof.ok;
   if (scope === "security") {
-    if (mode === "close") blockedClose = routing.reason;
+    if (mode === "close" && proof.ok) blockedClose = routing.reason;
   } else if (
     (mode === "close" || category === "low_quality") &&
     !NEVER_CLOSE.has(category)
   ) {
-    const proof = grounded(verdict, context, deterministic);
     const state = await closureState(env, job, context, routing.mayClose);
     if (!proof.ok) {
       blockedClose = proof.why;

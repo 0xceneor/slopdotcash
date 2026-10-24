@@ -28,6 +28,7 @@ async function uncertainReview(
     writes: string[];
     sql: (q: string) => unknown;
   }) => Promise<void>,
+  confidence = 0.6,
 ) {
   const { db, sqlite } = sqliteD1(
     readdirSync(new URL("../../migrations/", import.meta.url))
@@ -79,7 +80,7 @@ async function uncertainReview(
               type: "text",
               text: JSON.stringify({
                 category: "busywork",
-                confidence: 0.6,
+                confidence,
                 rule_refs: [],
                 evidence: [],
                 summary: "This change may be busywork.",
@@ -300,4 +301,18 @@ test("a maintainer who acts inside the window keeps the decision; Slopbot adds n
       { outcome: "maintainer_acted" },
     ]);
   });
+});
+
+test("a label-only finding without cited evidence waits even at high confidence", async () => {
+  await uncertainReview(
+    false,
+    async (run) => {
+      expect(await run.review()).toMatch(/^held for maintainer until /);
+      expect(run.writes.some((w) => w.endsWith("/labels"))).toBe(false);
+      expect(run.sql("SELECT status, action FROM slopbot_reviews")).toEqual([
+        { status: "completed", action: "hold" },
+      ]);
+    },
+    0.99,
+  );
 });
