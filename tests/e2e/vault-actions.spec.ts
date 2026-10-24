@@ -1548,7 +1548,10 @@ test("owner funds a separate bounty vault with private balances and no monthly r
   const fixturePath = join(temporary, "projects.json");
   writeFileSync(
     fixturePath,
-    JSON.stringify({ project: target, template: project }),
+    JSON.stringify({
+      project: target,
+      template: { ...project, securityBounty: undefined },
+    }),
   );
   let output = "";
   const server = spawn(
@@ -1730,6 +1733,7 @@ test("owner funds a separate bounty vault with private balances and no monthly r
     await expect(
       page.getByRole("region", { name: "Bounty funds", exact: true }),
     ).toContainText("Available for new awards: 10 USDC");
+    await expect(funding.getByRole("status")).toContainText("finalized");
     await page.getByRole("button", { name: "Edit bounty settings" }).click();
     await page.getByLabel("Status", { exact: true }).selectOption("open");
     await page.getByRole("button", { name: "Publish bounty terms" }).click();
@@ -1762,6 +1766,27 @@ test("owner funds a separate bounty vault with private balances and no monthly r
       path: info.outputPath("bounty-vault-funded-open.png"),
       fullPage: true,
     });
+    await page.goto(`${origin}/projects/${project.slug}/manage`, {
+      waitUntil: "networkidle",
+    });
+    await expect(
+      page.getByRole("heading", { name: "Manage project", exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("region", { name: "Bounty funds", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByText("Available for new awards:", { exact: false }),
+    ).toHaveCount(0);
+    await page.goto(`${origin}/projects/${id}/manage`, {
+      waitUntil: "networkidle",
+    });
+    await expect(
+      page.getByRole("region", { name: "Bounty funds", exact: true }),
+    ).toContainText("Available for new awards: 10 USDC");
+    await expect(funding.getByRole("status")).toHaveCount(0);
+    expect(errors).toEqual([]);
+    expect(failed).toEqual([]);
   } finally {
     server.kill("SIGTERM");
     rmSync(temporary, { recursive: true, force: true });
