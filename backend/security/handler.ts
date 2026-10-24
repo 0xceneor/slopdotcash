@@ -485,7 +485,10 @@ function allowedActions(row: CaseRow, roles: Set<Role>): string[] {
     if (open) actions.push("request-information");
     actions.push("remediation");
   }
-  if (roles.has("financial") && row.award_state === "approved")
+  if (
+    (roles.has("security-maintainer") || roles.has("financial")) &&
+    row.award_state === "approved"
+  )
     actions.push("prepare-payment");
   if (roles.has("dispute") && row.appeal_state === "open")
     actions.push("decide-appeal");
@@ -569,7 +572,7 @@ function nextStep(
       return {
         text: reporter
           ? "Accept payment visibility so the payer can prepare your payment."
-          : roles.has("financial")
+          : roles.has("security-maintainer") || roles.has("financial")
             ? "Prepare the private payment after the reporter accepts visibility."
             : "Waiting for payment preparation.",
         dueAt: row.payment_deadline,
@@ -2121,7 +2124,7 @@ async function planChange(
       });
       return {
         kind: action,
-        role: "financial",
+        role: actingRole(["security-maintainer", "financial"]),
         reason: null,
         evidenceReference: null,
         detail: {

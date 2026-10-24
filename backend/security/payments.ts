@@ -24,6 +24,10 @@ export async function securityPaymentNotices(
       SELECT c.id,json_extract(a.value,'$.githubId') FROM security_cases c
         JOIN projects p ON p.id=c.project_id,
         json_each(p.manifest,'$.securityBounty.approvers.financial') a
+      UNION
+      SELECT c.id,json_extract(a.value,'$.githubId') FROM security_cases c
+        JOIN projects p ON p.id=c.project_id,
+        json_each(p.manifest,'$.securityBounty.approvers.technical') a
     ) recipients ON recipients.case_id=s.case_id
     WHERE s.obligation_id=?
     ON CONFLICT(event_key,recipient_github_id) DO NOTHING`)
