@@ -50,7 +50,17 @@ disabled by `SLOPBOT_CLOSURE_ENABLED = "false"`.
    - an unchanged item just before acting.
 
    Otherwise the bot only comments and labels.
-7. `/slopbot appeal` from the author, or any reopen, blocks re-closing that
+7. An uncertain finding goes to the maintainer first (PRD section 5). A
+   finding is uncertain when its confidence is below 0.9, its cited rules or
+   evidence fail the verbatim check, or the second review does not confirm.
+   The bot comments, adds no label, and records a hold in
+   `slopbot_maintainer_holds` (`maintainer-holds.ts`). The 5-minute schedule
+   queues each hold after 7 days. If no maintainer commented, reviewed,
+   labeled, assigned or changed the item in that time, the bot adds the
+   finding's label only. An uncertain finding never closes an item. A closed,
+   merged or changed item, or a paused project for a non-security finding,
+   ends the hold without a label. Unknown maintainer status retries the hold.
+8. `/slopbot appeal` from the author, or any reopen, blocks re-closing that
    revision.
 
 ## Repository policy file
@@ -202,7 +212,12 @@ and publication separately. An unregistered repository must create no record.
 
 ## Not yet implemented
 
-- SCR-01 penalty journal events. Closures record `penaltyEligible` for them.
+- Penalty journal events. Closures record `penaltyEligible` for them. PRD
+  section 7 requires one owner-approved, published penalty table, and the PRD
+  lists its values as an open owner decision. No debit is recorded until then.
+- Slopbot appeal triage and draft resolutions. The PRD lists the escalation
+  criteria as an open owner decision. Until then an appeal is labeled
+  `slopbot: appeal` for a maintainer and blocks re-closing that revision.
 - Maintainer dashboard and Automation row (LDR-04).
 
 ## Value assessment work in progress

@@ -37,13 +37,18 @@ v2 keeps every v1 rule except the ones listed under "Changes from v1".
   9 October 2026, and every result says so.
 - Policy is read from the base branch at a recorded SHA. A pull request's own
   policy edits are content under review.
+- An uncertain finding goes to the maintainer first. If no maintainer acts
+  within 7 days, Slopbot adds its label only. An uncertain finding never
+  closes an item (PRD section 5).
 
 ## Penalty boundary
 
 A close by Slopbot creates a penalty only for an author who is a consenting
 Slop participant (PRD SCR-01). A close of an external author's item creates
 only the public outcome record. A human reopen suspends the penalty, and a
-successful appeal reverses it.
+successful appeal reverses it. Closure alone never authorizes a debit. No
+penalty is recorded until the owner approves and publishes the one penalty
+table that PRD section 7 requires.
 
 ## Cost
 
