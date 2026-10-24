@@ -1989,6 +1989,11 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
   }));
   // The owner consumes leaf B's source before the month is admitted.
   await commit("leaf-b", 999, 1);
+  const consumedAt = (
+    await program.account.obligation.fetch(obligation("leaf-b"))
+  ).committedAt.toNumber();
+  while ((await chainTime()) <= consumedAt) await sleep(500);
+  const frozenAt = String(await chainTime());
   const root = solanaAllocationRoot(entries),
     total = solanaAllocationTotal(entries);
   const nodeSigner = (keypair) => {
@@ -2007,8 +2012,6 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
       },
     };
   };
-  const frozenAt = String((await chainTime()) + 1);
-  while ((await chainTime()) < Number(frozenAt)) await sleep(250);
   const signed = solanaMonthlyMessage(
     program.programId.toBase58(),
     project.toBase58(),
