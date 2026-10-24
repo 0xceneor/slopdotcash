@@ -61,7 +61,6 @@ export async function readSecurityProgramFunds(
       snapshot.free_balance === null ||
       snapshot.asset_address !== deployment.asset ||
       snapshot.asset_decimals !== program.amount.decimals ||
-      Date.parse(snapshot.observed_at) > now ||
       !(now - Date.parse(snapshot.observed_at) <= VAULT_SNAPSHOT_MAX_AGE_MS)
     )
       continue;
