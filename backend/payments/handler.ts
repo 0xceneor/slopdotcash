@@ -37,6 +37,7 @@ import {
   type MonthlyOwnerService,
   MonthlyPaymentError,
 } from "./monthly";
+import { readMonthlyAuthorization } from "./monthly-publication";
 import {
   buildPaymentWalletMessage,
   canonicalEvmSignature,
@@ -226,6 +227,25 @@ export async function handlePaymentsApi(
           });
         throw error;
       }
+    }
+    const authorizationRoute =
+      /^\/projects\/([a-z0-9][a-z0-9-]*)\/monthly\/(\d{4}-(?:0[1-9]|1[0-2]))\/authorization\/([a-z0-9-]+)$/.exec(
+        path,
+      );
+    if (authorizationRoute && request.method === "GET") {
+      const [, projectId, period, network] = authorizationRoute;
+      const saved = await readMonthlyAuthorization(
+        deps.db,
+        projectId,
+        period,
+        network,
+      );
+      return saved
+        ? json(200, {
+            authorization: JSON.parse(saved.authorization),
+            publishedAt: saved.published_at,
+          })
+        : json(404, { error: "monthly_authorization_unavailable" });
     }
     const totalsRoute = /^\/projects\/([a-z0-9][a-z0-9-]*)\/totals$/.exec(path);
     if (totalsRoute && request.method === "GET") {

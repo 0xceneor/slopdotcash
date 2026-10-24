@@ -26,6 +26,7 @@ import {
   monthlyOwnerService,
 } from "./monthly";
 import { prepareMonthlyAttestation } from "./monthly-attestation";
+import { publishMonthlyAuthorizations } from "./monthly-publication";
 
 const testAttester = privateKeyToAccount(`0x${"01".repeat(32)}`);
 const deployment = {
@@ -955,6 +956,46 @@ test("monthly signing preserves its first intent through retry and refuses a cha
   const first = await signMonthlyAllocation(deps, request);
   expect(await signMonthlyAllocation(deps, request)).toEqual(first);
   expect(signatures).toBe(1);
+  const publicUrl = `https://slop.cash/api/v1/payments/projects/${project.id}/monthly/2026-11/authorization/base-sepolia`;
+  expect((await handlePaymentsApi(new Request(publicUrl), { db })).status).toBe(
+    404,
+  );
+  const publication = {
+    db,
+    networks: ["base-sepolia"],
+    schedule,
+    now: afterCutoff,
+    authorize: async () => first,
+  };
+  const failed = await publishMonthlyAuthorizations({
+    ...publication,
+    authorize: async () => {
+      throw new Error("transient signer outage");
+    },
+  });
+  expect(failed.failures).toHaveLength(1);
+  expect(count("monthly_payment_authorizations")).toBe(0);
+  expect((await publishMonthlyAuthorizations(publication)).published).toEqual([
+    `${project.id}/2026-11/base-sepolia`,
+  ]);
+  expect(
+    await publishMonthlyAuthorizations({
+      ...publication,
+      authorize: async () => {
+        throw new Error("must reuse published authorization");
+      },
+    }),
+  ).toEqual({ published: [], failures: [] });
+  const response = await handlePaymentsApi(new Request(publicUrl), { db });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    authorization: first,
+    publishedAt: afterCutoff.toISOString(),
+  });
+  expect(count("payment_obligations")).toBe(0);
+  expect(() =>
+    sqlite.exec("DELETE FROM monthly_payment_authorizations"),
+  ).toThrow("permanent");
   // A saved intent survives an interrupted signer and cannot be replaced.
   const [key, value] = [...records.entries()][0] as [
     string,

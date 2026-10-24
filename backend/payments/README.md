@@ -293,10 +293,19 @@ sections 6 and 7). Migration `0062` adds its private records.
    during the write forces a retry. Previously funded obligations remain valid.
    The owner sees excluded entries with zero payable amounts; they cannot obtain
    a reservation plan for those entries.
-5. **Reservation and payment.** The coordinator does not yet submit the D13
-   bounded monthly commitment (`commitMonthly` on EVM, `commit_monthly` and
-   `commit_monthly_award` on Solana; see the contract READMEs), because that
-   needs the attester signing service. Until then each obligation uses the
+5. **Authorization and execution.** The ordinary attester's scheduled job
+   refreshes the finalized vault projection, runs the coordinator, and signs
+   each funded month's eligible allocation. The Durable Object records the
+   first intent before signing and refuses a different root for that month.
+   Funding-time exclusions are omitted; later bans preserve funded awards.
+   The signed allocation is immutable in `monthly_payment_authorizations`.
+   `GET /api/v1/payments/projects/:projectId/monthly/:YYYY-MM/authorization/:network`
+   returns only this final authorization and its publication time, without
+   calling a signer or RPC. It exposes no private adjustment history.
+   Publication is not a reservation or payment. A project-operated or
+   permissionless executor must still submit the bounded commitment and
+   reconcile finalized results. Automatic executor submission is not yet
+   wired; the existing per-award path still uses
    owner-only `commitAward` and waits for the owner on the Awards page. `POST .../monthly/:YYYY-MM/commitment` and
    `.../solana-commitment` recheck the steward, repository authority, project
    revision, enforcement state, served network, execution snapshot digest and

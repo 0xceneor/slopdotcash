@@ -3,6 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import type { D1TransactionalDatabase as D1Database } from "../../backend/d1";
 import type { PaymentExecutor } from "../../backend/payments/dispatch";
 import type { MonthlyAttestationRequest } from "../../backend/payments/monthly-attestation";
+import { publishMonthlyAuthorizations } from "../../backend/payments/monthly-publication";
 import {
   CloudflareProjectPersistence,
   type ProjectD1Database,
@@ -11,8 +12,12 @@ import { publicRestrictionOf } from "../../backend/projects/enforcement";
 import { securityPaymentDatabase } from "../../backend/security/payment-database";
 import { solanaBase58 } from "../../contracts/solana/adapter";
 import { readBoundedJson } from "../../src/lib/browser-json";
-import { paymentDeploymentRecord } from "../../src/lib/escrow-policy.mjs";
+import {
+  ESCROW_NETWORKS,
+  paymentDeploymentRecord,
+} from "../../src/lib/escrow-policy.mjs";
 import { parseMonthlySchedule } from "../../src/lib/payments/monthly-allocation";
+import { runMonthlyCoordinator, syncRegistryVaults } from "../payments/index";
 import {
   createEvmAttester,
   createEvmExecutor,
@@ -22,6 +27,7 @@ import {
   retireUnsignedAttempt,
   type Signer,
 } from "./core";
+import type { MonthlyAuthorization } from "./monthly";
 import { signMonthlyAllocation } from "./monthly";
 import {
   SIGNER_STACKS,
@@ -336,8 +342,74 @@ export class PaymentSignerJournal {
   }
 }
 
+/** Background indexing and monthly signatures only; never dispatches a payment. */
+export async function runMonthlyAttester(env: Environment) {
+  if (env.SIGNER_ROLE !== "attester" || env.PAYMENT_SCOPE === "security-bounty")
+    return;
+  if (!env.REGISTRY_DB) throw new Error("Monthly registry binding missing");
+  const schedule = parseMonthlySchedule(env.MONTHLY_PAYMENT_SCHEDULE);
+  if (!schedule) throw new Error("Monthly schedule missing");
+  const stack = signerStack(env.SIGNER_STACK);
+  const deployments = JSON.parse(env.PAYMENT_DEPLOYMENTS) as {
+    network: string;
+  }[];
+  const networks = [...new Set(deployments.map((d) => d.network))];
+  if (
+    !networks.length ||
+    networks.some((network) => !stackServesNetwork(stack, network))
+  )
+    throw new Error("Monthly signer stack mismatch");
+  const worker = {
+    PAYMENTS_DB: env.PAYMENTS_DB,
+    REGISTRY_DB: env.REGISTRY_DB,
+    PAYMENT_NETWORKS: JSON.stringify(networks),
+    PAYMENT_RPC_URLS: env.PAYMENT_RPC_URLS,
+    PAYMENT_SOLANA_GENESIS: JSON.stringify(
+      Object.fromEntries(
+        networks.map((network) => [
+          network,
+          ESCROW_NETWORKS[network as keyof typeof ESCROW_NETWORKS]?.genesisHash,
+        ]),
+      ),
+    ),
+    MONTHLY_PAYMENT_SCHEDULE: env.MONTHLY_PAYMENT_SCHEDULE,
+  };
+  const sync = await syncRegistryVaults(worker);
+  await runMonthlyCoordinator(worker);
+  const report = await publishMonthlyAuthorizations({
+    db: env.PAYMENTS_DB,
+    networks,
+    schedule,
+    now: new Date(),
+    authorize: async (request) => {
+      const response = await env.JOURNAL.get(
+        env.JOURNAL.idFromName(SIGNER_STACKS[stack].journal),
+      ).fetch(
+        new Request("https://attester.internal/v1/monthly-authorization", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        }),
+      );
+      if (!response.ok)
+        throw new Error("Monthly attester rejected authorization");
+      return (await readBoundedJson(
+        response,
+        4 * 1024 * 1024,
+        "monthly authorization",
+      )) as MonthlyAuthorization;
+    },
+  });
+  if (sync.failures.length || report.failures.length)
+    throw new Error("Monthly indexing or authorization incomplete");
+  return report;
+}
+
 /** Service bindings only. workers_dev and preview URLs must remain disabled in both deployments. */
 export default {
+  async scheduled(_event: unknown, env: Environment) {
+    await runMonthlyAttester(env);
+  },
   async fetch(request: Request, env: Environment) {
     return env.JOURNAL.get(
       env.JOURNAL.idFromName(

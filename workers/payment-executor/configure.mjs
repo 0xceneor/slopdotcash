@@ -195,6 +195,9 @@ export function paymentStack({
           },
       ...(signer
         ? {
+            ...(monthlyAttester
+              ? { triggers: { crons: ["*/5 * * * *"] } }
+              : {}),
             durable_objects: {
               bindings: [
                 { name: "JOURNAL", class_name: "PaymentSignerJournal" },

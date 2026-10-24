@@ -1,0 +1,97 @@
+/** Publish final signed execution inputs from the scheduled attester (PRD 6).
+ * No signing, RPC, or payment submission occurs in the public read route.
+ */
+import {
+  type MonthlySchedule,
+  monthlyCutoff,
+  periodEnd,
+} from "../../src/lib/payments/monthly-allocation";
+import type { MonthlyAuthorization } from "../../workers/payment-executor/monthly";
+import type { D1TransactionalDatabase } from "../d1";
+import { automaticMonthlyPayment } from "./monthly";
+import type { MonthlyAttestationRequest } from "./monthly-attestation";
+
+export async function publishMonthlyAuthorizations(deps: {
+  db: D1TransactionalDatabase;
+  networks: readonly string[];
+  schedule: MonthlySchedule;
+  now: Date;
+  authorize(request: MonthlyAttestationRequest): Promise<MonthlyAuthorization>;
+}) {
+  const candidates = await deps.db
+    .prepare(
+      "SELECT json_group_array(json_object('projectId',r.project_id,'period',r.period,'network',r.network,'snapshotSha256',r.snapshot_sha256)) items FROM monthly_payment_runs r WHERE r.obligations_created_at IS NOT NULL AND EXISTS(SELECT 1 FROM monthly_payment_obligations o WHERE o.project_id=r.project_id AND o.period=r.period) AND NOT EXISTS(SELECT 1 FROM monthly_payment_authorizations a WHERE a.project_id=r.project_id AND a.period=r.period AND a.network=r.network)",
+    )
+    .first<{ items: string }>();
+  const published: string[] = [];
+  const failures: unknown[] = [];
+  for (const request of JSON.parse(
+    candidates?.items ?? "[]",
+  ) as MonthlyAttestationRequest[]) {
+    if (
+      !deps.networks.includes(request.network) ||
+      !(await automaticMonthlyPayment(deps.db, request.projectId))
+    )
+      continue;
+    const cutoff = monthlyCutoff(deps.schedule, request.period);
+    const closes = monthlyCutoff(
+      deps.schedule,
+      periodEnd(request.period).toISOString().slice(0, 7),
+    );
+    if (!cutoff || !closes || deps.now < cutoff || deps.now >= closes) continue;
+    try {
+      const authorization = await deps.authorize(request);
+      if (
+        Object.entries(request).some(
+          ([key, value]) =>
+            authorization.plan.request[
+              key as keyof MonthlyAttestationRequest
+            ] !== value,
+        )
+      )
+        throw new Error("Attester returned another monthly allocation");
+      const text = JSON.stringify(authorization);
+      await deps.db
+        .prepare(
+          "INSERT INTO monthly_payment_authorizations(project_id,period,network,snapshot_sha256,authorization,published_at) SELECT project_id,period,network,snapshot_sha256,?,? FROM monthly_payment_runs WHERE project_id=? AND period=? AND network=? AND snapshot_sha256=? AND obligations_created_at IS NOT NULL ON CONFLICT DO NOTHING",
+        )
+        .bind(
+          text,
+          deps.now.toISOString(),
+          request.projectId,
+          request.period,
+          request.network,
+          request.snapshotSha256,
+        )
+        .run();
+      const saved = await readMonthlyAuthorization(
+        deps.db,
+        request.projectId,
+        request.period,
+        request.network,
+      );
+      if (saved?.authorization !== text)
+        throw new Error("Monthly authorization publication conflict");
+      published.push(
+        `${request.projectId}/${request.period}/${request.network}`,
+      );
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  return { published, failures };
+}
+
+export function readMonthlyAuthorization(
+  db: D1TransactionalDatabase,
+  projectId: string,
+  period: string,
+  network: string,
+) {
+  return db
+    .prepare(
+      "SELECT authorization,published_at FROM monthly_payment_authorizations WHERE project_id=? AND period=? AND network=?",
+    )
+    .bind(projectId, period, network)
+    .first<{ authorization: string; published_at: string }>();
+}
