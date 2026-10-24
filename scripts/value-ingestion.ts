@@ -43,6 +43,62 @@ export class ValueFeedUnavailableError extends Error {
 /** Process exit status for a value feed outage (EX_TEMPFAIL). */
 export const VALUE_FEED_UNAVAILABLE_EXIT_CODE = 75;
 
+/**
+ * One bounded JSON page from the hosted Slopbot origin. A transport failure,
+ * timeout or retryable status is an outage; any other failure is an error.
+ */
+export async function fetchHostedJson(
+  url: URL,
+  transport: Fetch,
+  label: string,
+): Promise<unknown> {
+  if (url.origin !== HISTORY_ORIGIN)
+    throw new Error(`${label} must come from the hosted Slopbot origin`);
+  let response: Response;
+  try {
+    response = await transport(url, {
+      redirect: "manual",
+      cache: "no-store",
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    throw new ValueFeedUnavailableError(error);
+  }
+  if (
+    response.status === 408 ||
+    response.status === 429 ||
+    response.status >= 500
+  )
+    throw new ValueFeedUnavailableError(`HTTP ${response.status}`);
+  if (response.status !== 200 || response.redirected || !response.body)
+    throw new Error(`Authoritative ${label.toLowerCase()} is unavailable`);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    let result: Awaited<ReturnType<typeof reader.read>>;
+    try {
+      result = await reader.read();
+    } catch (error) {
+      throw new ValueFeedUnavailableError(error);
+    }
+    if (result.done) break;
+    size += result.value.byteLength;
+    if (size > 8 * 1024 * 1024) {
+      await reader.cancel();
+      throw new Error(`${label} response exceeds its page bound`);
+    }
+    chunks.push(result.value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+
 /** The fixed HTTPS origin, not a digest supplied by an arbitrary URL, is the
  * publication authority. Test callers can inject a transport, never a new URL.
  */
@@ -73,51 +129,12 @@ async function fetchHistoryPage(
   url.searchParams.set("pull", String(pull));
   url.searchParams.set("after", String(after));
   if (through !== null) url.searchParams.set("through", String(through));
-  let response: Response;
-  try {
-    response = await transport(url, {
-      redirect: "manual",
-      cache: "no-store",
-      signal: AbortSignal.timeout(30_000),
-    });
-  } catch (error) {
-    throw new ValueFeedUnavailableError(error);
-  }
-  if (
-    response.status === 408 ||
-    response.status === 429 ||
-    response.status >= 500
-  )
-    throw new ValueFeedUnavailableError(`HTTP ${response.status}`);
-  if (response.status !== 200 || response.redirected || !response.body)
-    throw new Error("Authoritative value history is unavailable");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    let result: Awaited<ReturnType<typeof reader.read>>;
-    try {
-      result = await reader.read();
-    } catch (error) {
-      throw new ValueFeedUnavailableError(error);
-    }
-    if (result.done) break;
-    size += result.value.byteLength;
-    if (size > 8 * 1024 * 1024) {
-      await reader.cancel();
-      throw new Error("Value history response exceeds its page bound");
-    }
-    chunks.push(result.value);
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.length;
-  }
-  const body = JSON.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-  );
+  // Untyped, as JSON.parse returns it; every field is checked below.
+  const body = (await fetchHostedJson(
+    url,
+    transport,
+    "Value history",
+  )) as ReturnType<typeof JSON.parse>;
   if (
     body?.schemaVersion !==
       (kind === "joint"

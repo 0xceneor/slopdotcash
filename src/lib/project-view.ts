@@ -33,6 +33,7 @@ import {
 } from "./projects.mjs";
 import { resolveRewardCapMinor } from "./reward-cap.mjs";
 import type { ProjectRunReceipt } from "./run-receipts";
+import { penaltyDebitThirds, snapshotProjectOf } from "./score-penalties";
 
 export const MAX_CREDITED_TOKENS_PER_OUTCOME = 1_000_000;
 const SHARE_PARTS_PER_MILLION = 1_000_000;
@@ -52,7 +53,10 @@ export interface ProjectContributor {
   rank: number;
   actor: GitHubActor;
   score: number;
+  /** Cycle credit less the applied penalty debit. */
   scoreThirds: number;
+  /** The published penalty debit applied to this cycle, in thirds. */
+  penaltyThirds: number;
   simulatedMinor: string | null;
   simulatedDisplayMinor: string | null;
   adjustedWeight: number;
@@ -549,6 +553,15 @@ export function createProjectView(
   for (const leader of paymentView?.leaders ?? [])
     actors.set(leader.actor.id, leader.actor);
 
+  // A debit of this project and month reduces only this cycle (PRD section 7).
+  const debits = penaltyDebitThirds(
+    ledger,
+    (snapshot.penalties ?? []).filter(
+      (penalty) =>
+        repositoryIds.has(penalty.repository) && penalty.period === cycleId,
+    ),
+    snapshotProjectOf(snapshot),
+  );
   const leaders = [...actors.values()].map<ProjectContributor>((actor) => {
     const events = ledger.filter((event) => event.actor.id === actor.id);
     const usage = usageForActor(actor.id, events, runs);
@@ -556,7 +569,7 @@ export function createProjectView(
       (total, event) => total + (event.scoreThirds ?? event.points * 3),
       0,
     );
-    const weightedThirdBasisPoints = events.reduce(
+    const creditedWeight = events.reduce(
       (total, event) =>
         total +
         (event.scoreThirds ?? event.points * 3) *
@@ -564,10 +577,15 @@ export function createProjectView(
       0,
     );
     const computeBonus =
-      rawThirds === 0
-        ? 0
-        : Math.floor(weightedThirdBasisPoints / rawThirds) - 10_000;
-    const score = Math.floor(rawThirds / 3);
+      rawThirds === 0 ? 0 : Math.floor(creditedWeight / rawThirds) - 10_000;
+    const penaltyThirds = debits.get(actor.id) ?? 0;
+    const netThirds = rawThirds - penaltyThirds;
+    // The debit removes weight in proportion; the compute bonus rate stays.
+    const weightedThirdBasisPoints =
+      penaltyThirds === 0
+        ? creditedWeight
+        : Math.floor((creditedWeight * netThirds) / rawThirds);
+    const score = Math.floor(netThirds / 3);
     const points = {
       "merged-pull-request": 0,
       "resolved-issue": 0,
@@ -581,7 +599,8 @@ export function createProjectView(
       rank: 0,
       actor,
       score,
-      scoreThirds: rawThirds,
+      scoreThirds: netThirds,
+      penaltyThirds,
       simulatedMinor: null,
       simulatedDisplayMinor: null,
       adjustedWeight: weightedThirdBasisPoints,

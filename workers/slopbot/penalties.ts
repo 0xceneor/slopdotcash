@@ -58,9 +58,9 @@ export type Penalty = {
 
 /** Records the table debit for one confirmed close. A replay or retry of the
  * same pull request keeps the first row. Returns null when the table sets no
- * debit. The row carries the UTC month of the close; the score that consumes
- * it never takes that month below zero and never changes an approved,
- * scheduled or paid award.
+ * debit. The row carries the UTC month of the close. The leaderboard reads
+ * unreversed rows from `GET /v1/penalties` (penaltyFeed) and applies each to
+ * that month only, never below zero; a closed cycle record never changes.
  */
 export async function recordPenalty(
   db: D1Database,
@@ -94,7 +94,8 @@ export async function recordPenalty(
       input.closedAt.toISOString().slice(0, 7),
       rule.moderatorReview ? 1 : 0,
       input.reviewKey,
-      new Date().toISOString(),
+      // The close time, so the published debit and its month always agree.
+      input.closedAt.toISOString(),
     )
     .run();
   return activePenalty(db, input.itemNodeId);
@@ -112,6 +113,62 @@ export async function activePenalty(
     )
     .bind(itemNodeId)
     .first<Penalty>();
+}
+
+export const PENALTY_FEED_SCHEMA = "slop-penalties:v1";
+export const PENALTY_FEED_PAGE_SIZE = 500;
+
+export type PenaltyFeedRecord = {
+  itemNodeId: string;
+  repositoryId: number;
+  itemKind: "issue" | "pull_request" | null;
+  itemNumber: number | null;
+  authorGithubId: number;
+  category: string;
+  tableVersion: string;
+  debitThirds: number;
+  period: string;
+  recordedAt: string;
+};
+
+/**
+ * The public read of one UTC month: unreversed debits only, in item node ID
+ * order. Identifiers, integers and the table category only; no verdict,
+ * appeal text, source or model output.
+ */
+export async function penaltyFeed(
+  db: D1Database,
+  period: string,
+  after: string,
+): Promise<{ records: PenaltyFeedRecord[]; nextAfter: string | null }> {
+  // The review row gives the item kind and number. Both are null only if that
+  // row is missing, and the leaderboard reader then fails closed.
+  const row = await db
+    .prepare(
+      `SELECT json_group_array(json_object(
+        'itemNodeId', item_node_id, 'repositoryId', repository_id,
+        'itemKind', item_kind, 'itemNumber', item_number,
+        'authorGithubId', CAST(author_github_id AS INTEGER),
+        'category', category, 'tableVersion', table_version,
+        'debitThirds', debit_thirds, 'period', period,
+        'recordedAt', recorded_at)) AS records
+       FROM (SELECT p.*, r.item_kind, r.item_number
+         FROM slopbot_penalties p
+         LEFT JOIN slopbot_reviews r ON r.review_key = p.review_key
+         WHERE p.period = ? AND p.reversed_at IS NULL AND p.item_node_id > ?
+         ORDER BY p.item_node_id LIMIT ?)`,
+    )
+    .bind(period, after, PENALTY_FEED_PAGE_SIZE + 1)
+    .first<{ records: string }>();
+  const rows = JSON.parse(row?.records ?? "[]") as PenaltyFeedRecord[];
+  const records = rows.slice(0, PENALTY_FEED_PAGE_SIZE);
+  return {
+    records,
+    nextAfter:
+      rows.length > PENALTY_FEED_PAGE_SIZE
+        ? (records.at(-1)?.itemNodeId ?? null)
+        : null,
+  };
 }
 
 /** Reverses the debit once. Later appeals, reopens and retries change nothing. */

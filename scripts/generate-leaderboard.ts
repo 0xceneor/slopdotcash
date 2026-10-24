@@ -1,4 +1,5 @@
 import { GitHubClient } from "../workers/slopbot/github";
+import { loadPenaltyInputs } from "./penalty-ingestion";
 import {
   loadValueInputs,
   VALUE_FEED_UNAVAILABLE_EXIT_CODE,
@@ -4069,6 +4070,25 @@ export async function generateLeaderboardFromGitHub(
       )),
     );
   }
+  // Published Slopbot debits reduce their month's score (PRD section 7). They
+  // come from the same hosted Slopbot origin as value assessments, so the
+  // months under the value policy read them; earlier months have no debits.
+  const penaltyFrom =
+    valuePolicyFrom.getTime() > windowFrom.getTime()
+      ? valuePolicyFrom
+      : windowFrom;
+  const penalties =
+    penaltyFrom.getTime() > now.getTime()
+      ? undefined
+      : await loadPenaltyInputs(
+          {
+            get: <T>(path: string) => {
+              valueRestRequests += 1;
+              return github.get<T>(path);
+            },
+          },
+          { from: penaltyFrom.toISOString(), to: now.toISOString() },
+        );
   const fetchedAt = new Date().toISOString();
   const rateLimit = client.getRateLimit();
   const source: LeaderboardSourceMetadata = {
@@ -4130,6 +4150,7 @@ export async function generateLeaderboardFromGitHub(
       now,
       actualNow,
     ),
+    penalties,
     retainedReviewEvents: options.retainedReviewEvents,
     retainedReviewAttributions: options.retainedReviewAttributions,
     verifyRunReceipt: verifyRunReceiptSignature,

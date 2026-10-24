@@ -328,6 +328,30 @@ export interface ScoreEvent {
   };
 }
 
+/**
+ * One unreversed debit from the published Slopbot penalty table (PRD section
+ * 7). It reduces only the actor's score for its UTC month in its project, and
+ * never below zero. It is not a score event and never changes an approved,
+ * scheduled or paid award.
+ */
+export interface ScorePenalty {
+  /** The closed item's GitHub node ID; one debit per item. */
+  id: string;
+  actor: GitHubActor;
+  repository: RepositoryId;
+  /** The UTC month of the confirmed close, `YYYY-MM`. */
+  period: string;
+  occurredAt: string;
+  category: string;
+  tableVersion: string;
+  debitThirds: number;
+  source: {
+    kind: "issue" | "pull-request";
+    number: number;
+    url: string;
+  };
+}
+
 export type ScoreOpportunityKind =
   | "near-material-test"
   | "expand-review"
@@ -369,7 +393,10 @@ export interface LeaderboardEntry {
   rank: number;
   actor: GitHubActor;
   score: number;
+  /** Ledger credit less the applied penalty debit. */
   scoreThirds: number;
+  /** Present only when a published penalty reduced this score. */
+  penaltyThirds?: number;
   points: {
     mergedPullRequests: number;
     resolvedIssues: number;
@@ -549,6 +576,8 @@ export interface LeaderboardSnapshot {
   source: LeaderboardSourceMetadata;
   leaders: LeaderboardEntry[];
   ledger: ScoreEvent[];
+  /** Absent in snapshots published before penalties reached the score. */
+  penalties?: ScorePenalty[];
   valueAssessmentCoverage?: {
     pullRequestId: string;
     repository: RepositoryId;
@@ -617,6 +646,8 @@ export interface LeaderboardInput {
   verificationWindowFrom: string;
   verifiedEvidence: VerifiedEvidenceArtifact[];
   evaluatedContributions?: ScoreEvent[];
+  /** Unreversed Slopbot debits whose UTC month overlaps the window. */
+  penalties?: ScorePenalty[];
   /**
    * Previously published accepted review events. GitHub may delete a merged
    * pull request and its reviews; only events whose parent outcome is absent

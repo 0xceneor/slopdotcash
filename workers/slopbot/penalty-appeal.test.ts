@@ -6,9 +6,21 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { readdirSync } from "node:fs";
+import { loadPenaltyInputs } from "../../scripts/penalty-ingestion";
+import { CYCLE_INDEX_SCHEMA_VERSION } from "../../src/lib/cycle-index";
+import { createGlobalLeaders } from "../../src/lib/global-leaderboard";
+import { createLeaderboardSnapshot } from "../../src/lib/leaderboard";
+import type {
+  GitHubActor,
+  LeaderboardInput,
+  ScorePenalty,
+} from "../../src/lib/leaderboard-types";
+import { createProjectView } from "../../src/lib/project-view";
 import { findProject } from "../../src/lib/projects.mjs";
+import { TARGET_REPOSITORIES } from "../../src/lib/repositories.mjs";
 import { sqliteD1 } from "../../tests/sqlite-d1";
 import type { Category, Job } from "./contracts";
+import { GitHubClient } from "./github";
 import worker from "./index";
 import type { D1TransactionalDatabase } from "./persistence";
 import { type ReviewEnv, reviewItem } from "./review";
@@ -40,6 +52,8 @@ type Run = {
   labels: string[];
   sql: (q: string) => unknown;
   job: (kind: string, extra: Record<string, unknown>) => Job;
+  /** The public penalty route of the real worker, as the leaderboard reads it. */
+  feed: typeof fetch;
 };
 
 async function closedItem(cb: (run: Run) => Promise<void>) {
@@ -154,6 +168,7 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
       if (path === `/repos/${owner}/${repo}`)
         return Response.json({
           id: repositoryId,
+          node_id: project.authority.repositoryNodeId,
           private: false,
           default_branch: "main",
           owner: { login: owner, id: 77, type: "Organization" },
@@ -223,6 +238,19 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
         return Response.json({
           login: login(Number(user[1])),
           id: Number(user[1]),
+          node_id: `U_${user[1]}`,
+          avatar_url: `https://avatars.githubusercontent.com/u/${user[1]}?v=4`,
+          html_url: `https://github.com/${login(Number(user[1]))}`,
+          type: "User",
+        });
+      // The other collected repositories, for the leaderboard's identity read.
+      const other = TARGET_REPOSITORIES.findIndex(
+        (target) => path === `/repos/${target.owner}/${target.name}`,
+      );
+      if (other >= 0)
+        return Response.json({
+          id: 7000 + other,
+          node_id: TARGET_REPOSITORIES[other].expectedNodeId,
         });
       if (path.endsWith("/permission"))
         return Response.json({
@@ -291,6 +319,7 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
     number: 5,
   };
   type Worker = {
+    fetch(request: Request, env: unknown): Promise<Response>;
     scheduled(event: unknown, env: unknown): Promise<void>;
     queue(batch: unknown, env: unknown): Promise<void>;
   };
@@ -368,6 +397,11 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
         verdict = { category, confidence };
       },
       sql: (q) => sqlite.query(q).all(),
+      feed: (async (url: Parameters<typeof fetch>[0]) =>
+        (worker as unknown as Worker).fetch(
+          new Request(url instanceof Request ? url.url : String(url)),
+          env,
+        )) as typeof fetch,
     });
   } finally {
     console.log = log;
@@ -596,6 +630,214 @@ test("concurrent moderator decisions cannot deny an appeal after its uphold star
     expect(
       run.comments.some((comment) => comment.includes("**Appeal denied**")),
     ).toBe(false);
+  });
+});
+
+// The published score path: the leaderboard reads the worker's public penalty
+// route, resolves the author on GitHub and builds the snapshot, the project
+// cycle and the cumulative leaderboard from the same records.
+const WINDOW = {
+  from: "2026-09-15T00:01:00.000Z",
+  to: "2026-10-20T00:01:00.000Z",
+};
+const AUTHOR_ACTOR: GitHubActor = {
+  id: "U_42",
+  login: "author",
+  avatarUrl: "https://avatars.githubusercontent.com/u/42?v=4",
+  url: "https://github.com/author",
+  kind: "User",
+};
+
+function mergedInput(penalties: ScorePenalty[] | undefined): LeaderboardInput {
+  const merges = [
+    { number: 31, mergedAt: "2026-09-20T00:00:00.000Z", head: "1" },
+    { number: 32, mergedAt: "2026-10-10T00:00:00.000Z", head: "2" },
+    { number: 33, mergedAt: "2026-10-12T00:00:00.000Z", head: "3" },
+  ].map(({ number, mergedAt, head }) => ({
+    id: `PR_merged_${number}`,
+    number,
+    title: `fix: accepted outcome ${number}`,
+    url: `https://github.com/SlopDotCash/asi/pull/${number}`,
+    body: "Fixes a defect.",
+    createdAt: mergedAt,
+    updatedAt: mergedAt,
+    mergedAt,
+    author: AUTHOR_ACTOR,
+    additions: 10,
+    deletions: 2,
+    head: head.repeat(40),
+  }));
+  return {
+    generatedAt: WINDOW.to,
+    windowFrom: WINDOW.from,
+    windowTo: WINDOW.to,
+    sourceUpdatedAt: merges[1].mergedAt,
+    source: {
+      provider: "github-graphql",
+      fetchedAt: WINDOW.to,
+      cutoffAt: WINDOW.to,
+      repositoryId: "R_fixture_0",
+      repositories: TARGET_REPOSITORIES.map((repository, index) => ({
+        id: repository.id,
+        repositoryId: `R_fixture_${index}`,
+      })),
+      requestCount: 1,
+      searchSliceCount: 1,
+      rateLimit: {
+        cost: 1,
+        limit: 5000,
+        remaining: 4999,
+        resetAt: WINDOW.to,
+      },
+      counts: {
+        mergedPullRequests: merges.length,
+        detailedMergedPullRequests: merges.length,
+        closedIssues: 0,
+        detailedClosedIssues: 0,
+        resolvedIssues: 0,
+        openIssues: 0,
+        openPullRequests: 0,
+      },
+      verificationWindow: { days: 35, ...WINDOW },
+      evidenceVerification: {
+        status: "complete",
+        sourceCount: 0,
+        artifactCount: 0,
+        maxSources: 64,
+        maxArtifacts: 64,
+      },
+    },
+    mergedPullRequestOutcomes: merges.map(({ head, ...merge }) => ({
+      ...merge,
+      baseRefName: "main",
+      commits: [{ oid: head, author: AUTHOR_ACTOR }],
+    })),
+    mergedPullRequests: merges.map(({ head, ...merge }) => ({
+      ...merge,
+      lastEditedAt: null,
+      editor: null,
+      headRefOid: head,
+      isDraft: false,
+      reviewDecision: "APPROVED",
+      activeReviewRequestCount: 0,
+      assignees: [],
+      labels: [],
+      files: [{ path: "src/fix.py", additions: 10, deletions: 2 }],
+      comments: [],
+      reviews: [],
+      closingIssueIds: [],
+      changedFiles: 1,
+      commitCount: 1,
+    })),
+    detailEligibleMergedPullRequestIds: merges.map((merge) => merge.id),
+    closedIssueCount: 0,
+    resolvedIssues: [],
+    openIssues: [],
+    openPullRequests: [],
+    verificationWindowFrom: WINDOW.from,
+    verifiedEvidence: [],
+    penalties,
+  };
+}
+
+async function publishedScore(run: Run) {
+  const penalties = await loadPenaltyInputs(
+    GitHubClient.forToken("local-synthetic-token"),
+    WINDOW,
+    run.feed,
+  );
+  const snapshot = createLeaderboardSnapshot(mergedInput(penalties));
+  const leader = snapshot.leaders.find(
+    (entry) => entry.actor.id === AUTHOR_ACTOR.id,
+  );
+  const cycle = (cycleId: string) =>
+    createProjectView(snapshot, "asi", cycleId).leaders.find(
+      (entry) => entry.actor.id === AUTHOR_ACTOR.id,
+    );
+  const global = createGlobalLeaders(snapshot, [], {
+    schemaVersion: CYCLE_INDEX_SCHEMA_VERSION,
+    generatedAt: WINDOW.to,
+    cycles: [],
+  }).find((entry) => entry.actor.id === AUTHOR_ACTOR.id);
+  return {
+    penalties: snapshot.penalties?.map(
+      (penalty) => `${penalty.source.url}:${penalty.debitThirds}`,
+    ),
+    rolling: [leader?.scoreThirds, leader?.penaltyThirds ?? 0],
+    september: [cycle("2026-09")?.scoreThirds, cycle("2026-09")?.penaltyThirds],
+    october: [cycle("2026-10")?.scoreThirds, cycle("2026-10")?.penaltyThirds],
+    global: global?.score,
+  };
+}
+
+test("a recorded debit changes the published score of its month once, and an upheld appeal restores it once", async () => {
+  setSystemTime(new Date("2026-10-20T00:00:00.000Z"));
+  await closedItem(async (run) => {
+    // Without a close, the author's merges score in their own months.
+    const before = await publishedScore(run);
+    expect(before.penalties).toEqual([]);
+    const [september, october] = [before.september[0], before.october[0]];
+    if (september === undefined || october === undefined)
+      throw new Error("fixture merges did not score");
+    expect(september).toBeGreaterThan(0);
+    expect(october).toBeGreaterThan(3);
+    expect(before.rolling).toEqual([september + october, 0]);
+    expect(before.september).toEqual([september, 0]);
+    expect(before.october).toEqual([october, 0]);
+
+    // The confirmed spam close of 20 October debits 3 thirds from October
+    // only. A replayed review records nothing new.
+    expect(await run.review()).toBe("closed (spam)");
+    expect(await run.review()).toBe(
+      "already reviewed at this revision and policy",
+    );
+    const after = await publishedScore(run);
+    expect(after).toEqual({
+      penalties: ["https://github.com/SlopDotCash/asi/pull/5:3"],
+      rolling: [september + october - 3, 3],
+      september: [september, 0],
+      october: [october - 3, 3],
+      global: (september + october - 3) / 3,
+    });
+
+    // An upheld appeal reverses the debit once; the score returns.
+    run.model("none", 0.95);
+    await run.deliver(run.job("appeal", { senderId: AUTHOR }));
+    expect(
+      await run.deliver(
+        run.job("appeal_command", { command: "accept", senderId: AUTHOR }),
+      ),
+    ).toBe("appeal upheld by the appellant");
+    expect(await publishedScore(run)).toEqual(before);
+  });
+});
+
+test("a scam debit never takes its month below zero, and the feed rejects an invalid month", async () => {
+  setSystemTime(new Date("2026-10-20T00:00:00.000Z"));
+  await closedItem(async (run) => {
+    const before = await publishedScore(run);
+    run.model("scam", 0.97);
+    expect(await run.review()).toBe("closed (scam)");
+    const after = await publishedScore(run);
+    const [september, october] = [
+      before.september[0] ?? 0,
+      before.october[0] ?? 0,
+    ];
+    expect(october).toBeLessThan(24);
+    expect(after).toMatchObject({
+      penalties: ["https://github.com/SlopDotCash/asi/pull/5:24"],
+      rolling: [september, october],
+      september: [september, 0],
+      october: [0, october],
+    });
+    for (const period of ["2026-13", "2026-1", ""])
+      expect(
+        (
+          await run.feed(
+            `https://slopbot.slop.cash/v1/penalties?period=${period}`,
+          )
+        ).status,
+      ).toBe(400);
   });
 });
 

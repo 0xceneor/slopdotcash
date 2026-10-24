@@ -74,6 +74,20 @@ disabled by `SLOPBOT_CLOSURE_ENABLED = "false"`.
    once, on an upheld appeal or a maintainer reopen. A `scam` close also adds
    the `slopbot: moderator` label for a moderator review of the account.
    Maintainers and authors without the closure evidence are never penalized.
+   The public `GET /v1/penalties?period=YYYY-MM&after=NODE_ID` route returns
+   the unreversed debits of one UTC month in item node ID order, up to 500
+   per page with a `nextAfter` cursor. Each record has only identifiers, the
+   item kind and number, the table category and version, the debit and the
+   close time. An invalid query returns 400 and a storage failure 503.
+   `bun run leaderboard:generate` reads this route for each month under the
+   value policy that the score window overlaps
+   (`scripts/penalty-ingestion.ts`). Each debit reduces only its author's
+   score in that project and UTC month, never below zero: in the rolling
+   leaderboard (`penaltyThirds` on the leader row), in the project cycle, and
+   in the cumulative leaderboard for months without a closed cycle record.
+   A reversed row leaves the feed, so the next publication restores the
+   score. A closed cycle record never changes. A feed outage keeps the last
+   published snapshot, as for value assessments.
 9. `/slopbot appeal` from the author, or any reopen, blocks re-closing that
    revision. An author's appeal opens Slopbot triage (`appeals.ts`, owner
    decision D8): an independent higher-effort review of the same revision,
@@ -242,10 +256,6 @@ and publication separately. An unregistered repository must create no record.
 
 ## Not yet implemented
 
-- Score publication of recorded debits. `slopbot_penalties` is the record;
-  the score producer must read it, subtract each unreversed debit from its UTC
-  month without going below zero, and never change an approved, scheduled or
-  paid award.
 - Inbox notices for escalated appeals. Escalation is visible through the
   `slopbot: moderator` label and the appeal comment until the Inbox adds an
   appeal notice kind.

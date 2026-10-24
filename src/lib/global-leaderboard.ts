@@ -12,6 +12,7 @@ import type { CycleIndex } from "./cycle-index";
 import type { GitHubActor, LeaderboardSnapshot } from "./leaderboard";
 import type { ProjectView } from "./project-view";
 import { findIngestedProjectByRepositoryId } from "./projects.mjs";
+import { penaltyDebitThirds } from "./score-penalties";
 
 export interface GlobalLeader {
   actor: GitHubActor;
@@ -86,13 +87,18 @@ export function createGlobalLeaders(
     }
   }
 
-  for (const event of snapshot.ledger) {
-    const project = findIngestedProjectByRepositoryId(event.repository);
+  const projectOf = (repository: string) => {
+    const project = findIngestedProjectByRepositoryId(repository);
     if (!project) {
       throw new TypeError(
-        `Accepted event ${event.id} references an unregistered project`,
+        `Repository ${repository} references an unregistered project`,
       );
     }
+    return project;
+  };
+  const rollingEvents: LeaderboardSnapshot["ledger"] = [];
+  for (const event of snapshot.ledger) {
+    const project = projectOf(event.repository);
     if (
       Date.parse(event.occurredAt) < Date.parse(project.reward.rewardStartAt)
     ) {
@@ -100,12 +106,29 @@ export function createGlobalLeaders(
     }
     const key = cycleKey(project.id, event.occurredAt.slice(0, 7));
     if (archivedCycleKeys.has(key)) continue;
+    rollingEvents.push(event);
     const current = byActor.get(event.actor.id) ?? emptyLeader(event.actor);
     current.actor = event.actor;
     current.score += event.scoreThirds ?? Math.round(event.points * 3);
     current.cycleKeys.add(key);
     current.projectIds.add(project.id);
     byActor.set(event.actor.id, current);
+  }
+  // A closed cycle already carries its debits; open months apply theirs to
+  // the same rolling events, never below zero (PRD section 7).
+  const debits = penaltyDebitThirds(
+    rollingEvents,
+    (snapshot.penalties ?? []).filter(
+      (penalty) =>
+        !archivedCycleKeys.has(
+          cycleKey(projectOf(penalty.repository).id, penalty.period),
+        ),
+    ),
+    (repository) => projectOf(repository).id,
+  );
+  for (const [actorId, thirds] of debits) {
+    const current = byActor.get(actorId);
+    if (current) current.score -= thirds;
   }
 
   for (const view of views) {

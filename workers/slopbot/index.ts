@@ -7,6 +7,7 @@ import { resumeBudgetBlocks } from "./budget-blocks";
 import { APPEAL_COMMANDS, type Job } from "./contracts";
 import { verifyWebhookSignature } from "./github";
 import { dispatchMaintainerHolds } from "./maintainer-holds";
+import { PENALTY_FEED_SCHEMA, penaltyFeed } from "./penalties";
 import * as store from "./persistence";
 import { QUALITY_MARKER } from "./quality";
 import { registeredRepository, reviewRegistration } from "./registry";
@@ -215,6 +216,39 @@ export default {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
       return Response.json({ service: "slopbot", ok: true });
+    }
+    if (request.method === "GET" && url.pathname === "/v1/penalties") {
+      const period = url.searchParams.get("period") ?? "";
+      const after = url.searchParams.get("after") ?? "";
+      if (
+        !/^\d{4}-(0[1-9]|1[0-2])$/u.test(period) ||
+        after.length > 200 ||
+        /[^A-Za-z0-9_=-]/u.test(after)
+      )
+        return Response.json(
+          { error: "Invalid penalty query" },
+          { status: 400 },
+        );
+      try {
+        return Response.json(
+          {
+            schemaVersion: PENALTY_FEED_SCHEMA,
+            period,
+            ...(await penaltyFeed(env.SLOPBOT_DB, period, after)),
+          },
+          {
+            headers: {
+              "cache-control": "no-store",
+              "x-content-type-options": "nosniff",
+            },
+          },
+        );
+      } catch {
+        return Response.json(
+          { error: "Penalties are unavailable" },
+          { status: 503, headers: { "cache-control": "no-store" } },
+        );
+      }
     }
     const jointHistory = url.pathname === "/v1/work-unit-assessments";
     if (

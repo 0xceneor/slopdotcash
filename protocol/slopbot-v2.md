@@ -73,6 +73,14 @@ A debit reduces only the score of the UTC month of the close and never takes
 that month below zero. It never changes an approved, scheduled or paid award.
 Changes to this table apply prospectively.
 
+The leaderboard snapshot publishes each unreversed debit in `penalties`, with
+the item, author, repository, month, category and debit. For each author,
+project and UTC month, the applied debit is the smaller of the recorded debits
+and that month's credit in the same view. The rolling leaderboard shows it as
+`penaltyThirds`; the project cycle and the cumulative leaderboard apply the
+same rule to the events they count. A reversed debit is not published, so the
+next snapshot restores the score. A closed cycle record keeps its score.
+
 ## Appeals
 
 Owner decision D8 of 24 October 2026. Slopbot triages each appeal first: an

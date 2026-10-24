@@ -34,6 +34,7 @@ import type {
   ScoreEvent,
   ScoreOpportunity,
   ScoreOpportunityKind,
+  ScorePenalty,
   VerifiedEvidenceArtifact,
   WorkItem,
   WorkItemCandidateExclusion,
@@ -83,6 +84,7 @@ export type {
   ScoreEvent,
   ScoreOpportunity,
   ScoreOpportunityKind,
+  ScorePenalty,
   VerifiedEvidenceArtifact,
   WorkItem,
   WorkItemCandidateExclusion,
@@ -127,6 +129,7 @@ import {
   assertRunReceiptPolicyJoin,
   type ProjectRunReceipt,
 } from "./run-receipts";
+import { penaltyDebitThirds, snapshotProjectOf } from "./score-penalties";
 import {
   assertScoreApprovalRecord,
   assertScoreRatificationContext,
@@ -2709,6 +2712,33 @@ export function createLeaderboardSnapshot(
   return snapshot;
 }
 
+/**
+ * The debits that can reach this window: recorded no later than its end, on a
+ * collected repository, in a UTC month that the window overlaps.
+ */
+function windowPenalties(input: LeaderboardInput): ScorePenalty[] | undefined {
+  if (input.penalties === undefined) return undefined;
+  const from = parseIsoTime(input.windowFrom);
+  const to = parseIsoTime(input.windowTo);
+  const collected = new Set(
+    TARGET_REPOSITORIES.map((repository) => repository.id),
+  );
+  const penalties = input.penalties
+    .filter((penalty) => {
+      const [year, month] = penalty.period.split("-").map(Number);
+      return (
+        collected.has(penalty.repository) &&
+        parseIsoTime(penalty.occurredAt) <= to &&
+        Date.UTC(year, month, 1) > from &&
+        Date.UTC(year, month - 1, 1) <= to
+      );
+    })
+    .sort((left, right) => compareCodeUnits(left.id, right.id));
+  if (new Set(penalties.map((penalty) => penalty.id)).size !== penalties.length)
+    throw new Error("A closed item carries at most one penalty debit");
+  return penalties;
+}
+
 /** Reuse the complete eligibility pipeline; only ordinary review timing differs. */
 function createSnapshotWithReviewCutoff(
   input: LeaderboardInput,
@@ -4520,17 +4550,36 @@ function createSnapshotWithReviewCutoff(
     }
   }
 
+  const penalties = windowPenalties(input);
+  const debits = penaltyDebitThirds(
+    dedupeByNodeId(ledger),
+    penalties ?? [],
+    snapshotProjectOf({ repositories: TARGET_REPOSITORIES }),
+  );
+  // A debit lowers the score, never the credited outcomes: an actor whose
+  // credit is fully debited keeps a row at zero, next to the ledger events.
   const leaders = [...entries.values()]
     .filter(
       (entry) =>
         entry.score > 0 || entry.acceptedOutcomes.mergedPullRequests > 0,
     )
+    .map((entry) => {
+      const penaltyThirds = debits.get(entry.actor.id) ?? 0;
+      return {
+        ...entry,
+        penaltyThirds,
+        scoreThirds: entry.scoreThirds - penaltyThirds,
+      };
+    })
     .sort(compareRankedEntries)
     .map<LeaderboardEntry>((entry) => ({
       rank: 0,
       actor: entry.actor,
       score: Math.floor(entry.scoreThirds / 3),
       scoreThirds: entry.scoreThirds,
+      ...(entry.penaltyThirds > 0
+        ? { penaltyThirds: entry.penaltyThirds }
+        : {}),
       points: {
         mergedPullRequests: entry.pointThirds.mergedPullRequests / 3,
         resolvedIssues: entry.pointThirds.resolvedIssues / 3,
@@ -4618,6 +4667,7 @@ function createSnapshotWithReviewCutoff(
         left.source.number - right.source.number ||
         left.id.localeCompare(right.id),
     ),
+    ...(penalties === undefined ? {} : { penalties }),
     reviewExclusions: reviewExclusions.sort(
       (left, right) =>
         left.pullRequestId.localeCompare(right.pullRequestId) ||
@@ -5193,6 +5243,64 @@ function assertNonNegativeNumber(value: unknown, path: string): void {
   }
 }
 
+/** Published debits; absent in snapshots published before penalties scored. */
+function assertPenaltyValues(
+  value: unknown,
+  repositoryIds: readonly string[],
+  windowFrom: string,
+  windowTo: string,
+): ScorePenalty[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value))
+    throw new Error("snapshot.penalties must be an array");
+  const from = parseIsoTime(windowFrom);
+  const to = parseIsoTime(windowTo);
+  const penalties = value.map((item, index) => {
+    const path = `snapshot.penalties[${index}]`;
+    const penalty = assertObject(item, path);
+    assertString(penalty.id, `${path}.id`);
+    assertActorValue(penalty.actor, `${path}.actor`);
+    assertEnum(penalty.repository, repositoryIds, `${path}.repository`);
+    assertString(penalty.period, `${path}.period`);
+    assertIsoTimestamp(penalty.occurredAt, `${path}.occurredAt`);
+    if (
+      !/^\d{4}-(0[1-9]|1[0-2])$/u.test(penalty.period) ||
+      penalty.occurredAt.slice(0, 7) !== penalty.period
+    )
+      throw new Error(`${path}.period must be the UTC month of occurredAt`);
+    const [year, month] = penalty.period.split("-").map(Number);
+    if (
+      parseIsoTime(penalty.occurredAt) > to ||
+      Date.UTC(year, month, 1) <= from
+    )
+      throw new Error(`${path} is outside the snapshot window`);
+    assertString(penalty.category, `${path}.category`);
+    assertString(penalty.tableVersion, `${path}.tableVersion`);
+    assertPositiveInteger(penalty.debitThirds, `${path}.debitThirds`);
+    const source = assertObject(penalty.source, `${path}.source`);
+    assertEnum(source.kind, ["issue", "pull-request"], `${path}.source.kind`);
+    assertPositiveInteger(source.number, `${path}.source.number`);
+    assertRepositoryUrl(
+      source.url,
+      `${path}.source.url`,
+      source.kind as "issue" | "pull-request",
+      source.number as number,
+      penalty.repository as RepositoryId,
+    );
+    if (Object.keys(penalty).length !== 9 || Object.keys(source).length !== 3)
+      throw new Error(`${path} must publish exactly the penalty fields`);
+    return penalty as unknown as ScorePenalty;
+  });
+  if (
+    penalties.some(
+      (penalty, index) =>
+        index > 0 && compareCodeUnits(penalties[index - 1].id, penalty.id) >= 0,
+    )
+  )
+    throw new Error("snapshot.penalties must list unique items in ID order");
+  return penalties;
+}
+
 function assertLeaderValue(
   value: unknown,
   path: string,
@@ -5225,7 +5333,12 @@ function assertLeaderValue(
     }
     scoreThirdsTotal += Number(pointThirds[key]);
   }
-  if (scoreThirdsTotal !== entry.scoreThirds) {
+  if (entry.penaltyThirds !== undefined)
+    assertPositiveInteger(entry.penaltyThirds, `${path}.penaltyThirds`);
+  if (
+    scoreThirdsTotal - Number(entry.penaltyThirds ?? 0) !==
+    entry.scoreThirds
+  ) {
     throw new Error(`${path}.scoreThirds does not equal its point breakdown`);
   }
 
@@ -6291,6 +6404,12 @@ export function assertLeaderboardSnapshot(
   ) {
     throw new Error("snapshot.ledger must contain unique score event IDs");
   }
+  const validatedPenalties = assertPenaltyValues(
+    snapshot.penalties,
+    repositoryIds,
+    windowFrom,
+    windowTo,
+  );
 
   const reviewExclusions = snapshot.reviewExclusions;
   if (reviewExclusions === undefined) {
@@ -6519,6 +6638,11 @@ export function assertLeaderboardSnapshot(
   const leaderByActorId = new Map(
     validatedLeaders.map((entry) => [entry.actor.id, entry]),
   );
+  const penaltyDebits = penaltyDebitThirds(
+    validatedLedger,
+    validatedPenalties,
+    snapshotProjectOf(snapshot as Pick<LeaderboardSnapshot, "repositories">),
+  );
   for (const event of validatedLedger) {
     if (!leaderByActorId.has(event.actor.id)) {
       throw new Error(
@@ -6566,11 +6690,14 @@ export function assertLeaderboardSnapshot(
         outcomes.evaluatedContributions += 1;
       }
     }
-    const ledgerThirds = events.reduce(
-      (total, event) => total + (event.scoreThirds ?? event.points * 3),
-      0,
-    );
+    const penaltyThirds = penaltyDebits.get(leader.actor.id) ?? 0;
+    const ledgerThirds =
+      events.reduce(
+        (total, event) => total + (event.scoreThirds ?? event.points * 3),
+        0,
+      ) - penaltyThirds;
     if (
+      (leader.penaltyThirds ?? 0) !== penaltyThirds ||
       Math.floor(ledgerThirds / 3) !== leader.score ||
       ledgerThirds !== leader.scoreThirds ||
       pointThirds.mergedPullRequests !==
@@ -6846,6 +6973,7 @@ export function assertLeaderboardSnapshot(
   assertActorCoherence([
     ...validatedLeaders.map((entry) => entry.actor),
     ...validatedLedger.map((event) => event.actor),
+    ...validatedPenalties.map((penalty) => penalty.actor),
     ...validatedAttributions.flatMap((attribution) =>
       attribution.actor ? [attribution.actor] : [],
     ),
