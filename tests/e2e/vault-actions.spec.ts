@@ -1250,6 +1250,26 @@ test("owner creates, registers and funds a vault through the real API", async ({
     );
     expect(sends).toHaveLength(1);
     await page.reload({ waitUntil: "networkidle" });
+    // Another tab may change the cap while this tab still shows the original project.
+    const beforeEdit = await (
+      await page.request.get(`${origin}/__fixture`)
+    ).json();
+    const edited = structuredClone(beforeEdit.project.manifest);
+    edited.reward.monthlyCapMinor = "2000000000";
+    edited.reward.monthlyCapDisplay = "2,000 TEST";
+    const changed = await page.request.put(
+      `${origin}/api/v1/projects/${project.id}`,
+      {
+        headers,
+        data: { manifest: edited, expectedRevision: 1 },
+      },
+    );
+    expect(changed.ok(), JSON.stringify(await changed.json())).toBe(true);
+    const afterEdit = await (
+      await page.request.get(`${origin}/__fixture`)
+    ).json();
+    expect(afterEdit.project.revision).toBe(2);
+    await expect(setup.getByText("1,000 TEST", { exact: true })).toBeVisible();
     expectedRecoveryRejection = true;
     await setup
       .getByLabel("Creation transaction hash")
@@ -1273,17 +1293,28 @@ test("owner creates, registers and funds a vault through the real API", async ({
       .getByRole("button", { name: "Check vault registration" })
       .click();
     await expect(setup).toHaveCount(0);
+    await expect(
+      page
+        .getByRole("status")
+        .filter({ hasText: "Creation used a monthly cap" }),
+    ).toHaveText(
+      "Creation used a monthly cap of 1,000 TEST. The project now uses 2,000 TEST. Use the automatic payment controls below to apply the new cap.",
+    );
     const state = await (await page.request.get(`${origin}/__fixture`)).json();
-    expect(state.project.revision).toBe(2);
-    expect(state.scanReads).toBe(0);
-    expect(state.revisions.n).toBe(2);
+    expect(state.project.revision).toBe(3);
+    expect(state.scanReads).toBe(afterEdit.scanReads);
+    expect(state.revisions.n).toBe(3);
+    expect(state.project.manifest.reward.monthlyCapMinor).toBe("2000000000");
     const created = state.project.manifest.escrow.deployments[0];
     expect(created.owner).toBe(donor);
     expect(created.deploymentTransaction).toBe(sends[0]);
-    expect(
-      (await readEvmMonthlyCommitment({ ...created, rpcUrl, chainId: 84532n }))
-        .enabled,
-    ).toBe(automatic);
+    const monthly = await readEvmMonthlyCommitment({
+      ...created,
+      rpcUrl,
+      chainId: 84532n,
+    });
+    expect(monthly.enabled).toBe(automatic);
+    expect(monthly.cap).toBe("1000000000");
     await expect(
       verifyEvmDeployment(
         { ...created, rpcUrl, chainId: 84532n },
@@ -1299,8 +1330,23 @@ test("owner creates, registers and funds a vault through the real API", async ({
     expect(
       (await (await page.request.get(`${origin}/__fixture`)).json()).revisions
         .n,
-    ).toBe(2);
+    ).toBe(3);
     unknownSend = false;
+    const monthlyControls = page.getByRole("region", {
+      name: "Automatic monthly payment · base-sepolia",
+      exact: true,
+    });
+    await monthlyControls
+      .getByRole("button", { name: "Connect MetaMask" })
+      .click();
+    await monthlyControls
+      .getByRole("button", {
+        name: "Review monthly payment setting",
+        exact: true,
+      })
+      .click();
+    await expect(monthlyControls.getByText(/^On, up to 2,000 /)).toBeVisible();
+    expect(sends).toHaveLength(1);
     const funding = page.getByRole("region", { name: /Fund or withdraw/ });
     await funding.getByRole("button", { name: "Connect MetaMask" }).click();
     await funding.getByLabel("Token amount").fill("10");

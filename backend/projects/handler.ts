@@ -1042,14 +1042,15 @@ async function ownerVault(
       return json(200, {
         status: "registered",
         deployment: existing,
+        project: current.manifest,
         revision: current.revision,
       });
   }
-  if (
-    positiveInteger(body.expectedRevision, "expectedRevision") !==
-      current.revision &&
-    body.step === "review"
-  )
+  const expectedRevision = positiveInteger(
+    body.expectedRevision,
+    "expectedRevision",
+  );
+  if (expectedRevision !== current.revision && body.step === "review")
     fail(
       409,
       "stale_revision",
@@ -1070,8 +1071,46 @@ async function ownerVault(
     !/^0x[0-9a-fA-F]{64}$/.test(body.transactionId)
   )
     fail(400, "invalid_request", "Enter the vault creation transaction hash.");
+  // A wallet send may outlive an owner edit. Verify its exact creation intent
+  // from immutable server history, while attaching only to compatible current policy.
+  let creation = current;
+  if (expectedRevision !== current.revision) {
+    const stored = await deps.persistence.getRevisionText(
+      projectId,
+      expectedRevision,
+    );
+    if (!stored)
+      fail(
+        409,
+        "stale_revision",
+        "The reviewed project revision is not available.",
+      );
+    const { manifest } = canonicalManifest(JSON.parse(stored.manifestText));
+    if (
+      manifest.id !== current.id ||
+      manifest.reward.kind !== current.manifest.reward.kind ||
+      manifest.reward.chain !== current.manifest.reward.chain ||
+      !sameValue(manifest.escrow, current.manifest.escrow) ||
+      !(
+        sameValue(manifest.rewardAsset, current.manifest.rewardAsset) ||
+        sameRewardAsset(manifest.rewardAsset, current.manifest.rewardAsset)
+      )
+    )
+      fail(
+        409,
+        "vault_policy_changed",
+        "The project asset or vault policy changed. Restore the reviewed policy before registering this creation transaction.",
+      );
+    creation = {
+      ...current,
+      revision: expectedRevision,
+      status: manifest.status,
+      manifest,
+      manifestSha256: stored.manifestSha256,
+    };
+  }
   const deployment = await deps.vaultSetup.register(
-    current,
+    creation,
     actor,
     input,
     body.transactionId,
@@ -1088,7 +1127,14 @@ async function ownerVault(
   return json(200, {
     status: "registered",
     deployment,
+    project: updated.manifest,
     revision: updated.revision,
+    ...(creation.manifest.reward.monthlyCapMinor !==
+    updated.manifest.reward.monthlyCapMinor
+      ? {
+          notice: `Creation used a monthly cap of ${creation.manifest.reward.monthlyCapDisplay}. The project now uses ${updated.manifest.reward.monthlyCapDisplay}. Use the automatic payment controls below to apply the new cap.`,
+        }
+      : {}),
   });
 }
 
@@ -1222,6 +1268,7 @@ async function publishOwnerRevision(
     reason: `Owner update by @${actor.githubLogin}: ${summary}.${note ? ` ${note}` : ""}`,
     actor,
     applicationId: stored?.applicationId,
+    ownerParticipation: true,
   });
   const scanRequest =
     changes.executable.length > 0

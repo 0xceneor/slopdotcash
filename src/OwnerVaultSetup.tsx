@@ -77,8 +77,9 @@ export function OwnerVaultSetup({
 }: {
   project: ProjectDefinition;
   onRegistered: (
-    deployment: EscrowDeployment,
+    project: ProjectDefinition,
     wallet: Connection | null,
+    notice?: string,
   ) => void;
 }) {
   const key = `slop:vault-setup:v1:${project.id}`;
@@ -282,16 +283,25 @@ export function OwnerVaultSetup({
         ...current.input,
         step: "register",
         transactionId: hash,
-      })) as unknown as { status: string; deployment?: EscrowDeployment };
+      })) as unknown as {
+        status: string;
+        deployment?: EscrowDeployment;
+        project?: ProjectDefinition;
+        notice?: string;
+      };
       if (result.status === "pending") {
         setNotice("The creation is not finalized yet. Wait, then check again.");
         return;
       }
-      if (result.status !== "registered" || !result.deployment)
+      if (
+        result.status !== "registered" ||
+        !result.deployment ||
+        result.project?.id !== project.id
+      )
         throw new Error("Registration could not be verified. Check again.");
       remember(null);
       setReview(null);
-      onRegistered(result.deployment, wallet);
+      onRegistered(result.project, wallet, result.notice);
     });
   const active = pending ?? review;
   return (

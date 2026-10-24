@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { AutomaticMonthlyPayment } from "./AutomaticMonthlyPayment";
 import { readBoundedJson } from "./lib/browser-json";
-import type { EscrowDeployment } from "./lib/escrow-policy.mjs";
 import { ESCROW_NETWORKS } from "./lib/escrow-policy.mjs";
 import type { VaultConnection } from "./lib/evm-vault-actions";
 import { CHAIN_NAMES, networkLabel } from "./lib/network-names";
@@ -182,16 +181,11 @@ export function EscrowFunding({
 }: {
   project: ProjectDefinition;
 }) {
-  const [registered, setRegistered] = useState<EscrowDeployment | null>(null);
+  const [registered, setRegistered] = useState<ProjectDefinition | null>(null);
+  const [registrationNotice, setRegistrationNotice] = useState("");
   const [connectedWallet, setConnectedWallet] =
     useState<VaultConnection | null>(null);
-  const project =
-    registered && original.escrow
-      ? {
-          ...original,
-          escrow: { ...original.escrow, deployments: [registered] },
-        }
-      : original;
+  const project = registered ?? original;
   const [revision, setRevision] = useState(0);
   const totals = useVaultTotals(project, revision);
   const deployed = totals.status !== "none";
@@ -210,13 +204,15 @@ export function EscrowFunding({
       {!deployed ? (
         <OwnerVaultSetup
           project={project}
-          onRegistered={(deployment, wallet) => {
-            setRegistered(deployment);
+          onRegistered={(updated, wallet, notice) => {
+            setRegistered(updated);
             setConnectedWallet(wallet);
+            setRegistrationNotice(notice ?? "");
           }}
         />
       ) : (
         <>
+          {registrationNotice && <p role="status">{registrationNotice}</p>}
           <p>
             Use the deposit action below to fund this project. Direct token
             transfers are not credited.
