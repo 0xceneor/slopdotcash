@@ -41,10 +41,14 @@ test("large private evidence downloads with a single-use browser grant @registry
   const steward = projectManifest.steward as Record<string, unknown>;
   projectManifest.steward = {
     ...steward,
+    kind: facts.owner.type === "User" ? "individual" : "organization",
     github: {
       ...(steward.github as Record<string, unknown>),
       actorId: String(facts.owner.id),
       nodeId: facts.owner.node_id,
+      login: facts.owner.login,
+      type: facts.owner.type,
+      profileUrl: `https://github.com/${facts.owner.login}`,
     },
   };
   projectManifest.authority = {
@@ -55,7 +59,7 @@ test("large private evidence downloads with a single-use browser grant @registry
   const submitted = await api("projects", {
     manifest: projectManifest,
   });
-  expect(submitted.status()).toBe(201);
+  expect(submitted.status(), await submitted.text()).toBe(201);
   // Creation queues its first scan automatically. Read that real assessment
   // instead of making an admin create a second request.
   const queue = await request.get("/api/v1/admin/vetting", {
