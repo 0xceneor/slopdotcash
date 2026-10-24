@@ -34,9 +34,11 @@ disabled by `SLOPBOT_CLOSURE_ENABLED = "false"`.
 6. A close needs all of the following:
    - closure eligibility (`closure-eligibility.ts`): a pull request whose
      author is not a maintainer, is a slop.cash member matched by immutable
-     GitHub ID, and recorded an authenticated Slop skill run for this project
-     whose `pull_request_opened` event names this pull request. The
-     `Made via @slopdotcash` marker is never evidence. Issues are never closed.
+     GitHub ID, and has skill-use evidence under an owner-approved attribution
+     rule. PRD section 11 leaves that rule undecided, so automatic closure
+     remains inactive even if the global and repository switches are enabled.
+     Authenticated progress events and copied markers do not prove skill use.
+     Advisory review stays available. Issues are never closed.
      The check runs at routing and again, from fresh state, immediately before
      the close;
    - the category set to `close`;

@@ -9,8 +9,8 @@ export type ClosureEvidence = {
   exemption: Exemption;
   /** A slop.cash member record matched by the author's immutable GitHub ID. */
   member: boolean;
-  /** An authenticated Slop skill run by the same author linked to this PR. */
-  verifiedSkillRun: boolean;
+  /** Authenticated progress telemetry linked to this PR; not proof of skill use. */
+  recordedSkillRun: boolean;
 };
 
 export type ClosureEligibility =
@@ -38,12 +38,18 @@ export function closureEligibility(
       eligible: false,
       why: "author is not a verified slop.cash member",
     };
-  if (!evidence.verifiedSkillRun)
+  if (!evidence.recordedSkillRun)
     return {
       eligible: false,
-      why: "no verified Slop skill run for this pull request",
+      why: "no recorded Slop run for this pull request",
     };
-  return { eligible: true, why: "verified Slop-skill participant" };
+  // PRD section 11 leaves the closure-attribution rule to the owner.
+  // An authenticated event proves who reported it, not which skill ran.
+  // Do not let the global or repository switch bypass that missing decision.
+  return {
+    eligible: false,
+    why: "automatic closure awaits the owner-approved attribution rule",
+  };
 }
 
 export async function isMember(
@@ -61,9 +67,9 @@ export async function isMember(
  * project's repository, whose recorded pull_request_opened event names this
  * exact pull request. The session comes from the author's own GitHub login, so
  * a copied marker, receipt or footer cannot produce this record for another
- * person. GitHub-sourced events are written only by the webhook processor.
+ * person. Neither an agent event nor a webhook link establishes skill execution.
  */
-export async function hasVerifiedSkillRun(
+export async function hasRecordedSkillRun(
   db: D1Database,
   item: {
     authorId: number;
