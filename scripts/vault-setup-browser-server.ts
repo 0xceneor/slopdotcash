@@ -9,8 +9,10 @@ import {
   type ProjectApiDependencies,
 } from "../backend/projects/handler";
 import { ownerVaultSetupService } from "../backend/projects/vault-setup";
+import { readSecurityProgramFunds } from "../backend/security/program-funds";
 import { sha256Hex } from "../src/lib/sha256";
 import { sqliteD1 } from "../tests/sqlite-d1";
+import securityPayments from "../workers/security-payments";
 
 if (process.env.SLOP_E2E_VAULT_ACTIONS !== "1")
   throw new Error("Local vault harness requires explicit opt-in");
@@ -101,6 +103,8 @@ const deps: ProjectApiDependencies = {
     networks: () => (templatesEnabled ? ["base-sepolia"] : []),
     rpcUrl: () => rpcUrl,
   }),
+  securityProgramFunds: (projectId, program) =>
+    readSecurityProgramFunds({ db, now }, projectId, program),
 };
 const root = resolve("dist");
 Bun.serve({
@@ -115,6 +119,13 @@ Bun.serve({
           if (typeof body.permitted === "boolean") permitted = body.permitted;
           if (typeof body.templatesEnabled === "boolean")
             templatesEnabled = body.templatesEnabled;
+          if (body.scanSecurity === true)
+            await securityPayments.scheduled(null, {
+              PAYMENTS_DB: db,
+              REGISTRY_DB: db,
+              PAYMENT_NETWORKS: JSON.stringify(["base-sepolia"]),
+              PAYMENT_RPC_URLS: JSON.stringify({ "base-sepolia": rpcUrl }),
+            });
         }
         return Response.json({
           token,
@@ -123,6 +134,16 @@ Bun.serve({
           revisions: sqlite
             .prepare(
               "SELECT COUNT(*) n FROM project_revisions WHERE project_id=?",
+            )
+            .get(input.project.id),
+          publicSnapshots: sqlite
+            .prepare(
+              "SELECT COUNT(*) n FROM vault_snapshots WHERE project_id=?",
+            )
+            .get(input.project.id),
+          privateSnapshots: sqlite
+            .prepare(
+              "SELECT COUNT(*) n FROM security_vault_snapshots WHERE project_id=?",
             )
             .get(input.project.id),
         });
