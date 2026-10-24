@@ -118,6 +118,7 @@ test("funding and wallet keyboard flows remain accessible at 200 percent text si
         githubUserId: "123",
         wallets: [],
         payments: [],
+        monthlyAwards: [],
         balances: [],
         directTransfers: [],
         walletObservations: [],

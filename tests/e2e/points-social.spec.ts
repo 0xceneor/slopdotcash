@@ -64,6 +64,7 @@ test("social membership shows connection points, respects privacy and survives d
         githubUserId: "123",
         wallets: [],
         payments: [],
+        monthlyAwards: [],
         balances: [],
         directTransfers: [],
         walletObservations: [],

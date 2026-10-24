@@ -129,8 +129,9 @@ and listing tier, then classifies the change (`src/lib/project-revision-changes.
   and queues a new scan; a clean result reactivates it on the next setup
   check;
 - financial policy applies from the next UTC calendar month: a new monthly
-  amount pins the open UTC cycle to the previous amount through
-  `reward.cycleCaps`, an unfunded project may change its network and asset
+  amount pins every month from the reward start through the open UTC cycle
+  that has no `reward.cycleCaps` entry to the previous amount, so a closed
+  month whose proposal has not run yet keeps its amount too; an unfunded project may change its network and asset
   (the open cycle then has no pool, because amounts do not carry over
   between assets), a funded project keeps them, and no separate review
   budget can be added.

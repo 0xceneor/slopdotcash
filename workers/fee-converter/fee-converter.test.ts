@@ -13,7 +13,7 @@ import {
 } from "./core";
 import worker, { runOnce, triggerAt } from "./index";
 import { sqliteD1 } from "./sqlite-d1";
-import { D1ConversionStore, projectRewardTokens } from "./store";
+import { D1ConversionStore, projectRewardTokens, projectVaults } from "./store";
 
 const TOKEN = "0x1111111111111111111111111111111111111111";
 const OTHER = "0x2222222222222222222222222222222222222222";
@@ -902,9 +902,19 @@ describe("D1 contract", () => {
     add("escrowed", {
       escrow: {
         deployments: [
-          { network: "base-mainnet", asset: TOKEN },
+          { network: "base-mainnet", asset: TOKEN, vault: WALLET },
           { network: "base-sepolia", asset: OTHER },
         ],
+      },
+    });
+    add("bounty-only", {
+      securityBounty: {
+        settlement: {
+          deployments: [
+            { network: "base-mainnet", asset: OTHER, vault: THIRD },
+            { network: "base-sepolia", asset: USDC, vault: TOKEN },
+          ],
+        },
       },
     });
     add("token-reward", {
@@ -918,7 +928,11 @@ describe("D1 contract", () => {
     });
     expect(
       (await projectRewardTokens(db, "base", ["base-mainnet"])).sort(),
-    ).toEqual([TOKEN, THIRD]);
+    ).toEqual([TOKEN, OTHER, THIRD].sort());
+    expect((await projectVaults(db, ["base-mainnet"])).sort()).toEqual(
+      [WALLET, THIRD].sort(),
+    );
+    expect(await projectVaults(db, ["ethereum"])).toEqual([]);
     expect(await projectRewardTokens(db, "ethereum", ["ethereum"])).toEqual([
       OTHER,
     ]);

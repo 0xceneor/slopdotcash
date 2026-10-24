@@ -24,6 +24,7 @@ async function payments(page: Page, wallets: SavedWallet[] = []) {
           githubUserId: "123",
           wallets,
           payments: [],
+          monthlyAwards: [],
           balances: [],
           directTransfers: [],
           walletObservations: [],

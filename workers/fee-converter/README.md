@@ -2,16 +2,20 @@
 
 `slop-fee-converter` converts project tokens that a network fee wallet has
 already received into that network's Circle USDC (PRD section 6, TOK-07,
-MVP-07c; owner decision of 18 October 2026). The escrow pays the 2% fee in the
-reward token directly to the fee wallet (TOK-06). This Worker sells those
-tokens soon after they arrive, inside the same wallet. USDC is the only
+MVP-07c; owner decision of 18 October 2026). The 2% fee is in the reward
+token (TOK-06). Solana pays it to the fee wallet during the payment. An EVM
+vault keeps it as `accruedFees` until someone calls the permissionless
+`claimFees()`, which sends it only to the vault's immutable fee recipient.
+This Worker claims those EVM fees (issue #905) and sells the tokens soon after
+they arrive, inside the same wallet. USDC is the only
 target: a network without a verified Circle USDC address converts nothing, and
 no other stablecoin or token named "USDC" stands in for it.
 
 It is a narrow exception to "Slop holds no keys" (PRD TOK-07, PAY-04,
 MVP-07c). It holds one hot key per
-network for the fee wallet only. It never reads or writes vaults, payment
-obligations, contributor balances or payment state. No payout waits on it,
+network for the fee wallet only. On a vault it only reads the fee counters
+and calls `claimFees()`. It never reads or writes payment obligations,
+contributor balances or payment state. No payout waits on it,
 and a failed conversion leaves the fee in the wallet.
 
 The Worker is off by default.
@@ -50,26 +54,41 @@ For each enabled network:
 3. A network without a verified USDC target stops here with status
    `route_pending` and logs `fee_conversion_route_pending`. It quotes and
    signs nothing and loads no key; its fees stay in the wallet.
-4. List candidate tokens from D1 project manifests: a `rewardAsset` of kind
+4. Recovery scans only, EVM only: claim vault fees. For each
+   `escrow.deployments[].vault` on the network's escrow keys in D1 project
+   manifests, read `accruedFees()`, `feeRecipient()` and `token()`. Skip a
+   vault with nothing accrued or with another fee recipient. Value the fee in
+   USDC (a quote, or the amount itself for a USDC vault) and price the
+   claim's own network fee through a native-currency quote. Claim only when
+   the fee value reaches `FEE_CONVERTER_MIN_VALUE_MICRO` and
+   `FEE_CONVERTER_GAS_MULTIPLE` times that network fee; a smaller fee keeps
+   accruing in the vault. `dry_run` logs `fee_claim_quoted` and signs nothing.
+   `live` signs `claimFees()` only when no earlier fee-wallet transaction is
+   pending, waits for its receipt and logs `fee_claim_included`. A claim is a
+   transfer to the fee wallet itself, so it does not count against the
+   conversion caps. The step runs before the balance reads, so the claimed
+   fee converts in the same run. Receipt runs skip this step, so the claim
+   costs at most one vault read and two quotes per vault every 15 minutes.
+5. List candidate tokens from D1 project manifests: a `rewardAsset` of kind
    `token` on that network, and the `escrow.deployments[].asset` of each
    deployment on the network's escrow key (`base-mainnet`, `ethereum`,
    `robinhood-mainnet`, `solana-mainnet`). Add the `FEE_CONVERTER_ALLOWLIST`
    entries. It never discovers tokens from the wallet, so an airdropped token
    is never sold.
-5. Read the fee-wallet balance of each candidate. Skip USDC and empty
+6. Read the fee-wallet balance of each candidate. Skip USDC and empty
    balances. A receipt run also skips a balance unchanged since the token's
    latest record.
-6. Get a quote. If the quoted value is above the remaining per-run or per-day
+7. Get a quote. If the quoted value is above the remaining per-run or per-day
    cap, scale the amount down (at most three requotes, aiming at 98% of the
    remaining cap).
-7. Skip the token and record the reason when the quoted value is below
+8. Skip the token and record the reason when the quoted value is below
    `FEE_CONVERTER_MIN_VALUE_MICRO`, below `FEE_CONVERTER_GAS_MULTIPLE` times the
    estimated network fee, has unknown price impact or impact above
    `FEE_CONVERTER_MAX_PRICE_IMPACT_BPS`, or has a minimum output outside
    `FEE_CONVERTER_MAX_SLIPPAGE_BPS`. The first two are the dust threshold: a
    skipped fee accumulates in the wallet until a later receipt lifts it over.
-8. `dry_run`: record the quote as `quoted` and stop. No key is loaded.
-9. `live`: build, check, simulate and sign the swap. Record the signed bytes
+9. `dry_run`: record the quote as `quoted` and stop. No key is loaded.
+10. `live`: build, check, simulate and sign the swap. Record the signed bytes
    as `submitted`, then broadcast. A finalized state is set only by a later
    reconciliation that reads the finalized chain.
 
@@ -211,7 +230,8 @@ owner-controlled software wallets. The owner chose local `.env` custody for
 the sweep keys; those wallets are not cold storage. A
 remote signer may replace it later. Signing stays narrow: only `live` mode on a
 network with a verified USDC target loads a key; the key signs only an exact
-approval to the pinned router and the checked swap; errors and logs never
+approval to the pinned router, the checked swap, and `claimFees()` (no
+arguments, no value) to a vault named in a D1 project manifest; errors and logs never
 include it.
 
 The fee-wallet key can sign any transaction from the fee wallet. Treat its
@@ -324,9 +344,17 @@ bun run test:fee-converter:solana
 Full live cycles with throwaway keys: an Anvil fork of Base (port 28545)
 covering an ordinary send, a send lost before delivery, a send whose
 response was lost, a below-minimum skip, a refusal when the price moved
-between quote and signing, and a token no aggregator can route; and a local
+between quote and signing, a token no aggregator can route, and a vault fee
+claim (the reviewed EscrowFactory and ProjectEscrow deployed on the fork, a
+real 2% fee accrued, no claim by a receipt or dry run, then a live claim,
+sale and finalized reconcile); and a local
 `solana-test-validator` (port 28899) that clones the mainnet Jupiter and
 Whirlpool programs and one JUP/USDC route. The Solana harness lifts the
 Solana block with a local-only option that the hosted Worker never sets.
 They need `anvil` and `solana-test-validator` on `PATH` and never touch a real
 chain.
+
+The registry discovery includes ordinary `escrow.deployments` and private
+bounty `securityBounty.settlement.deployments`. Both supply fee assets and
+vaults. A bounty-only project does not need an ordinary vault or reward token
+entry for its fees to be claimed and converted.

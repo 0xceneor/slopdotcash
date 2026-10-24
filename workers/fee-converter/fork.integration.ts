@@ -1,9 +1,21 @@
 // Live cycle against a local Anvil fork of Base mainnet with a throwaway key.
+// The last step deploys the reviewed EscrowFactory and ProjectEscrow on the
+// fork, accrues a real 2% fee in the vault and proves the converter claims it
+// into the fee wallet and sells it (issue #905).
 // Nothing reaches a real chain: Anvil holds the fork, the key is generated
 // here, and the test token arrives by impersonating a holder on the fork.
 // KyberSwap's public API is only read for a route.
 //   bun workers/fee-converter/fork.integration.ts [fork-rpc-url]
-import { encodeAbiParameters, keccak256 } from "viem";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import {
+  decodeFunctionResult,
+  encodeAbiParameters,
+  encodeFunctionData,
+  type Hex,
+  keccak256,
+  parseAbi,
+} from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { runOnce } from "./index";
 import { sqliteD1 } from "./sqlite-d1";
@@ -241,8 +253,179 @@ try {
     .query("SELECT COUNT(*) AS n FROM fee_conversions")
     .get() as { n: number };
   if (count.n !== 7) throw new Error("a repeat run added a record");
+
+  // 7. EVM fees accrue inside the vault until claimFees() moves them to the
+  // fee recipient. Deploy the reviewed contracts with this fee wallet as fee
+  // recipient, accrue a real 2% withdrawal fee, and run the Worker.
+  const [registrar, authority] = (await rpc("eth_accounts", [])) as string[];
+  const vaultAbi = parseAbi([
+    "function create(bytes32,address,address,address) returns (address)",
+    "function vaults(bytes32,address) view returns (address)",
+    "function approve(address,uint256) returns (bool)",
+    "function deposit(uint128)",
+    "function withdrawUnused(uint128)",
+    "function accruedFees() view returns (uint128)",
+  ]);
+  const call = async (from: string, to: string, data: Hex) => {
+    const hash = await rpc("eth_sendTransaction", [
+      { from, to, data, gas: "0x7a1200" },
+    ]);
+    await rpc("anvil_mine", ["0x1"]);
+    const receipt = (await rpc("eth_getTransactionReceipt", [hash])) as {
+      status: string;
+    };
+    if (receipt.status !== "0x1")
+      throw new Error(`7 transaction to ${to} reverted`);
+  };
+  const view = async (
+    to: string,
+    functionName: "vaults" | "accruedFees",
+    args: readonly unknown[] = [],
+  ) =>
+    decodeFunctionResult({
+      abi: vaultAbi,
+      functionName,
+      data: (await rpc("eth_call", [
+        {
+          to,
+          data: encodeFunctionData({
+            abi: vaultAbi,
+            functionName,
+            args: args as never,
+          }),
+        },
+        "latest",
+      ])) as Hex,
+    });
+  const factory = (
+    JSON.parse(
+      execFileSync(
+        "forge",
+        [
+          "create",
+          "--root",
+          fileURLToPath(new URL("../../contracts/evm", import.meta.url)),
+          "src/ProjectEscrow.sol:EscrowFactory",
+          "--rpc-url",
+          RPC,
+          "--unlocked",
+          "--from",
+          registrar,
+          "--broadcast",
+          "--json",
+          "--constructor-args",
+          registrar,
+          wallet,
+          authority,
+          "3600",
+        ],
+        { encoding: "utf8" },
+      ),
+    ) as { deployedTo: string }
+  ).deployedTo.toLowerCase();
+  const projectKey = keccak256(new TextEncoder().encode("fee-claim-fork"));
+  await call(
+    registrar,
+    factory,
+    encodeFunctionData({
+      abi: vaultAbi,
+      functionName: "create",
+      args: [projectKey, AERO, registrar as Hex, registrar as Hex],
+    }),
+  );
+  const vault = (
+    (await view(factory, "vaults", [projectKey, AERO])) as unknown as string
+  ).toLowerCase();
+  const gross = 250n * 10n ** 18n;
+  await rpc("anvil_impersonateAccount", [HOLDER]);
+  await rpc("eth_sendTransaction", [
+    {
+      from: HOLDER,
+      to: AERO,
+      data: `0xa9059cbb${word(registrar)}${gross.toString(16).padStart(64, "0")}`,
+    },
+  ]);
+  await rpc("anvil_stopImpersonatingAccount", [HOLDER]);
+  await call(
+    registrar,
+    AERO,
+    encodeFunctionData({
+      abi: vaultAbi,
+      functionName: "approve",
+      args: [vault as Hex, gross],
+    }),
+  );
+  await call(
+    registrar,
+    vault,
+    encodeFunctionData({
+      abi: vaultAbi,
+      functionName: "deposit",
+      args: [gross],
+    }),
+  );
+  await call(
+    registrar,
+    vault,
+    encodeFunctionData({
+      abi: vaultAbi,
+      functionName: "withdrawUnused",
+      args: [gross],
+    }),
+  );
+  const fee = gross / 50n;
+  if ((await view(vault, "accruedFees")) !== fee)
+    throw new Error("7 the withdrawal did not accrue the 2% fee");
+  const manifest = JSON.stringify({
+    id: "fee-claim-fork",
+    status: "active",
+    // The fee claim must also discover a bounty-only program. The shared
+    // claim path collects accrued fees regardless of their original rate.
+    securityBounty: {
+      settlement: {
+        deployments: [{ network: "base-mainnet", vault, asset: AERO }],
+      },
+    },
+  });
+  sqlite.exec(`INSERT INTO project_revisions (project_id, revision, manifest, manifest_sha256, reason, created_at)
+    VALUES ('fee-claim-fork', 1, '${manifest}', '${"a".repeat(64)}', 'fork', 'now')`);
+  sqlite.exec(`INSERT INTO projects (id, status, revision, manifest, manifest_sha256, created_at, updated_at)
+    VALUES ('fee-claim-fork', 'active', 1, '${manifest}', '${"a".repeat(64)}', 'now', 'now')`);
+  const aeroBeforeClaim = await balanceOf(AERO, wallet);
+
+  // A receipt run never claims; a dry run reports the claim and signs nothing.
+  await runOnce(env, undefined, undefined, "receipts");
+  await runOnce({ ...env, FEE_CONVERTER_MODE: "dry_run" });
+  if (
+    (await view(vault, "accruedFees")) !== fee ||
+    (await balanceOf(AERO, wallet)) !== aeroBeforeClaim
+  )
+    throw new Error("7 a receipt or dry run moved vault fees");
+
+  // A live recovery run claims the fee into the fee wallet and sells it.
+  const [claimRun] = await runOnce(env);
+  console.log("7 run:", JSON.stringify(claimRun));
+  if (claimRun.claimed !== 1 || (await view(vault, "accruedFees")) !== 0n)
+    throw new Error("7 the live run did not claim the accrued fee");
+  expect(state(), "submitted", "7 claimed fee send");
+  const claimedRow = sqlite
+    .query(
+      "SELECT amount_in, token_balance_before FROM fee_conversions WHERE token = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    )
+    .get(AERO) as { amount_in: string; token_balance_before: string };
+  if (claimedRow.token_balance_before !== (aeroBeforeClaim + fee).toString())
+    throw new Error("7 the conversion did not see the claimed fee");
+  await rpc("anvil_mine", ["0x80"]);
+  await runOnce(env);
+  expect(state(), "finalized", "7 after reconcile");
+  if ((await balanceOf(AERO, wallet)) !== 0n)
+    throw new Error("7 the claimed fee was not sold");
+  // Nothing is left to claim, so a further run sends no claim.
+  const [after] = await runOnce(env);
+  if (after.claimed !== 0) throw new Error("7 a repeat run claimed again");
+
   console.log(
-    "PASS: Base fork live cycles (ordinary, lost send, lost response, below minimum, slippage refusal, unsupported route)",
+    "PASS: Base fork live cycles (ordinary, lost send, lost response, below minimum, slippage refusal, unsupported route, vault fee claim)",
   );
 } finally {
   anvil.kill();

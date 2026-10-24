@@ -1,8 +1,10 @@
 /**
  * slop-fee-converter: a cron Worker that converts project-token fees received
  * in each network fee wallet to that network's Circle USDC, inside the same
- * wallet (PRD section 6, TOK-07, MVP-07c). It has no HTTP route. It never
- * touches vaults, obligations or payments, and no payout waits on it.
+ * wallet (PRD section 6, TOK-07, MVP-07c). It has no HTTP route. On EVM it
+ * calls only the permissionless claimFees() of reviewed vaults, which moves
+ * accrued fees to their fixed fee recipient (issue #905). It never touches
+ * obligations or payments, and no payout waits on it.
  *
  * The cron fires every minute. Most runs are `receipts` runs that convert
  * only tokens whose fee-wallet balance changed; every RECOVERY_SCAN_MINUTES
@@ -31,6 +33,7 @@ import {
   D1ConversionStore,
   type FeeD1Database,
   projectRewardTokens,
+  projectVaults,
 } from "./store";
 
 export interface Env extends FeeConverterEnv {
@@ -133,6 +136,12 @@ export async function runOnce(
             )
               .filter((token) => isTokenAddress(n.network, token))
               .map((token) => normalizeToken(n.network, token)),
+          projectVaults: async (n) =>
+            n.definition.family === "evm"
+              ? (await projectVaults(env.FEE_DB, n.definition.escrowNetworks))
+                  .filter((vault) => isTokenAddress(n.network, vault))
+                  .map((vault) => normalizeToken(n.network, vault))
+              : [],
           client: (n) => chainClient(env, config, n, overrides),
           log: (event) => console.log(JSON.stringify(event)),
         }),

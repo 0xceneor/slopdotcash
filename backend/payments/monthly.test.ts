@@ -4,6 +4,7 @@ import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { monthlyBasesSql } from "../../scripts/prepare-monthly-rewards";
+import type { PaymentsAccount } from "../../src/lib/payments/contracts";
 import { escrowAwardOrigin } from "../../src/lib/payments/escrow-cycle";
 import { parseMonthlySchedule } from "../../src/lib/payments/monthly-allocation";
 import type { ProjectRecord } from "../../src/lib/project-contracts";
@@ -14,6 +15,7 @@ import {
   CloudflareProjectPersistence,
   type ProjectD1Database,
 } from "../projects/cloudflare-persistence";
+import { handlePaymentsApi } from "./handler";
 import {
   coordinateMonthlyPayments,
   MonthlyPaymentError,
@@ -293,6 +295,86 @@ describe("monthly coordinator", () => {
     expect(view.run?.awards.map((award) => award.state)).toEqual([
       "awaiting-reservation",
       "awaiting-reservation",
+    ]);
+  });
+
+  test("a contributor's account shows the approved monthly award from the freeze until the vault reserves it", async () => {
+    const token = "c".repeat(43);
+    sqlite
+      .prepare(
+        "INSERT INTO points_members(actor_id,github_id,login,joined_at,public) VALUES('node-first',?,'first',?,0)",
+      )
+      .run(A, afterCutoff.toISOString());
+    sqlite
+      .prepare("INSERT INTO points_sessions VALUES(?,?,?)")
+      .run(await sha256Hex(token), "node-first", "2027-01-01T00:00:00.000Z");
+    const account = async () =>
+      (await (
+        await handlePaymentsApi(
+          new Request("https://slop.cash/api/v1/payments/me", {
+            headers: { cookie: `__Host-slop_points=${token}` },
+          }),
+          { db, now: () => clock },
+        )
+      ).json()) as PaymentsAccount;
+    // A proposal under the owner's review is private; nothing is shown.
+    expect((await account()).monthlyAwards).toEqual([]);
+    await coordinate(afterCutoff);
+    vault("899");
+    expect((await coordinate(afterCutoff)).waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "underfunded" },
+    ]);
+    const award = {
+      projectId: project.id,
+      period: "2026-11",
+      network: "base-sepolia",
+      chain: "base" as const,
+      assetAddress: deployment.asset,
+      assetDecimals: 6,
+      grossBase: "600",
+      feeBase: "12",
+      netBase: "588",
+    };
+    // Approved and frozen, but the vault cannot cover the month yet.
+    expect(await account()).toMatchObject({
+      monthlyAwards: [{ ...award, state: "underfunded" }],
+      payments: [],
+      balances: [],
+    });
+    vault("1000");
+    expect((await coordinate(afterCutoff)).created).toEqual([
+      `${project.id}/2026-11`,
+    ]);
+    expect((await account()).monthlyAwards).toEqual([
+      { ...award, state: "awaiting-reservation" },
+    ]);
+    // The finalized chain projection records the reservation: the award is
+    // now a reserved payment that waits for the contributor's wallet.
+    sqlite
+      .prepare(
+        "INSERT INTO payment_obligations(id,project_id,github_user_id,network,chain,vault,asset_address,asset_decimals,gross_base,fee_base,source_digest,state,created_at,paid_transaction) VALUES(?,?,?,?,?,?,?,6,'600','12',?,'reserved',?,NULL)",
+      )
+      .run(
+        `0x${"8".repeat(64)}`,
+        project.id,
+        A,
+        "base-sepolia",
+        "base",
+        deployment.vault,
+        deployment.asset,
+        escrowAwardOrigin(project.id, "2026-11", A),
+        afterCutoff.toISOString(),
+      );
+    const reserved = await account();
+    expect(reserved.monthlyAwards).toEqual([]);
+    expect(reserved.payments).toMatchObject([
+      {
+        projectId: project.id,
+        grossBase: "600",
+        netBase: "588",
+        state: "reserved",
+        deliveryState: "needs_wallet",
+      },
     ]);
   });
 

@@ -22,6 +22,7 @@ const account = {
     activationEligibleAt: null,
   })),
   payments: [],
+  monthlyAwards: [],
   balances: [],
   directTransfers: [],
   walletObservations: [],

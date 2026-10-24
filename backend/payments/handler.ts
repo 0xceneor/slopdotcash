@@ -20,6 +20,7 @@ import {
   EVM_CHAINS,
 } from "../../src/lib/escrow-policy.mjs";
 import {
+  type AccountMonthlyAward,
   type AccountPayment,
   type DirectTransfer,
   type PaymentAsset,
@@ -983,13 +984,42 @@ export async function handlePaymentsApi(
         .first<{ items: string }>();
       const paymentRows = await deps.db
         .prepare(
-          "SELECT json_group_array(json_object('id',o.id,'projectId',project_id,'network',network,'chain',chain,'assetAddress',asset_address,'assetDecimals',asset_decimals,'grossBase',gross_base,'feeBase',fee_base,'state',o.state,'transactionId',paid_transaction,'submittedTransactionId',(SELECT transaction_id FROM payment_attempts a WHERE a.obligation_id=o.id AND a.transaction_id IS NOT NULL ORDER BY created_at DESC LIMIT 1),'deliveryState',CASE WHEN o.state='paid' THEN 'paid' WHEN q.state='submitted' THEN 'submitted' WHEN q.state='held' THEN 'held' WHEN q.state IS NULL THEN 'needs_wallet' ELSE 'awaiting_binding' END)) items FROM payment_obligations o LEFT JOIN payment_outbox q ON q.obligation_id=o.id WHERE github_user_id=?",
+          "SELECT json_group_array(json_object('id',o.id,'projectId',project_id,'network',network,'chain',chain,'assetAddress',asset_address,'assetDecimals',asset_decimals,'grossBase',gross_base,'feeBase',fee_base,'state',o.state,'transactionId',paid_transaction,'submittedTransactionId',(SELECT transaction_id FROM payment_attempts a WHERE a.obligation_id=o.id AND a.transaction_id IS NOT NULL ORDER BY created_at DESC LIMIT 1),'deliveryState',CASE WHEN o.state='paid' THEN 'paid' WHEN q.state='submitted' THEN 'submitted' WHEN q.state='held' THEN 'held' WHEN q.state IS NULL THEN 'needs_wallet' ELSE 'ready' END)) items FROM payment_obligations o LEFT JOIN payment_outbox q ON q.obligation_id=o.id WHERE github_user_id=?",
         )
         .bind(member.github_id)
         .first<{ items: string }>();
       const payments = JSON.parse(
         paymentRows?.items ?? "[]",
       ) as AccountPayment[];
+      // Frozen monthly awards that the vault has not reserved yet. A reserved
+      // award is in `payments` under the same source digest, so it is left
+      // out here; the state matches the owner's view (monthly.ts).
+      const monthlyRows = await deps.db
+        .prepare(
+          "SELECT json_group_array(json_object('projectId',project_id,'period',period,'network',network,'assetAddress',asset,'assetDecimals',decimals,'grossBase',gross,'feeBase',fee,'netBase',net,'state',state)) items FROM (SELECT r.project_id,r.period,r.network,json_extract(r.snapshot,'$.asset') asset,COALESCE((SELECT v.asset_decimals FROM vault_snapshots v WHERE v.project_id=r.project_id AND v.network=r.network AND v.vault=r.vault AND lower(v.asset_address)=lower(json_extract(r.snapshot,'$.asset'))),CASE WHEN lower(json_extract(b.manifest,'$.rewardAsset.address'))=lower(json_extract(r.snapshot,'$.asset')) THEN json_extract(b.manifest,'$.rewardAsset.decimals') END) decimals,json_extract(a.value,'$.grossBase') gross,json_extract(a.value,'$.feeBase') fee,json_extract(a.value,'$.netBase') net,CASE WHEN r.obligations_created_at IS NULL THEN 'underfunded' ELSE 'awaiting-reservation' END state FROM monthly_payment_runs r JOIN monthly_reward_bases b ON b.project_id=r.project_id AND b.period=r.period, json_each(r.snapshot,'$.awards') a WHERE json_extract(a.value,'$.githubUserId')=? AND NOT EXISTS(SELECT 1 FROM payment_obligations o WHERE o.network=r.network AND o.vault=r.vault AND o.source_digest=json_extract(a.value,'$.sourceDigest')) ORDER BY r.period DESC,r.project_id)",
+        )
+        .bind(member.github_id)
+        .first<{ items: string }>();
+      const monthlyAwards = (
+        JSON.parse(monthlyRows?.items ?? "[]") as Omit<
+          AccountMonthlyAward,
+          "chain"
+        >[]
+      ).map((award) => {
+        // Decimals come from the vault reading, else the proposal's verified
+        // reward asset, else the network's reference asset list.
+        const network =
+          ESCROW_NETWORKS[award.network as keyof typeof ESCROW_NETWORKS];
+        const assetDecimals =
+          award.assetDecimals ??
+          network?.assets.find(
+            (entry) =>
+              entry.address.toLowerCase() === award.assetAddress.toLowerCase(),
+          )?.decimals;
+        if (!network || !Number.isInteger(assetDecimals))
+          throw new Error(`Unreviewed monthly award asset on ${award.network}`);
+        return { ...award, assetDecimals, chain: network.chain };
+      });
       for (const p of payments)
         p.netBase = (BigInt(p.grossBase) - BigInt(p.feeBase)).toString();
       // One balance per network and asset: assets differ in value and in
@@ -1022,6 +1052,7 @@ export async function handlePaymentsApi(
         githubUserId: member.github_id,
         wallets: JSON.parse(walletRows?.items ?? "[]"),
         payments,
+        monthlyAwards,
         balances,
         directTransfers: await directTransfers(
           deps.db,

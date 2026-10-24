@@ -36,6 +36,43 @@ import type {
 } from "./core";
 
 const KYBER_API = "https://aggregator-api.kyberswap.com";
+/** KyberSwap's address for the chain's native currency, used to price gas. */
+const NATIVE = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+/** The permissionless ProjectEscrow fee claim (contracts/evm/adapter.ts). */
+const VAULT_FEE_ABI = [
+  {
+    type: "function",
+    name: "accruedFees",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint128" }],
+  },
+  {
+    type: "function",
+    name: "feeRecipient",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "token",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "address" }],
+  },
+  {
+    type: "function",
+    name: "claimFees",
+    stateMutability: "nonpayable",
+    inputs: [],
+    outputs: [],
+  },
+] as const;
+const CLAIM_FEES = encodeFunctionData({
+  abi: VAULT_FEE_ABI,
+  functionName: "claimFees",
+});
 const DEADLINE_SECONDS = 20 * 60;
 const RECEIPT_WAIT_MS = 60_000;
 
@@ -260,7 +297,7 @@ export function createEvmClient(options: EvmClientOptions): ChainClient & {
     return { raw, hash: keccak256(raw) };
   }
 
-  return {
+  const self: ChainClient & { address(): string | null } = {
     address: () => account?.address.toLowerCase() ?? null,
 
     async balance(token) {
@@ -514,5 +551,70 @@ export function createEvmClient(options: EvmClientOptions): ChainClient & {
         };
       return { kind: "rebroadcast" };
     },
+
+    vaultFees: {
+      async accrued(vault) {
+        const read = <F extends "accruedFees" | "feeRecipient" | "token">(
+          functionName: F,
+        ) =>
+          client.readContract({
+            address: vault as Address,
+            abi: VAULT_FEE_ABI,
+            functionName,
+          });
+        const [amount, recipient, token] = await Promise.all([
+          read("accruedFees"),
+          read("feeRecipient"),
+          read("token"),
+        ]);
+        // A claim pays only the vault's own fee recipient; another wallet's
+        // fees are not this run's to claim.
+        if (
+          (amount as bigint) === 0n ||
+          (recipient as string).toLowerCase() !== wallet
+        )
+          return null;
+        return {
+          asset: (token as string).toLowerCase(),
+          amount: amount as bigint,
+        };
+      },
+
+      async claimCostMicro(vault) {
+        const [gas, fees] = await Promise.all([
+          client.estimateGas({
+            account: wallet,
+            to: vault as Address,
+            data: CLAIM_FEES,
+            value: 0n,
+          }),
+          client.estimateFeesPerGas(),
+        ]);
+        const priced = await self.quote(
+          NATIVE,
+          ((gas * 13n) / 10n) * fees.maxFeePerGas,
+        );
+        return "noRoute" in priced ? null : priced.amountOut;
+      },
+
+      async claim(vault) {
+        // One send at a time: a claim waits until no earlier fee-wallet
+        // transaction is pending, so a resend can never race the first.
+        const [latest, pending] = await Promise.all([
+          client.getTransactionCount({ address: wallet, blockTag: "latest" }),
+          client.getTransactionCount({ address: wallet, blockTag: "pending" }),
+        ]);
+        if (pending !== latest)
+          throw new Error("an earlier fee-wallet transaction is still pending");
+        const sent = await signAndSend(vault as Address, CLAIM_FEES, latest);
+        await sendRaw(sent.raw);
+        const receipt = await waitForReceipt(sent.hash);
+        if (!receipt) throw new Error(`claim ${sent.hash} not mined in time`);
+        if (receipt.status !== "success")
+          throw new Error(`claim ${sent.hash} reverted`);
+        return { txId: sent.hash };
+      },
+    },
   };
+  return self;
 }

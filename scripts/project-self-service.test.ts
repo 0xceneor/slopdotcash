@@ -20,6 +20,7 @@ import { vettedContentSha256 } from "../backend/vetting/persistence";
 import type { RepositoryAccess } from "../src/lib/project-contracts";
 import { classifyRevisionChanges } from "../src/lib/project-revision-changes";
 import type { ProjectDefinition } from "../src/lib/projects.mjs";
+import { resolveRewardCapMinor } from "../src/lib/reward-cap.mjs";
 import type { VettingClearance } from "../src/lib/vetting-contracts";
 import {
   applicationManifest,
@@ -68,13 +69,14 @@ function registry() {
     clearance: { state: "unscanned" } as VettingClearance,
     scans: [] as string[],
     scanAnswer: { state: "queued" } as ScanRequest,
+    now: NOW,
   };
   const deps: ProjectApiDependencies = {
     persistence,
     adminGithubIds: new Set([ADMIN]),
     moderatorGithubIds: new Set(),
     vettingClearance: async () => state.clearance,
-    now: () => new Date(NOW),
+    now: () => new Date(state.now),
     randomId: () =>
       `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`,
     sessionActor: async (request) => {
@@ -378,6 +380,39 @@ test("owner revisions publish presentation at once, rescan skill inputs and appl
     monthlyCapMinor: "2000000000",
     cycleCaps: [{ cycleId: "2026-10", monthlyCapMinor: "1000000000" }],
   });
+  // On 2 December the November proposal may not exist yet; it reads the
+  // newest revision. A new amount then keeps November and December too.
+  state.now = "2026-12-02T00:05:00.000Z";
+  const december = await persistence.getProject("open-registry");
+  if (december?.manifest.reward.kind !== "monthly-pool")
+    throw new Error("monthly reward expected");
+  const raised = await call("PUT", "projects/open-registry", OWNER, {
+    manifest: {
+      ...december.manifest,
+      reward: {
+        ...december.manifest.reward,
+        monthlyCapMinor: "3000000000",
+        monthlyCapDisplay: "$3,000",
+      },
+    },
+    expectedRevision: december.revision,
+  });
+  expect(raised.status).toBe(200);
+  const stored = await persistence.getProject("open-registry");
+  if (!stored) throw new Error("project expected");
+  expect(stored.manifest.reward).toMatchObject({
+    monthlyCapMinor: "3000000000",
+    cycleCaps: [
+      { cycleId: "2026-10", monthlyCapMinor: "1000000000" },
+      { cycleId: "2026-11", monthlyCapMinor: "2000000000" },
+      { cycleId: "2026-12", monthlyCapMinor: "2000000000" },
+    ],
+  });
+  expect(
+    ["2026-10", "2026-11", "2026-12", "2027-01"].map((cycle) =>
+      resolveRewardCapMinor(stored.manifest, cycle),
+    ),
+  ).toEqual(["1000000000", "2000000000", "2000000000", "3000000000"]);
   // A separate review budget is no longer offered.
   const latest = await persistence.getProject("open-registry");
   if (latest?.manifest.reward.kind !== "monthly-pool")
