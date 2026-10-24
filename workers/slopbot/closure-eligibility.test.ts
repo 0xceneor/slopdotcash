@@ -5,7 +5,7 @@ import { findProject } from "../../src/lib/projects.mjs";
 import { sqliteD1 } from "../../tests/sqlite-d1";
 import {
   closureEligibility,
-  hasVerifiedSkillRun,
+  hasRecordedSkillRun,
   isMember,
 } from "./closure-eligibility";
 import { labelOnlyConfig } from "./contracts";
@@ -21,14 +21,14 @@ const eligible = {
   itemKind: "pull_request",
   exemption: "not-exempt",
   member: true,
-  verifiedSkillRun: true,
+  recordedSkillRun: true,
 } as const;
 
 describe("closure eligibility", () => {
-  test("requires a non-maintainer member with a verified skill run on a pull request", () => {
+  test("keeps closure inactive until the owner approves attribution evidence", () => {
     expect(closureEligibility(eligible)).toEqual({
-      eligible: true,
-      why: "verified Slop-skill participant",
+      eligible: false,
+      why: "automatic closure awaits the owner-approved attribution rule",
     });
     for (const [change, why] of [
       [{ exemption: "exempt" }, "maintainers are never closed by Slopbot"],
@@ -36,8 +36,8 @@ describe("closure eligibility", () => {
       [{ itemKind: "issue" }, "only Slop-skill pull requests can be closed"],
       [{ member: false }, "author is not a verified slop.cash member"],
       [
-        { verifiedSkillRun: false },
-        "no verified Slop skill run for this pull request",
+        { recordedSkillRun: false },
+        "no recorded Slop run for this pull request",
       ],
     ] as const)
       expect(closureEligibility({ ...eligible, ...change })).toEqual({
@@ -71,7 +71,7 @@ describe("closure eligibility", () => {
       closure: closureEligibility({
         ...eligible,
         member: false,
-        verifiedSkillRun: false,
+        recordedSkillRun: false,
       }),
     });
     expect(routing).toEqual({
@@ -86,15 +86,15 @@ describe("closure eligibility", () => {
     expect(
       route({
         ...base,
-        closure: closureEligibility({ ...eligible, verifiedSkillRun: false }),
+        closure: closureEligibility({ ...eligible, recordedSkillRun: false }),
       }),
     ).toMatchObject({ review: true, mayClose: false, penaltyEligible: false });
   });
 
-  test("only the eligible participant may be closed and penalized", () => {
+  test("a matched member and recorded run keep advisory review without closure", () => {
     expect(
       route({ ...base, closure: closureEligibility(eligible) }),
-    ).toMatchObject({ review: true, mayClose: true, penaltyEligible: true });
+    ).toMatchObject({ review: true, mayClose: false, penaltyEligible: false });
   });
 
   test("a security-only review of a paused project never closes", () => {
@@ -113,7 +113,7 @@ describe("closure eligibility", () => {
   });
 });
 
-describe("verified skill run evidence", () => {
+describe("recorded run evidence", () => {
   test("binds the authenticated author, project, repository and pull request", async () => {
     const { db, sqlite } = sqliteD1(migrations);
     const store = db as unknown as D1Database;
@@ -146,24 +146,33 @@ describe("verified skill run evidence", () => {
     };
     expect(await isMember(store, 42)).toBe(true);
     expect(await isMember(store, 43)).toBe(false);
-    expect(await hasVerifiedSkillRun(store, item)).toBe(true);
+    expect(await hasRecordedSkillRun(store, item)).toBe(true);
+    // Authenticated telemetry can be self-reported without running the skill.
+    // PRD section 11 leaves the evidence rule for closure undecided.
+    expect(
+      closureEligibility({
+        ...eligible,
+        member: await isMember(store, 42),
+        recordedSkillRun: await hasRecordedSkillRun(store, item),
+      }),
+    ).toMatchObject({ eligible: false });
     // Another person's run, another pull request, project or repository is
     // not evidence for this author.
-    expect(await hasVerifiedSkillRun(store, { ...item, authorId: 43 })).toBe(
+    expect(await hasRecordedSkillRun(store, { ...item, authorId: 43 })).toBe(
       false,
     );
-    expect(await hasVerifiedSkillRun(store, { ...item, number: 8 })).toBe(
+    expect(await hasRecordedSkillRun(store, { ...item, number: 8 })).toBe(
       false,
     );
     expect(
-      await hasVerifiedSkillRun(store, { ...item, projectId: "other" }),
+      await hasRecordedSkillRun(store, { ...item, projectId: "other" }),
     ).toBe(false);
-    expect(await hasVerifiedSkillRun(store, { ...item, repo: "fork" })).toBe(
+    expect(await hasRecordedSkillRun(store, { ...item, repo: "fork" })).toBe(
       false,
     );
     // A run without a pull_request_opened event proves no submission.
     sqlite.run("UPDATE run_progress_events SET kind = 'checkpoint'");
-    expect(await hasVerifiedSkillRun(store, item)).toBe(false);
+    expect(await hasRecordedSkillRun(store, item)).toBe(false);
   });
 });
 

@@ -5,7 +5,7 @@ import { activeBudgetBlock, recordBudgetBlock } from "./budget-blocks";
 import {
   type ClosureEligibility,
   closureEligibility,
-  hasVerifiedSkillRun,
+  hasRecordedSkillRun,
   isMember,
 } from "./closure-eligibility";
 import {
@@ -572,14 +572,14 @@ async function closureEligibilityFor(
     itemKind: job.itemKind,
     exemption,
     member: true,
-    verifiedSkillRun: true,
+    recordedSkillRun: true,
   };
   const structural = closureEligibility(evidence);
   if (!structural.eligible) return structural;
   evidence.member = member ?? (await isMember(db, context.issue.user.id));
-  evidence.verifiedSkillRun =
+  evidence.recordedSkillRun =
     evidence.member &&
-    (await hasVerifiedSkillRun(db, {
+    (await hasRecordedSkillRun(db, {
       authorId: context.issue.user.id,
       projectId: context.registration.projectId,
       owner: job.owner,
