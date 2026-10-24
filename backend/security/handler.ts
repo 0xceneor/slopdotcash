@@ -616,10 +616,10 @@ async function programFunds(
     BigInt(program.amount.grossMinor) * BigInt(program.capacity.awards);
   const reserved = await deps.db
     .prepare(
-      "SELECT COALESCE(SUM(CAST(gross_minor AS INTEGER)), 0) AS total FROM security_award_reservations WHERE project_id = ? AND currency = ?",
+      "SELECT CAST(COALESCE(SUM(CAST(gross_minor AS INTEGER)), 0) AS TEXT) AS total FROM security_award_reservations WHERE project_id = ? AND currency = ?",
     )
     .bind(projectId, program.amount.currency)
-    .first<{ total: number | bigint }>();
+    .first<{ total: string }>();
   const available = budget - BigInt(reserved?.total ?? 0);
   return {
     currency: program.amount.currency,
