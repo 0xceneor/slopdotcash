@@ -358,7 +358,12 @@ export function startGitHubApiFixture(port) {
         return;
       }
       const [owner] = repository[1].split("/");
-      if (owner === E2E_OWNER.login || owner === E2E_ORGANIZATION.login) {
+      if (
+        owner === E2E_OWNER.login ||
+        owner === E2E_ORGANIZATION.login ||
+        owner === "e2e-applicant" ||
+        Object.hasOwn(E2E_SECURITY_ACCOUNTS, owner.replace(/^e2e-/, ""))
+      ) {
         response.writeHead(200, { "content-type": "application/json" });
         response.end(JSON.stringify(fixtureRepository(repository[1])));
         return;
