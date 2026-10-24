@@ -35,10 +35,10 @@ const STATE_TEXT: Record<
   NonNullable<MonthlyOwnerView["run"]>["awards"][number]["state"],
   string
 > = {
-  underfunded: "Waiting for free vault funds",
-  excluded: "Excluded from payment: account banned",
-  "awaiting-reservation": "Ready for your reservation",
-  reserved: "Reserved; pays when the contributor's wallet is ready",
+  underfunded: "Underfunded: waiting for free vault funds",
+  excluded: "Excluded: account banned",
+  "awaiting-reservation": "Approved and funded: ready for your reservation",
+  reserved: "Reserved in the vault; payment not yet verified",
   paid: "Paid",
 };
 

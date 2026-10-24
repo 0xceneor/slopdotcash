@@ -270,7 +270,7 @@ test("equal contributors share cycle and profile ranks", async ({
     throw new Error("Public snapshot has no tied overall contributors");
   for (const leader of leaders.slice(profileIndex - 1, profileIndex + 1)) {
     await page.goto(`/contributors/${encodeURIComponent(leader.actor.login)}`);
-    const rank = page.getByText("overall rank", { exact: true }).locator("..");
+    const rank = page.getByText("all-time rank", { exact: true }).locator("..");
     await expect(rank).toBeVisible();
     await expect(rank.locator("strong")).toHaveText(`#${profileIndex}`);
   }

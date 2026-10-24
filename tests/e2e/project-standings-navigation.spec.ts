@@ -81,7 +81,7 @@ async function fixtures(page: Page, paymentsAvailable = () => true) {
   );
 }
 
-test("Paid standings preserve unavailable data and recover on retry", async ({
+test("Money received standings preserve unavailable data and recover on retry", async ({
   page,
 }, info) => {
   let available = false;
@@ -119,7 +119,9 @@ test("Paid standings preserve unavailable data and recover on retry", async ({
   await expect(
     standings.locator("tbody tr").first().locator("td").last(),
   ).toHaveText("Unavailable");
-  await standings.getByRole("button", { name: "Paid", exact: true }).click();
+  await standings
+    .getByRole("button", { name: "Money received", exact: true })
+    .click();
   available = true;
   failures.length = 0;
   const retry = standings.getByRole("button", {
@@ -176,7 +178,9 @@ test("history navigation keeps contributor standings scoped to the current proje
     .getByRole("link", { name: "Projects", exact: true })
     .click();
   await page.locator('a.project-card[href="/projects/eliza"]').click();
-  await standings.getByRole("button", { name: "Paid", exact: true }).click();
+  await standings
+    .getByRole("button", { name: "Money received", exact: true })
+    .click();
   await expect(eliza).toContainText("$111.11");
   await page.evaluate(() => history.go(-2));
   await expect(page.locator(".breadcrumb")).toHaveText("Projects/Slop");
@@ -249,9 +253,14 @@ test("global standings still accept project, sort and contributor filters", asyn
   await expect(
     standings.getByRole("columnheader", { name: "Score", exact: true }),
   ).toHaveAttribute("aria-sort", "descending");
-  await standings.getByRole("button", { name: "Paid", exact: true }).click();
+  await standings
+    .getByRole("button", { name: "Money received", exact: true })
+    .click();
   await expect(
-    standings.getByRole("columnheader", { name: "Paid", exact: true }),
+    standings.getByRole("columnheader", {
+      name: "Money received",
+      exact: true,
+    }),
   ).toHaveAttribute("aria-sort", "descending");
   await expect(page).toHaveURL(/sort=money/);
   expect(

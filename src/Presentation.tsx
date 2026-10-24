@@ -158,11 +158,45 @@ export function formatCycleMonth(value: string): string {
   }).format(new Date(`${value}-01T00:00:00.000Z`));
 }
 
+/**
+ * Stored cycle states keep their recorded names; pages show the PRD section 6
+ * award and payment words instead (awards: projected, under review, approved,
+ * excluded; payments: underfunded, awaiting wallet, ready, held, submitted,
+ * paid).
+ */
+const CYCLE_STATE_LABELS: Record<CycleIndexEntry["state"], string> = {
+  "closed-no-awards": "Closed, no awards",
+  "external-provisional": "Provisional external shares",
+  review: "Under review",
+  "payment-ready": "Approved",
+  "settlement-planned": "Approved, payment ready",
+  paid: "Paid",
+  "wound-up": "Approved, payment held",
+};
+
 export function cycleStateLabel(state: CycleIndexEntry["state"]): string {
-  return state
-    .split("-")
-    .map((part) => part[0]?.toUpperCase() + part.slice(1))
-    .join(" ");
+  return CYCLE_STATE_LABELS[state];
+}
+
+/** A contributor's recorded cycle row in PRD section 6 award and payment words. */
+const CYCLE_CONTRIBUTOR_STATE_LABELS: Record<
+  CycleIndexEntry["contributors"][number]["state"],
+  string
+> = {
+  proposed: "Under review",
+  approved: "Approved",
+  excluded: "Excluded",
+  "external-share": "External prize share",
+  unclaimed: "Awaiting wallet",
+  held: "Held",
+  "held-below-minimum": "Held below the payment minimum",
+  paid: "Paid",
+};
+
+export function cycleContributorStateLabel(
+  state: CycleIndexEntry["contributors"][number]["state"],
+): string {
+  return CYCLE_CONTRIBUTOR_STATE_LABELS[state];
 }
 
 /**
@@ -185,7 +219,7 @@ export function cycleLifecycleLabel(
   cycle: Pick<CycleIndexEntry, "approvedAt" | "reviewEndsAt" | "state">,
 ): string {
   return awaitingApproval(cycle)
-    ? "Awaiting approval"
+    ? "Under review, awaiting approval"
     : cycleStateLabel(cycle.state);
 }
 
@@ -316,6 +350,13 @@ export function PaymentLifecycle() {
             The owner approved the amount. Funding and payment are separate.
           </span>
         </li>
+        <li>
+          <strong>Excluded</strong>
+          <span>
+            A recorded decision, such as a payout exclusion or ban, keeps the
+            award out of payment.
+          </span>
+        </li>
       </ol>
       <div className="payment-branches">
         <h3>Payment of an approved award</h3>
@@ -349,9 +390,8 @@ export function PaymentLifecycle() {
           </div>
         </dl>
         <p>
-          Unclaimed awards need a usable wallet; their records show whether
-          funds are reserved. Excluded awards keep the decision and reason and
-          do not enter payment.
+          Awaiting wallet is a payment state, not a separate award: the award
+          stays approved until you add or confirm a payout wallet.
         </p>
       </div>
     </>

@@ -18,6 +18,7 @@ import type { DataState } from "./lib/use-snapshot";
 import { ProfilePoints, useProfileMembership } from "./Points";
 import {
   ContributorIdentity,
+  cycleContributorStateLabel,
   cycleLifecycleLabel,
   DataNotice,
   ExternalLinkAnchor,
@@ -194,7 +195,7 @@ export function ProfilePage({
             {globalRank !== null ? (
               <div>
                 <strong>#{globalRank}</strong>
-                <span>overall rank</span>
+                <span>all-time rank</span>
               </div>
             ) : null}
             <div>
@@ -256,9 +257,7 @@ export function ProfilePage({
             <span>{penalties.length} recorded</span>
           </div>
           <p>
-            Slopbot debits a closed pull request once, from its published
-            penalty table. A debit lowers only that project and UTC month, never
-            below zero. An upheld appeal or a maintainer reopen removes it.
+            <Link href="/how-it-works#slop-score">How penalties work</Link>
           </p>
           <ul className="profile-penalties">
             {penalties.map((penalty) => (
@@ -328,11 +327,7 @@ export function ProfilePage({
                           : contributor.suggestedMinor,
                     )}
                   </strong>
-                  <small>
-                    {contributor.state === "paid"
-                      ? "paid"
-                      : contributor.state.replaceAll("-", " ")}
-                  </small>
+                  <small>{cycleContributorStateLabel(contributor.state)}</small>
                 </span>
                 <ChevronRight aria-hidden="true" />
               </Link>

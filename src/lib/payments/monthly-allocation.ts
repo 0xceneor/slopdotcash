@@ -20,6 +20,18 @@ export interface MonthlySchedule {
 }
 
 /**
+ * The recorded monthly period model (PRD section 6 and section 11, Monthly
+ * period model): calendar UTC months from 2026-11, cut off 72 hours after the
+ * month ends. Public pages read it to describe a month's owner-change window;
+ * the automatic process still reads only `MONTHLY_PAYMENT_SCHEDULE`, and a
+ * unit test keeps the two equal.
+ */
+export const PRD_MONTHLY_SCHEDULE: Readonly<MonthlySchedule> = Object.freeze({
+  firstPeriod: "2026-11",
+  cutoffSecondsAfterPeriodEnd: 72 * 60 * 60,
+});
+
+/**
  * Reads `MONTHLY_PAYMENT_SCHEDULE`. Owner decision D1 sets it in the Pages
  * `[vars]`; nothing defaults in code: an unset value returns null and the
  * automatic process stays off. A malformed value throws.

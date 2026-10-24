@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   assertAllocationChange,
   buildExecutionSnapshot,
   currentAllocations,
   monthlyCutoff,
+  PRD_MONTHLY_SCHEDULE,
   parseMonthlySchedule,
 } from "./monthly-allocation";
 
@@ -47,6 +49,21 @@ describe("monthly schedule", () => {
     expect(monthlyCutoff(schedule, "2026-10")).toBeNull();
     expect(monthlyCutoff(schedule, "2026-12")?.toISOString()).toBe(
       "2027-01-01T02:00:00.000Z",
+    );
+  });
+
+  test("public pages describe the same schedule that production and staging configure", () => {
+    for (const file of ["wrangler.toml", "wrangler.staging.toml"]) {
+      const { vars } = Bun.TOML.parse(readFileSync(file, "utf8")) as {
+        vars: Record<string, string>;
+      };
+      expect(parseMonthlySchedule(vars.MONTHLY_PAYMENT_SCHEDULE)).toEqual({
+        ...PRD_MONTHLY_SCHEDULE,
+      });
+    }
+    expect(monthlyCutoff(PRD_MONTHLY_SCHEDULE, "2026-10")).toBeNull();
+    expect(monthlyCutoff(PRD_MONTHLY_SCHEDULE, "2026-11")?.toISOString()).toBe(
+      "2026-12-04T00:00:00.000Z",
     );
   });
 });

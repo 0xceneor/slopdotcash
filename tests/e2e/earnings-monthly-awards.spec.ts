@@ -80,7 +80,7 @@ test("Your payouts lists approved monthly awards with their payment state", asyn
   );
   await expect(rows.nth(1)).toContainText("eliza (October 2026)");
   await expect(rows.nth(1)).toContainText(
-    "Approved and funded, waiting for the vault reservation",
+    "Approved, funded: the project vault reserves it next",
   );
   await expect(rows.nth(2)).toContainText("Ready, payment queued");
   await expect(

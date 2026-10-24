@@ -729,7 +729,7 @@ export function EarningsPage({
                             <td>
                               {award.state === "underfunded"
                                 ? "Approved, underfunded: waiting for the project to add funds"
-                                : "Approved and funded, waiting for the vault reservation"}
+                                : "Approved, funded: the project vault reserves it next"}
                             </td>
                           </tr>
                         ))}
@@ -759,11 +759,11 @@ export function EarningsPage({
                               {
                                 {
                                   paid: "Paid, verified on chain",
-                                  needs_wallet: `Add or confirm ${networkName[payment.chain]} wallet`,
+                                  needs_wallet: `Awaiting wallet: add or confirm your ${networkName[payment.chain]} wallet`,
                                   ready: "Ready, payment queued",
                                   submitted:
                                     "Submitted, waiting for chain verification",
-                                  held: "Payment held, funds remain reserved",
+                                  held: "Held, funds remain reserved",
                                 }[payment.deliveryState]
                               }
                               {transactionUrl(
