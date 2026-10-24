@@ -91,6 +91,8 @@ export async function startLocalWorker(
       String(port),
       "--ip",
       "127.0.0.1",
+      "--inspector-port",
+      "0",
       ...extraArgs,
       "--log-level",
       "error",
