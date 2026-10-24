@@ -65,6 +65,7 @@ const config = {
     ...base.vars,
     SLOP_ENVIRONMENT: target,
     NOTIFY_INBOX_URL: `${expectedOrigin}/inbox`,
+    PROJECT_MODERATOR_GITHUB_IDS: pages.vars?.PROJECT_MODERATOR_GITHUB_IDS ?? "",
   },
   d1_databases: pilots.length
     ? [{ ...database[0], migrations_dir: resolve(root, "migrations") }]
