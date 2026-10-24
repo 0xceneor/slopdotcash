@@ -1153,7 +1153,7 @@ test("account-reinstatement upgrade preserves prior releases and separates futur
   }
 });
 
-test.each(["vault verification", "owner update"])(
+test.each(["vault verification", "owner update", "automatic activation"])(
   "a ban issued during %s blocks the owner revision",
   async (flow) => {
     const t = registry();
@@ -1217,29 +1217,32 @@ test.each(["vault verification", "owner update"])(
     };
     const prepared = await t.persistence.getProject(target.id);
     if (!prepared) throw new Error("Project required");
-    if (flow === "owner update")
+    if (flow === "automatic activation") t.state.clearance = CLEARED;
+    if (flow !== "vault verification")
       t.deps.repositoryAccess = async () => {
         start();
         await verified;
         return t.state.access;
       };
     const registration =
-      flow === "owner update"
-        ? t.call("PUT", `projects/${target.id}`, OWNER, {
-            manifest: {
-              ...prepared.manifest,
-              headline: "A useful updated project summary.",
-            },
-            expectedRevision: prepared.revision,
-          })
-        : t.call("POST", "project-vaults/vault-target", OWNER, {
-            step: "register",
-            expectedRevision: 2,
-            network: "ethereum",
-            claimId: "verified-owner-wallet",
-            automatic: true,
-            transactionId: TEST_VAULT.deploymentTransaction,
-          });
+      flow === "automatic activation"
+        ? t.call("POST", `project-setup/${target.id}/check`, OWNER, {})
+        : flow === "owner update"
+          ? t.call("PUT", `projects/${target.id}`, OWNER, {
+              manifest: {
+                ...prepared.manifest,
+                headline: "A useful updated project summary.",
+              },
+              expectedRevision: prepared.revision,
+            })
+          : t.call("POST", "project-vaults/vault-target", OWNER, {
+              step: "register",
+              expectedRevision: 2,
+              network: "ethereum",
+              claimId: "verified-owner-wallet",
+              automatic: true,
+              transactionId: TEST_VAULT.deploymentTransaction,
+            });
     await started;
     const scan: ProjectEnforcement = {
       id: "enf_vault_race_scan",
