@@ -16,6 +16,7 @@ import { networkLabel } from "./lib/network-names";
 import {
   formatAssetAmount,
   formatBaseUnits,
+  type PayoutPolicy,
   transactionUrl,
 } from "./lib/payments/contracts";
 import {
@@ -75,11 +76,13 @@ export function VaultActions({
   projectId,
   deployment,
   connectedWallet,
+  payoutPolicy = "ordinary",
   onFinalized,
 }: {
   projectId: string;
   deployment: EscrowDeployment;
   connectedWallet?: VaultConnection;
+  payoutPolicy?: PayoutPolicy;
   onFinalized: () => void;
 }) {
   const solana = ESCROW_NETWORKS[deployment.network].family === "solana";
@@ -154,7 +157,13 @@ export function VaultActions({
               operation,
               amount,
             )
-          : await reviewVaultAction(deployment, wallet, operation, amount),
+          : await reviewVaultAction(
+              deployment,
+              wallet,
+              operation,
+              amount,
+              payoutPolicy,
+            ),
       );
     });
   const send = (step: Step) =>
@@ -215,6 +224,7 @@ export function VaultActions({
             amount,
             step,
             beforeSend,
+            payoutPolicy,
           );
         }
         const submitted = { ...intent, hash };
@@ -262,6 +272,7 @@ export function VaultActions({
             pending.gross,
             hash,
             pending.step,
+            payoutPolicy,
           );
       if (!pending.hash) remember({ ...pending, hash });
       if (result === "pending") {
