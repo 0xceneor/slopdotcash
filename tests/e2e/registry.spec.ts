@@ -1574,6 +1574,13 @@ test("two contributors flag through the form, pause the project and notify moder
     fullPage: true,
   });
 
+  await second.reload({ waitUntil: "networkidle" });
+  await second
+    .getByText("Report malicious code in this project", { exact: true })
+    .click({ timeout: 10000 });
+  await expect(
+    second.getByRole("button", { name: "Withdraw my flag" }),
+  ).toBeVisible();
   await second.getByRole("button", { name: "Withdraw my flag" }).click();
   await expect(
     second.getByRole("status").filter({ hasText: "Flag withdrawn" }),
