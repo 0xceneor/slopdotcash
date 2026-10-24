@@ -1118,7 +1118,8 @@ test("account-reinstatement upgrade preserves prior releases and separates futur
         "SELECT name,sql FROM sqlite_master WHERE type='trigger' ORDER BY name",
       )
       .all() as { name: string; sql: string }[];
-    for (const name of names.filter((name) => name >= "0070"))
+    // Test this upgrade only. Later migrations may intentionally replace unrelated triggers.
+    for (const name of names.filter((name) => name >= "0070" && name < "0073"))
       sqlite.exec(
         readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
       );

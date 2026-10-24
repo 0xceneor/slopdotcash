@@ -1359,10 +1359,12 @@ test("an owner installs Slopbot before creation and resumes setup; a failed scan
   await expect(created.locator("h2")).toHaveText(
     "Setup status: Waiting for the security scan",
   );
+  await expect(created.getByText("Confirmed", { exact: true })).toBeVisible();
+  await expect(created.getByText("Queued", { exact: true })).toBeVisible();
   await expect(created).toContainText(
-    `Confirmed. @e2e-owner has admin access to ${project.repository}.`,
+    `@e2e-owner has admin access to ${project.repository}.`,
   );
-  await expect(created).toContainText("Queued. The security scan is queued.");
+  await expect(created).toContainText("The security scan is queued.");
   await expectAccessible(page);
 
   // Resumed setup: the owner checks again from "Your projects" on a new
@@ -1376,10 +1378,11 @@ test("an owner installs Slopbot before creation and resumes setup; a failed scan
     "Setup status: Waiting for the security scan",
   );
   await expect(resumed).toContainText(
-    `Confirmed. @e2e-owner has admin access to ${project.repository}.`,
+    `@e2e-owner has admin access to ${project.repository}.`,
   );
+  await expect(resumed.getByText("Installed", { exact: true })).toBeVisible();
   await expect(resumed).toContainText(
-    `Installed. Slopbot is installed on ${project.repository}.`,
+    `Slopbot is installed on ${project.repository}.`,
   );
 
   // Scan failure: an incomplete scan does not clear the project. The owner
@@ -1464,8 +1467,11 @@ test("an owner installs Slopbot before creation and resumes setup; a failed scan
   await page.reload({ waitUntil: "networkidle" });
   const managed = page.locator(".project-setup-status");
   await expect(managed.locator("h2")).toHaveText("Setup status: Action needed");
+  await expect(
+    managed.getByText("Not confirmed", { exact: true }),
+  ).toBeVisible();
   await expect(managed).toContainText(
-    `Not confirmed. @e2e-owner has read access to ${project.repository}. Write, maintain or admin access is required.`,
+    `@e2e-owner has read access to ${project.repository}. Write, maintain or admin access is required.`,
   );
   await page
     .getByRole("textbox", { name: "Short description", exact: true })
@@ -1578,7 +1584,7 @@ test("an applicant publishes an application stored before self-service setup wit
     "Setup status: Waiting for the security scan",
   );
   await expect(entry.locator(".project-setup-status")).toContainText(
-    `Confirmed. @e2e-owner has admin access to ${project.repository}.`,
+    `@e2e-owner has admin access to ${project.repository}.`,
   );
   expect(await listedProject(page, project.id)).toMatchObject({
     name: project.name,
