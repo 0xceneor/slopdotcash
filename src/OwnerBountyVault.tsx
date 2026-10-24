@@ -36,7 +36,11 @@ export function OwnerBountyVault({
   // biome-ignore lint/correctness/useExhaustiveDependencies: Refresh repeats the private balance read.
   useEffect(() => {
     let active = true;
-    setState({ status: "loading" });
+    // A balance refresh must not unmount the wallet action and erase its
+    // finalized result or an in-flight recovery form.
+    setState((previous) =>
+      previous.status === "ready" ? previous : { status: "loading" },
+    );
     projectApiRequest<{ funds: PrivateFunds | null; canSetup: boolean }>(
       "GET",
       `project-vaults/${project.id}?purpose=security-bounty`,
