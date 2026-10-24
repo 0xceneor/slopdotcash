@@ -24,6 +24,31 @@ until the responsible humans approve and demonstrate those controls. Policy
 references must identify the approved public access and retention terms; private
 operational evidence must not be published with those terms.
 
+## Approved production policy
+
+The owner approved the [operator designation](https://github.com/SlopDotCash/slopdotcash/issues/909#issuecomment-6379712530)
+and [retention and recovery terms](https://github.com/SlopDotCash/slopdotcash/issues/909#issuecomment-6379714982):
+
+- The evidence operators are `lalalune` (18633264) and `drew-dot-com`
+  (202660855). `lalalune` is the policy authority. This access is separate
+  from the moderator role.
+- Each audited read grant lasts 15 minutes.
+- Keep raw evidence while its case is open and for 90 days after closure.
+- Make daily private backups. Keep each backup for 30 days. Deleted evidence
+  can therefore remain in backups for up to 30 additional days.
+- Keep access logs for one year.
+- Prove restoration before production activation.
+
+These terms apply only to scanner evidence. They do not change permanent
+contributor-trace storage. Keep production and staging stores separate;
+preview deployments have no evidence-store binding.
+
+Policy approval is not an external-controls attestation. Before activation,
+configure and verify the case-closure retention schedule, daily backup job,
+backup expiry, access logging, and restoration. Do not fill `externalControls`
+with an assertion that these controls operate until that assertion has evidence.
+The existing bucket and its binding alone do not meet this requirement.
+
 ## Write and inspect exact bytes
 
 The existing signed vetting service registers an immutable object inventory at

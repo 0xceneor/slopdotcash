@@ -23,6 +23,12 @@ migrations_dir = "migrations"
 binding = "PRIVATE_TRACES"
 bucket_name = "slop-private-traces"
 
+# Scanner evidence is separate from permanent contributor traces.
+# Access also requires the approved evidence policy and scanner public keys.
+[[r2_buckets]]
+binding = "VETTING_EVIDENCE"
+bucket_name = "slop-vetting-evidence"
+
 [[services]]
 binding = "SLOP_IDENTITY"
 service = "slop-identity"
