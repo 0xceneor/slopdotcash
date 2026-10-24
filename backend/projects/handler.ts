@@ -24,8 +24,8 @@ import {
   rewardAssetChoice,
   sameRewardAsset,
 } from "../../src/lib/reward-asset.mjs";
-import type { VaultSetupInput } from "../../src/lib/vault-setup";
 import type { SecurityBountyTerms } from "../../src/lib/security-bounty.mjs";
+import type { VaultSetupInput } from "../../src/lib/vault-setup";
 import { type ApiError, fail } from "../api-error";
 import { pathParts } from "../api-path";
 import type { readSecurityProgramFunds } from "../security/program-funds";
