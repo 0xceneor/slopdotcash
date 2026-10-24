@@ -421,11 +421,29 @@ describe("monthly coordinator", () => {
       }),
       "award_unfunded",
     );
+    // A refreshed balance can arrive after the read but before the batch.
+    vault("5000");
+    const originalBatch = db.batch.bind(db);
+    db.batch = async (statements) => {
+      vault("0");
+      return originalBatch(statements);
+    };
+    await coordinate(afterCutoff);
+    db.batch = originalBatch;
+    expect(count("monthly_payment_obligations")).toBe(0);
+    expect((await owner().view(project.id, "2026-11", actor)).run?.funded).toBe(
+      false,
+    );
     // A stale vault reading never funds a month.
     vault("5000", "2026-11-30T00:00:00.000Z");
     expect((await coordinate(afterCutoff)).waiting).toEqual([
       { key: `${project.id}/2026-11`, reason: "stale-funding" },
     ]);
+    vault("5000");
+    expect((await coordinate(afterCutoff)).created).toEqual([
+      `${project.id}/2026-11`,
+    ]);
+    expect(count("monthly_payment_obligations")).toBe(2);
   });
 
   test("after the cutoff the automatic default fixes the allocations until they are frozen", async () => {
