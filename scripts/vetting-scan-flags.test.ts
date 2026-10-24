@@ -526,8 +526,6 @@ describe("two-contributor flags", () => {
         path: "/projects/open-registry",
       },
     ]);
-    // A third flag records evidence but never pauses twice.
-    expect((await flag("carol")).status).toBe(201);
     expect(
       (await projects.listEnforcements()).filter(
         (entry) => entry.projectId === "open-registry",
@@ -537,7 +535,7 @@ describe("two-contributor flags", () => {
     const overview = await vettingApi(
       sessionRequest("GET", "admin/vetting", "admin"),
     );
-    expect((await overview.json()).flags).toHaveLength(3);
+    expect((await overview.json()).flags).toHaveLength(2);
 
     // The fresh scan queued with the pause reinstates on a clean result.
     const fresh = (await vetting.pendingAssessments()).at(-1);
@@ -575,6 +573,45 @@ describe("two-contributor flags", () => {
     expect(await (await flag("alice")).json()).toMatchObject({ paused: false });
     expect((await publicProject()).status).toBe(200);
   });
+
+  test.each([0, 30_000])(
+    "a flag filed during a scan waits for a newer scan (offset %i)",
+    async (offset) => {
+      await activeProject();
+      expect((await flag("alice")).status).toBe(201);
+      clock = new Date(NOW.getTime() + 60_000);
+      expect((await flag("bob")).status).toBe(201);
+      const old = (await vetting.pendingAssessments()).at(-1);
+      if (!old) throw new Error("Missing pause scan");
+      clock = new Date(NOW.getTime() + 60_000 + offset);
+      expect((await flag("carol")).status).toBe(201);
+      clock = new Date(NOW.getTime() + 120_000);
+      expect(
+        (
+          await postResult(
+            await scanFixture(old.id, "clean", { runId: "old-flag-scan" }),
+          )
+        ).status,
+      ).toBe(200);
+      expect((await publicProject()).status).toBe(410);
+      expect(
+        (await flags.activeFlags()).map((entry) => entry.reporter.githubId),
+      ).toEqual([CAROL.githubId]);
+      const refreshed = await refresh();
+      expect(refreshed.queued).toHaveLength(1);
+      const fresh = refreshed.queued[0];
+      clock = new Date(NOW.getTime() + 180_000);
+      expect(
+        (
+          await postResult(
+            await scanFixture(fresh, "clean", { runId: "new-flag-scan" }),
+          )
+        ).status,
+      ).toBe(200);
+      expect((await publicProject()).status).toBe(200);
+      expect(await flags.activeFlags()).toEqual([]);
+    },
+  );
 
   test("withdrawn flags stop counting and owners cannot flag", async () => {
     await activeProject();

@@ -208,3 +208,8 @@ Migration 0032 preserves human enforcement history and admits the signed service
 issuer only for standing-rule Ban records.
 
 Confirmed-malicious bans notify the configured administrators and project moderators, the applicant and steward, and known affected contributors. Contributor recipients come from current positive contribution records resolved through immutable membership IDs, plus project payment obligations and imported transfers. Reversed awards and unrelated projects do not select recipients. People without a resolvable inbox identity cannot receive a direct notice. The private inbox notice contains no security reason, trace, or evidence reference. The result, ban, and notices commit together; a repeated signed result cannot duplicate them.
+
+A scan records the active flag IDs when it is queued. Its clean result resolves
+only those flags. New flags keep the project paused and cause the next automatic
+refresh to queue another scan. Equal timestamps do not make a newer flag part
+of an older scan. The database checks this boundary when it records reinstatement.

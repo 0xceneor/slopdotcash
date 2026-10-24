@@ -214,6 +214,18 @@ export class CloudflareVettingPersistence {
   }
 
   /** Returns "conflict" when this revision already has a queued scan. */
+  /** A scan can resolve only the flags present when it was queued. */
+  async assessmentCoversActiveFlags(assessmentId: string): Promise<boolean> {
+    const row = await this.db
+      .prepare(`SELECT NOT EXISTS (
+      SELECT 1 FROM project_flags f WHERE f.project_id = a.project_id
+        AND f.state = 'active' AND f.id NOT IN (SELECT value FROM json_each(a.flag_ids))
+    ) AS covered FROM vetting_assessments a WHERE a.id = ?`)
+      .bind(assessmentId)
+      .first<{ covered: number }>();
+    return row?.covered === 1;
+  }
+
   async createAssessment(
     assessment: Omit<
       VettingAssessment,
@@ -228,8 +240,8 @@ export class CloudflareVettingPersistence {
     try {
       await this.db
         .prepare(
-          `INSERT INTO vetting_assessments (id, project_id, revision, manifest_sha256, content_sha256, commit_sha, template_sha256, requested_by_github_id, requested_by_github_login, requested_at, request_reason, state)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+          `INSERT INTO vetting_assessments (id, project_id, revision, manifest_sha256, content_sha256, commit_sha, template_sha256, requested_by_github_id, requested_by_github_login, requested_at, request_reason, state, flag_ids)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', (SELECT json_group_array(id) FROM project_flags WHERE project_id = ? AND state = 'active'))`,
         )
         .bind(
           assessment.id,
@@ -243,6 +255,7 @@ export class CloudflareVettingPersistence {
           assessment.requestedBy.githubLogin,
           assessment.requestedAt,
           assessment.requestReason,
+          assessment.projectId,
         )
         .run();
       return "created";
@@ -322,7 +335,11 @@ export class CloudflareVettingPersistence {
         projects.getProject(result.projectId),
         this.getAssessment(result.assessmentId),
       ]);
-      if (project && assessment)
+      if (
+        project &&
+        assessment &&
+        (await this.assessmentCoversActiveFlags(assessment.id))
+      )
         enforcement = planScanReinstatement({
           project,
           restriction: projectRestriction(
