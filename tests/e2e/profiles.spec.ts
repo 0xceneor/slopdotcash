@@ -88,7 +88,10 @@ test("profiles preserve legacy coverage and expose recorded issue history", asyn
     "2 PRs closed without merging",
   );
   await expect(
-    page.getByText("points", { exact: true }).locator("..").locator("strong"),
+    page
+      .getByText("total points", { exact: true })
+      .locator("..")
+      .locator("strong"),
   ).toHaveText("0");
   await expect(
     profile.getByRole("link", { name: "GitHub · @profile-only-contributor" }),

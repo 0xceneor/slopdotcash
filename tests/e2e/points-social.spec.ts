@@ -283,7 +283,10 @@ test("social membership preserves past points and connection privacy without new
     .getByRole("link", { name: "social-member", exact: true })
     .click();
   await expect(
-    page.getByText("points", { exact: true }).locator("..").locator("strong"),
+    page
+      .getByText("total points", { exact: true })
+      .locator("..")
+      .locator("strong"),
   ).toHaveText("15");
   expect(errors).toEqual([]);
   expect(failures).toEqual([]);
