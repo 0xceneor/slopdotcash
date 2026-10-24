@@ -33,10 +33,10 @@ export interface SolanaEscrowConfig {
 }
 const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
-/** Project account size: 265 bytes of v3 state, then the pending identity authority, its
- * effective time and confirmation, and the i64 rotation delay. `migrate_project` grows a
- * 265-byte account to this size. */
-export const PROJECT_SIZE = 314;
+/** Project account size: 257 bytes of core state, the pending identity authority, its
+ * effective time and confirmation, the i64 rotation delay, then the u8 purpose, the u64
+ * monthly cap and the monthly on/off switch. */
+export const PROJECT_SIZE = 316;
 /** Wallet binding size: 160 bytes of latest-binding state plus the u64 paid version and u8 veto count. */
 export const BINDING_SIZE = 169;
 /** Obligation size: 137 bytes of v2 state plus the i64 commit time. */
@@ -68,6 +68,7 @@ const anchorDiscriminator = (name: string) =>
   hex(sha256(encoder.encode(`global:${name}`)).slice(0, 8));
 const COMMIT = anchorDiscriminator("commit"),
   COMMIT_BOUNTY = anchorDiscriminator("commit_bounty"),
+  COMMIT_MONTHLY_AWARD = anchorDiscriminator("commit_monthly_award"),
   PAY = anchorDiscriminator("pay");
 export const CONFIG_DISCRIMINATOR = hex(
   sha256(encoder.encode("account:Config")).slice(0, 8),
@@ -319,9 +320,11 @@ export async function verifySolanaDeployment(
   )
     throw new Error("Project authorities differ from the pinned escrow Config");
   const view = new DataView(project.buffer, project.byteOffset);
+  if (project[306] !== solanaProjectPurpose(config.payoutPolicy))
+    throw new Error("Project purpose does not match the payout policy");
   if (
     view.getBigInt64(249, true) !== BigInt(config.bindingDelaySeconds) ||
-    view.getBigInt64(306, true) !== BigInt(config.rotationDelaySeconds) ||
+    view.getBigInt64(298, true) !== BigInt(config.rotationDelaySeconds) ||
     pubkey(project, 8) !== config.owner ||
     pubkey(project, 136) !== config.feeRecipient ||
     pubkey(project, 168) !== config.mint ||
@@ -346,15 +349,148 @@ export function solanaAuthorityRotation(
   if (project.length !== PROJECT_SIZE)
     throw new Error("Account layout mismatch");
   const view = new DataView(project.buffer, project.byteOffset);
-  const pending = pubkey(project, 265);
+  const pending = pubkey(project, 257);
   const proposed = pending !== "11111111111111111111111111111111";
   return {
     identityAuthority: pubkey(project, 104),
     pendingIdentityAuthority: proposed ? pending : null,
-    effectiveAt: proposed ? view.getBigInt64(297, true).toString() : null,
-    confirmed: proposed && project[305] === 1,
-    rotationDelaySeconds: view.getBigInt64(306, true).toString(),
+    effectiveAt: proposed ? view.getBigInt64(289, true).toString() : null,
+    confirmed: proposed && project[297] === 1,
+    rotationDelaySeconds: view.getBigInt64(298, true).toString(),
   };
+}
+
+/** The program's project purpose for a payout policy: 0 ordinary awards, 1 private bounties. It
+ * is the last project PDA seed: ["project", owner, project ID, purpose]. */
+export function solanaProjectPurpose(policy: PayoutPolicy = "ordinary") {
+  return policy === "security-bounty" ? 1 : 0;
+}
+
+const U64 = (1n << 64n) - 1n;
+/** One award of a monthly allocation, in allocation order. */
+export interface SolanaMonthlyEntry {
+  githubUserId: string;
+  grossMicro: string;
+  sourceDigest: string;
+}
+const le = (value: string | bigint, bytes: number) => {
+  const out = new Uint8Array(bytes);
+  new DataView(out.buffer).setBigUint64(0, BigInt(value), true);
+  return out;
+};
+const concat = (...parts: Uint8Array[]) => {
+  const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
+  let at = 0;
+  for (const part of parts) {
+    out.set(part, at);
+    at += part.length;
+  }
+  return out;
+};
+function monthlyLeaf(entry: SolanaMonthlyEntry) {
+  if (
+    !/^[1-9][0-9]*$/.test(entry.githubUserId) ||
+    !/^[1-9][0-9]*$/.test(entry.grossMicro) ||
+    BigInt(entry.githubUserId) > U64 ||
+    BigInt(entry.grossMicro) > U64
+  )
+    throw new Error("Invalid monthly award");
+  return sha256(
+    concat(
+      Uint8Array.of(0),
+      le(entry.githubUserId, 8),
+      le(entry.grossMicro, 8),
+      digest(entry.sourceDigest),
+    ),
+  );
+}
+type AllocationNode = { hash: Uint8Array; total: bigint };
+const node = (left: AllocationNode, right: AllocationNode): AllocationNode => {
+  const total = left.total + right.total;
+  if (total > U64) throw new Error("Monthly total overflow");
+  return {
+    hash: sha256(
+      concat(
+        Uint8Array.of(1),
+        left.hash,
+        le(left.total.toString(), 8),
+        right.hash,
+        le(right.total.toString(), 8),
+      ),
+    ),
+    total,
+  };
+};
+function levels(entries: readonly SolanaMonthlyEntry[]) {
+  if (entries.length === 0 || entries.length > 0xffffffff)
+    throw new Error("Invalid monthly allocation size");
+  const tree: AllocationNode[][] = [
+    entries.map((entry) => ({
+      hash: monthlyLeaf(entry),
+      total: BigInt(entry.grossMicro),
+    })),
+  ];
+  while (tree[tree.length - 1].length > 1) {
+    const level = tree[tree.length - 1];
+    const next: AllocationNode[] = [];
+    for (let i = 0; i < level.length; i += 2)
+      next.push(i + 1 < level.length ? node(level[i], level[i + 1]) : level[i]);
+    tree.push(next);
+  }
+  return tree;
+}
+/** Merkle sum root binding the complete allocation and its aggregate gross. */
+export function solanaAllocationRoot(entries: readonly SolanaMonthlyEntry[]) {
+  const tree = levels(entries);
+  return hex(tree[tree.length - 1][0].hash);
+}
+export function solanaAllocationTotal(entries: readonly SolanaMonthlyEntry[]) {
+  const tree = levels(entries);
+  return tree[tree.length - 1][0].total.toString();
+}
+/** Sibling digests and sums needed to verify an award's complete funded allocation. */
+export function solanaAllocationProof(
+  entries: readonly SolanaMonthlyEntry[],
+  index: number,
+) {
+  const tree = levels(entries);
+  if (!Number.isSafeInteger(index) || index < 0 || index >= entries.length)
+    throw new Error("Invalid allocation index");
+  const proof: { hash: string; total: string }[] = [];
+  let at = index;
+  for (const level of tree.slice(0, -1)) {
+    const sibling = at % 2 === 1 ? at - 1 : at + 1;
+    if (sibling < level.length)
+      proof.push({
+        hash: hex(level[sibling].hash),
+        total: level[sibling].total.toString(),
+      });
+    at = Math.floor(at / 2);
+  }
+  return proof;
+}
+/** The bytes the identity authority signs for one period ("YYYY-MM") of one project. */
+export function solanaMonthlyMessage(
+  programId: string,
+  projectPda: string,
+  period: string,
+  allocationRoot: string,
+  total: string,
+  network: string,
+) {
+  const match = /^([2-9][0-9]{3})-(0[1-9]|1[0-2])$/.exec(period);
+  if (!match) throw new Error("Invalid monthly period");
+  const yyyymm = new Uint8Array(4);
+  new DataView(yyyymm.buffer).setUint32(0, Number(match[1] + match[2]), true);
+  return concat(
+    new TextEncoder().encode("slop-monthly-allocation-v2"),
+    publicKeyBytes(programId),
+    publicKeyBytes(projectPda),
+    yyyymm,
+    digest(allocationRoot),
+    le(total, 8),
+    digest(network),
+  );
 }
 
 /** The only award ID the program accepts for a source in this project. */
@@ -411,7 +547,13 @@ export function escrowInvocations(
     if (entry.ix.programId !== programId) return;
     const data = decodeBase58Bytes(string(entry.ix.data));
     const tag = hex(data.slice(0, 8));
-    if (tag !== COMMIT && tag !== COMMIT_BOUNTY && tag !== PAY) return;
+    if (
+      tag !== COMMIT &&
+      tag !== COMMIT_BOUNTY &&
+      tag !== COMMIT_MONTHLY_AWARD &&
+      tag !== PAY
+    )
+      return;
     const children: Obj[] = [];
     for (let next = index + 1; next < flat.length; next++) {
       const candidate = flat[next];
@@ -515,7 +657,31 @@ export function solanaPaymentAdapter(
         throw new Error("Invalid award accounting");
       const { accounts, data, children } = invocation;
       let destination: string | undefined;
-      if (input.kind === "reserved") {
+      if (
+        input.kind === "reserved" &&
+        hex(data.slice(0, 8)) === COMMIT_MONTHLY_AWARD
+      ) {
+        // commit_monthly_award(period, award_id, source_digest, actor_id, gross, index, count,
+        // proof); accounts: payer, project, vault, month, origin, obligation. Ordinary only.
+        if (
+          config.payoutPolicy === "security-bounty" ||
+          data.length < 104 ||
+          data.length !==
+            104 +
+              40 *
+                new DataView(data.buffer, data.byteOffset).getUint32(
+                  100,
+                  true,
+                ) ||
+          accounts[1] !== config.projectPda ||
+          accounts[5] !== awardAddress ||
+          hex(data.slice(12, 44)) !== hex(award) ||
+          hex(data.slice(44, 76)) !== source ||
+          uint(data, 76) !== actor ||
+          uint(data, 84) !== gross
+        )
+          throw new Error("Reservation differs from award");
+      } else if (input.kind === "reserved") {
         // commit(award_id, source_digest, actor_id, gross); accounts: owner, project, vault, origin, obligation.
         if (
           hex(data.slice(0, 8)) !==
@@ -666,10 +832,8 @@ export async function readVaultTotals(config: {
     paid = uint(project, 216),
     payoutFees = uint(project, 224),
     withdrawnGross = uint(project, 232),
-    withdrawalFees = uint(project, 240),
-    serviceFees = uint(project, 257);
-  const free =
-    deposited - paid - payoutFees - withdrawnGross - serviceFees - reserved;
+    withdrawalFees = uint(project, 240);
+  const free = deposited - paid - payoutFees - withdrawnGross - reserved;
   if (free < 0n) throw new Error("Project counters exceed deposits");
   return {
     network: config.network,
@@ -683,7 +847,6 @@ export async function readVaultTotals(config: {
     totalPayoutFees: payoutFees.toString(),
     totalGrossWithdrawn: withdrawnGross.toString(),
     totalWithdrawalFees: withdrawalFees.toString(),
-    totalServiceFees: serviceFees.toString(),
     freeBalance: free.toString(),
     reservedPrincipal: null,
     reservedFees: null,

@@ -19,6 +19,9 @@ contract OpusHandler {
     uint256 public maxDeposit;
     address public owner;
     address public authority;
+    uint256 internal authorityKey;
+    /// @dev The next period a monthly allocation may use; it only moves forward.
+    uint32 public period = 202612;
 
     bytes32[] public ids;
     uint64[] public actorOf;
@@ -34,11 +37,12 @@ contract OpusHandler {
     bool public paidToWrongDestination;
     bool public paidBeforeActivation;
 
-    constructor(ProjectEscrow e, MintableToken t, address o, address a, uint256 maxDeposit_) {
+    constructor(ProjectEscrow e, MintableToken t, address o, uint256 authorityKey_, uint256 maxDeposit_) {
         escrow = e;
         usdc = t;
         owner = o;
-        authority = a;
+        authorityKey = authorityKey_;
+        authority = vm.addr(authorityKey_);
         maxDeposit = maxDeposit_;
     }
 
@@ -141,12 +145,36 @@ contract OpusHandler {
         ghostWithdrawalFees += gross / 50;
     }
 
-    function charge(uint256 amount) external {
+    /// @dev Anyone commits a signed two-award allocation for the next open period, within the owner's cap.
+    function commitMonthly(uint256 actorSeed, uint256 gross, address caller) external {
         uint128 free = escrow.freeBalance();
-        if (free == 0) return;
-        amount = 1 + (amount % free);
-        vm.prank(owner);
-        escrow.chargeService(uint128(amount), keccak256(abi.encode("inv", nonce++)));
+        if (free < 2) return;
+        if (!escrow.monthlyEnabled()) {
+            vm.prank(owner);
+            escrow.setMonthlyCommitment(type(uint128).max, true);
+        }
+        (uint64 opensAt, uint64 closesAt) = escrow.monthlyWindow(period);
+        while (block.timestamp >= closesAt) {
+            period = period % 100 == 12 ? period + 89 : period + 1;
+            (opensAt, closesAt) = escrow.monthlyWindow(period);
+        }
+        if (block.timestamp < opensAt) vm.warp(opensAt);
+        gross = 1 + (gross % (free / 2));
+        ProjectEscrow.MonthlyAward[] memory entries = new ProjectEscrow.MonthlyAward[](2);
+        for (uint256 i; i < 2; ++i) {
+            entries[i] = ProjectEscrow.MonthlyAward(
+                _actor(actorSeed + i), uint128(gross), keccak256(abi.encode("monthly", nonce++))
+            );
+        }
+        (uint8 v, bytes32 r, bytes32 s) =
+            vm.sign(authorityKey, escrow.monthlyDigest(period, escrow.allocationRoot(entries)));
+        vm.prank(caller);
+        escrow.commitMonthly(period, entries, abi.encodePacked(r, s, v));
+        for (uint256 i; i < 2; ++i) {
+            ids.push(escrow.awardId(entries[i].sourceDigest));
+            actorOf.push(entries[i].actorId);
+        }
+        period = period % 100 == 12 ? period + 89 : period + 1;
     }
 
     function claim() external {
@@ -167,7 +195,7 @@ contract OpusInvariantTest is OpusBase {
 
     function setUp() public virtual {
         deployWithDelay(DELAY);
-        handler = new OpusHandler(escrow, MintableToken(address(usdc)), OWNER, AUTHORITY, 50_000e6);
+        handler = new OpusHandler(escrow, MintableToken(address(usdc)), OWNER, AUTHORITY_KEY, 50_000e6);
     }
 
     function token() internal view virtual returns (address) {
@@ -182,7 +210,7 @@ contract OpusInvariantTest is OpusBase {
     function invariant_supplyIdentity() public view {
         uint256 lhs = escrow.totalDeposited();
         uint256 rhs = uint256(escrow.freeBalance()) + escrow.reservedPrincipal() + escrow.reservedFees()
-            + escrow.totalPaid() + escrow.totalPayoutFees() + escrow.totalGrossWithdrawn() + escrow.totalServiceFees();
+            + escrow.totalPaid() + escrow.totalPayoutFees() + escrow.totalGrossWithdrawn();
         require(lhs == rhs, "totalDeposited identity");
     }
 
@@ -197,7 +225,7 @@ contract OpusInvariantTest is OpusBase {
     function invariant_feeIdentity() public view {
         require(
             uint256(escrow.accruedFees()) + handler.ghostClaimed()
-                == uint256(escrow.totalPayoutFees()) + escrow.totalWithdrawalFees() + escrow.totalServiceFees(),
+                == uint256(escrow.totalPayoutFees()) + escrow.totalWithdrawalFees(),
             "fee identity"
         );
         require(IERC20(token()).balanceOf(FEE) == handler.ghostClaimed(), "fee recipient balance");
@@ -215,7 +243,6 @@ contract OpusInvariantTest is OpusBase {
             uint128 payoutFees,
             uint128 grossWithdrawn,
             uint128 withdrawalFees,
-            uint128 serviceFees,
             uint128 free,
             uint128 principalReserved,
             uint128 feesReserved,
@@ -225,9 +252,9 @@ contract OpusInvariantTest is OpusBase {
         require(
             deposited == escrow.totalDeposited() && paid == escrow.totalPaid() && payoutFees == escrow.totalPayoutFees()
                 && grossWithdrawn == escrow.totalGrossWithdrawn() && withdrawalFees == escrow.totalWithdrawalFees()
-                && serviceFees == escrow.totalServiceFees() && free == escrow.freeBalance()
-                && principalReserved == escrow.reservedPrincipal() && feesReserved == escrow.reservedFees()
-                && feesAccrued == escrow.accruedFees() && balance == IERC20(token()).balanceOf(address(escrow)),
+                && free == escrow.freeBalance() && principalReserved == escrow.reservedPrincipal()
+                && feesReserved == escrow.reservedFees() && feesAccrued == escrow.accruedFees()
+                && balance == IERC20(token()).balanceOf(address(escrow)),
             "totals() equals the getters"
         );
     }
@@ -262,9 +289,9 @@ contract OpusInvariant18DecimalsTest is OpusInvariantTest {
     function setUp() public override {
         deployWithDelay(DELAY);
         wide = new WideToken(18);
-        vm.prank(REGISTRAR);
-        escrow = ProjectEscrow(factory.create(keccak256("project"), IERC20(address(wide)), OWNER, OWNER));
-        handler = new OpusHandler(escrow, MintableToken(address(wide)), OWNER, AUTHORITY, 1e30);
+        vm.prank(OWNER);
+        escrow = ProjectEscrow(factory.create(keccak256("project"), IERC20(address(wide)), Purpose.Ordinary));
+        handler = new OpusHandler(escrow, MintableToken(address(wide)), OWNER, AUTHORITY_KEY, 1e30);
     }
 
     function token() internal view override returns (address) {

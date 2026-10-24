@@ -277,9 +277,11 @@ sections 6 and 7). Migration `0062` adds its private records.
    gets one Inbox payout exception for that month (key
    `monthly-underfunded:PROJECT:YYYY-MM`), however often the coordinator
    retries.
-5. **Reservation and payment.** The vault contract accepts `commitAward` only
-   from the owner's wallet, so each obligation waits for the owner on the
-   Awards page. `POST .../monthly/:YYYY-MM/commitment` and
+5. **Reservation and payment.** The coordinator does not yet submit the D13
+   bounded monthly commitment (`commitMonthly` on EVM, `commit_monthly` and
+   `commit_monthly_award` on Solana; see the contract READMEs), because that
+   needs the attester signing service. Until then each obligation uses the
+   owner-only `commitAward` and waits for the owner on the Awards page. `POST .../monthly/:YYYY-MM/commitment` and
    `.../solana-commitment` recheck the steward, repository authority, project
    revision, enforcement state, served network, execution snapshot digest and
    funded obligation, and return an unsigned plan for that award. Each source

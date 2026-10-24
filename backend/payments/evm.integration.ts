@@ -17,6 +17,7 @@ import {
   evmAwardId,
   evmBindingDigest,
   type evmBindingTypedData,
+  evmVaultKey,
   verifyBinding,
 } from "../../contracts/evm/adapter";
 import { ESCROW_NETWORKS } from "../../src/lib/escrow-policy.mjs";
@@ -262,7 +263,15 @@ async function factoryVault(factory: string, token: string, url = rpcUrl) {
       [
         {
           to: factory,
-          data: `0x4627e7c0${projectKey.slice(2)}${token.slice(2).toLowerCase().padStart(64, "0")}`,
+          data: execFileSync(
+            "cast",
+            [
+              "calldata",
+              "vaults(bytes32)",
+              evmVaultKey({ owner, projectId: projectKey, asset: token }),
+            ],
+            { encoding: "utf8" },
+          ).trim(),
         },
         "latest",
       ],
@@ -349,19 +358,19 @@ try {
     .sort())
     sql.exec(readFileSync(`${root}migrations/${file}`, "utf8"));
   const asset = deploy("integration/TestDollar.sol:TestDollar");
-  // Vaults are created only by the factory, which holds the identity authority.
-  // The registrar is an explicit constructor parameter (the owner account here).
+  // The registrar is an explicit constructor parameter (the owner account here);
+  // the owner creates its own ordinary vault.
   const factory = deploy("src/ProjectEscrow.sol:EscrowFactory", [
     owner,
     fee,
     attester,
     delay,
   ]);
-  const createTx = await send(
-    factory,
-    "create(bytes32,address,address,address)",
-    [projectKey, asset, owner, owner],
-  );
+  const createTx = await send(factory, "create(bytes32,address,uint8)", [
+    projectKey,
+    asset,
+    "0",
+  ]);
   const vault = await factoryVault(factory, asset);
   deploymentTransactions.set(vault, createTx);
   award = evmAwardId(31337n, vault, source);
@@ -1047,7 +1056,6 @@ try {
       totalPayoutFees: "2000000",
       totalGrossWithdrawn: "100000000",
       totalWithdrawalFees: "2000000",
-      totalServiceFees: "0",
       freeBalance: "0",
       reservedPrincipal: "0",
       reservedFees: "0",
@@ -1332,8 +1340,8 @@ try {
   );
   const rcCreateTx = await send(
     rcFactory,
-    "create(bytes32,address,address,address)",
-    [projectKey, rcAsset, owner, owner],
+    "create(bytes32,address,uint8)",
+    [projectKey, rcAsset, "0"],
     rcRpcUrl,
   );
   const rcVault = await factoryVault(rcFactory, rcAsset, rcRpcUrl);

@@ -48,7 +48,7 @@ contract AnyTokenTest is OpusBase {
         address indexed token,
         address indexed vault,
         address owner,
-        address refundDestination,
+        Purpose purpose,
         uint8 decimals
     );
 
@@ -57,8 +57,8 @@ contract AnyTokenTest is OpusBase {
     }
 
     function vaultFor(bytes32 projectId, WideToken token) internal returns (ProjectEscrow vault) {
-        vm.prank(REGISTRAR);
-        vault = ProjectEscrow(factory.create(projectId, IERC20(address(token)), OWNER, OWNER));
+        vm.prank(OWNER);
+        vault = ProjectEscrow(factory.create(projectId, IERC20(address(token)), Purpose.Ordinary));
     }
 
     function depositFrom(ProjectEscrow vault, WideToken token, address from, uint256 amount) internal {
@@ -82,12 +82,12 @@ contract AnyTokenTest is OpusBase {
     function conserved(ProjectEscrow vault, WideToken token, uint256 claimed) internal view returns (bool) {
         uint256 deposited = vault.totalDeposited();
         uint256 parts = uint256(vault.freeBalance()) + vault.reservedPrincipal() + vault.reservedFees()
-            + vault.totalPaid() + vault.totalPayoutFees() + vault.totalGrossWithdrawn() + vault.totalServiceFees();
+            + vault.totalPaid() + vault.totalPayoutFees() + vault.totalGrossWithdrawn();
         uint256 held =
             uint256(vault.freeBalance()) + vault.reservedPrincipal() + vault.reservedFees() + vault.accruedFees();
         uint256 fees = uint256(vault.accruedFees()) + claimed;
         return deposited == parts && token.balanceOf(address(vault)) == held
-            && fees == uint256(vault.totalPayoutFees()) + vault.totalWithdrawalFees() + vault.totalServiceFees();
+            && fees == uint256(vault.totalPayoutFees()) + vault.totalWithdrawalFees();
     }
 
     /// Full lifecycle with one award, one withdrawal and a fee claim, at a given scale.
@@ -212,13 +212,13 @@ contract AnyTokenTest is OpusBase {
     function test_tokenWithoutValidDecimalsIsRejected() public {
         address noDecimals = address(new NoDecimalsToken());
         address hugeDecimals = address(new HugeDecimalsToken());
-        vm.startPrank(REGISTRAR);
+        vm.startPrank(OWNER);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        factory.create(keccak256("nd"), IERC20(noDecimals), OWNER, OWNER);
+        factory.create(keccak256("nd"), IERC20(noDecimals), Purpose.Ordinary);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        factory.create(keccak256("hd"), IERC20(hugeDecimals), OWNER, OWNER);
+        factory.create(keccak256("hd"), IERC20(hugeDecimals), Purpose.Ordinary);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        factory.create(keccak256("eoa"), IERC20(address(0xBEEF)), OWNER, OWNER);
+        factory.create(keccak256("eoa"), IERC20(address(0xBEEF)), Purpose.Ordinary);
         vm.stopPrank();
     }
 
@@ -226,26 +226,27 @@ contract AnyTokenTest is OpusBase {
         bytes32 project = keccak256("project");
         WideToken other = new WideToken(18);
         vm2.expectEmit(true, true, false, false, address(factory));
-        emit VaultCreated(project, address(other), address(0), OWNER, OWNER, 18);
+        emit VaultCreated(project, address(other), address(0), OWNER, Purpose.Ordinary, 18);
         ProjectEscrow second = vaultFor(project, other);
         check(address(second) != address(escrow), "a second token gets its own vault");
-        check(factory.vaults(project, address(usdc)) == address(escrow), "first vault indexed");
-        check(factory.vaults(project, address(other)) == address(second), "second vault indexed");
+        bytes32 firstKey = factory.vaultKey(OWNER, project, IERC20(address(usdc)), Purpose.Ordinary);
+        bytes32 secondKey = factory.vaultKey(OWNER, project, IERC20(address(other)), Purpose.Ordinary);
+        check(factory.vaults(firstKey) == address(escrow), "first vault indexed");
+        check(factory.vaults(secondKey) == address(second), "second vault indexed");
         check(address(second.token()) == address(other) && address(escrow.token()) == address(usdc), "token");
         bytes32 initCodeHash = keccak256(
             abi.encodePacked(
-                type(ProjectEscrow).creationCode, abi.encode(project, IERC20(address(other)), OWNER, OWNER, FEE, DELAY)
+                type(ProjectEscrow).creationCode,
+                abi.encode(project, IERC20(address(other)), OWNER, Purpose.Ordinary, FEE, DELAY)
             )
         );
         check(
-            vm2.computeCreate2Address(
-                    factory.vaultSalt(project, IERC20(address(other))), initCodeHash, address(factory)
-                ) == address(second),
-            "CREATE2 address from vaultSalt"
+            vm2.computeCreate2Address(secondKey, initCodeHash, address(factory)) == address(second),
+            "CREATE2 address from vaultKey"
         );
-        vm.prank(REGISTRAR);
+        vm.prank(OWNER);
         vm.expectRevert(EscrowFactory.DuplicateVault.selector);
-        factory.create(project, IERC20(address(other)), OWNER, OWNER);
+        factory.create(project, IERC20(address(other)), Purpose.Ordinary);
     }
 
     function test_factoryTakesExplicitRoles() public {
@@ -259,9 +260,10 @@ contract AnyTokenTest is OpusBase {
         new EscrowFactory(REGISTRAR, FEE, address(0), DELAY);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
         new EscrowFactory(REGISTRAR, FEE, REGISTRAR, DELAY);
-        // The deployer holds no role: only the named registrar creates vaults.
-        vm.expectRevert(ProjectEscrow.Unauthorized.selector);
-        f.create(keccak256("x"), IERC20(address(usdc)), OWNER, OWNER);
+        // Creation is permissionless and the caller is always the owner, whoever deployed the factory.
+        vm.prank(DONOR);
+        ProjectEscrow own = ProjectEscrow(f.create(keccak256("x"), IERC20(address(usdc)), Purpose.Ordinary));
+        check(own.owner() == DONOR && own.purpose() == Purpose.Ordinary, "caller owns the vault");
     }
 
     function test_totalsMatchGetters() public {
@@ -272,15 +274,12 @@ contract AnyTokenTest is OpusBase {
         escrow.pay(id, version);
         vm.prank(OWNER);
         escrow.withdrawUnused(100e6);
-        vm.prank(OWNER);
-        escrow.chargeService(5e6, keccak256("invoice"));
         (
             uint128 deposited,
             uint128 paid,
             uint128 payoutFees,
             uint128 grossWithdrawn,
             uint128 withdrawalFees,
-            uint128 serviceFees,
             uint128 free,
             uint128 principalReserved,
             uint128 feesReserved,
@@ -288,8 +287,8 @@ contract AnyTokenTest is OpusBase {
             uint256 balance
         ) = escrow.totals();
         check(deposited == 1_000e6 && paid == 294e6 && payoutFees == 6e6, "award totals");
-        check(grossWithdrawn == 100e6 && withdrawalFees == 2e6 && serviceFees == 5e6, "withdrawal totals");
-        check(free == 595e6 && principalReserved == 0 && feesReserved == 0, "balances");
-        check(feesAccrued == 13e6 && balance == 608e6, "vault holds free plus accrued fees");
+        check(grossWithdrawn == 100e6 && withdrawalFees == 2e6, "withdrawal totals");
+        check(free == 600e6 && principalReserved == 0 && feesReserved == 0, "balances");
+        check(feesAccrued == 8e6 && balance == 608e6, "vault holds free plus accrued fees");
     }
 }

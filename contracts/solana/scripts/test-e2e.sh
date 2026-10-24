@@ -35,10 +35,7 @@ node --test --test-force-exit --test-isolation=none integration/production-delay
 stop_validator
 # The main suite waits the binding delay out in seconds, so it builds with the test-only delay floor.
 SLOP_ESCROW_FEATURES=short-delay-for-tests bash scripts/build-local.sh
-# A project account in the layout from before the rotation fields, which the
-# owner-plan suite grows with migrate_project.
-legacy_project=$(node integration/legacy-project.mjs)
-start_validator --account "$legacy_project" .local/legacy-project-account.json
+start_validator
 bun build adapter.ts --target=node --outfile=.local/adapter.mjs
 bun build funding.ts --target=node --outfile=.local/funding.mjs
 bun build commitment.ts --target=node --outfile=.local/commitment.mjs

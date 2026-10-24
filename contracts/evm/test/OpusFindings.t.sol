@@ -149,8 +149,9 @@ contract OpusFindingsTest is OpusBase {
 
     /// Sound: award IDs are vault-bound; another vault cannot commit this vault's ID.
     function test_sound_awardIdIsVaultBound() public {
-        vm.prank(REGISTRAR);
-        ProjectEscrow other = ProjectEscrow(factory.create(keccak256("project-2"), IERC20(address(usdc)), OWNER, OWNER));
+        vm.prank(OWNER);
+        ProjectEscrow other =
+            ProjectEscrow(factory.create(keccak256("project-2"), IERC20(address(usdc)), Purpose.Ordinary));
         bytes32 src = keccak256("same-source");
         bytes32 idHere = escrow.awardId(src);
         check(other.awardId(src) != idHere, "distinct");
@@ -162,8 +163,8 @@ contract OpusFindingsTest is OpusBase {
         vm.prank(OWNER);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
         other.commitAward(idHere, ALICE, 1e6, src);
-        vm.prank(REGISTRAR);
+        vm.prank(OWNER);
         vm.expectRevert(EscrowFactory.DuplicateVault.selector);
-        factory.create(keccak256("project"), IERC20(address(usdc)), OWNER, OWNER);
+        factory.create(keccak256("project"), IERC20(address(usdc)), Purpose.Ordinary);
     }
 }

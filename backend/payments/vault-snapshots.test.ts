@@ -56,7 +56,6 @@ const totals = (overrides: Partial<VaultTotals> = {}): VaultTotals => ({
   totalPayoutFees: "2000000",
   totalGrossWithdrawn: "0",
   totalWithdrawalFees: "0",
-  totalServiceFees: "0",
   freeBalance: "300000000",
   reservedPrincipal: "98000000",
   reservedFees: "2000000",
@@ -263,7 +262,6 @@ describe("GET /api/v1/payments/projects/:id/vault", () => {
           totalPayoutFees: "2000000",
           totalGrossWithdrawn: "0",
           totalWithdrawalFees: "0",
-          totalServiceFees: "0",
           freeBalance: null,
           reservedPrincipal: "98000000",
           reservedFees: "2000000",
@@ -366,7 +364,6 @@ test("concurrent finalized refreshes cannot decrease cumulative vault counters",
     ["totalPayoutFees", "total_payout_fees"],
     ["totalGrossWithdrawn", "total_gross_withdrawn"],
     ["totalWithdrawalFees", "total_withdrawal_fees"],
-    ["totalServiceFees", "total_service_fees"],
   ] as const) {
     const db = open();
     const initial = "999999999999999999999999999999";

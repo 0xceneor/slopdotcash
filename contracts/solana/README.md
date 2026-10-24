@@ -1,7 +1,12 @@
 # Solana protected payout escrow
 
 This Anchor program holds classic SPL Token mints in a separate PDA vault for
-each owner/project digest. Any classic SPL mint is accepted, with any number of
+each owner, project digest and purpose. The project PDA seeds are
+`["project", owner, project digest, purpose]`, where the purpose byte is `0`
+for ordinary awards and `1` for private bounties, so one owner can hold separate
+ordinary and bounty projects for the same digest (owner decision D13, 24
+October 2026). `initialize` is permissionless: the signing owner pays and owns
+the project. Any classic SPL mint is accepted, with any number of
 decimals. Every transfer passes the mint's own decimals to `transfer_checked`.
 Token-2022 mints are rejected: `Account<Mint>` and `Program<Token>` require the
 classic token program. Classic SPL has no transfer fee and no rebasing, so the
@@ -16,7 +21,10 @@ project can hold: at 18 decimals, u64 holds about 18.4 whole tokens in the
 cumulative `deposited` counter. Use a mint whose decimals fit the expected
 project budget.
 
-Anyone can deposit. The owner approves immutable awards. The only mutable
+Anyone can deposit. The owner approves immutable awards: `commit` only in an
+ordinary project and `commit_bounty` only in a bounty project. In an ordinary
+project the bounded monthly commitment below also commits awards. The only
+mutable
 authority is the identity authority, replaced by a public two-party timelock. Award approval reserves principal
 and its included 2% fee before a wallet exists. The `award` PDA and separate `origin` PDA are
 permanent: no close, cancellation, rescue or reserve withdrawal instruction exists.
@@ -200,17 +208,57 @@ such transfers remain unavailable to awards and refunds. Both credited free
 balance and the actual vault token balance must cover every new reserve or
 withdrawal.
 
-`charge_service(amount, invoice_digest)` (PAY-10) lets only the owner pay one
-Slopbot invoice from free funds to the fee recipient's token account. A
-permanent `service` PDA per project and invoice digest makes each charge
-happen once. The `service_fees` counter joins the conservation identity:
-`deposited = free + reserved + paid + payout_fees + withdrawn_gross + service_fees`.
+The program has no service charge. Slopbot is free (PRD section 5); owner
+decision D13 removed `charge_service` and its `service_fees` counter. The
+conservation identity is
+`deposited = free + reserved + paid + payout_fees + withdrawn_gross`.
 The binding lifecycle does not change this identity. A zero-amount transfer leg
 (a zero fee, or a withdrawal whose return rounds to zero) is skipped, so a
 frozen fee account cannot stall a zero-fee payout.
 It cannot spend reserved principal or fees. Every credited balance is
 owner-controlled free balance, whoever deposited it; this version keeps no
 separate donor-class funds.
+
+## Bounded monthly commitment
+
+The owner calls `set_monthly_commitment(cap, enabled)` on an ordinary project.
+It is off with a zero cap after `initialize`, "on" needs a positive cap, and
+the owner can turn it off at any time (the opt-out). A period is a calendar UTC
+month written as `YYYYMM`. Its window opens 72 hours after the month ends, at
+00:00 UTC on the 4th, and closes when the next month's window opens, so only one
+period is open at a time.
+
+1. Anyone calls `commit_monthly(period, allocation_root, total)` inside the window,
+   while the switch is on. The instruction just before it in the same
+   transaction must be an Ed25519 program check of one signature by the
+   project's identity authority over
+   `"slop-monthly-allocation-v2" || program ID || project PDA || period (u32 LE) || allocation root || total (u64 LE) || network domain (32 bytes)`.
+   The program reads that instruction from the instructions sysvar and requires
+   every offset to point inside it. The `month` PDA
+   (`["month", project, period LE]`) records the root once, so each period
+   commits once. The total must be positive, within the current owner cap, and
+   fully covered by free vault funds. Recording the root reserves that full
+   total before any individual award can be created.
+2. Anyone calls `commit_monthly_award(period, award_id, source_digest,
+   actor_id, gross, index, count, proof)` for each award. The program rebuilds
+   the root from the leaf and its Merkle proof. A leaf is
+   `sha256(0x00 || actor_id LE || gross LE || source_digest)` and a node is
+   `sha256(0x01 || left hash || left total LE || right hash || right total LE)`.
+   Each proof sibling includes its hash and aggregate gross amount. Node totals
+   add with checked u64 arithmetic; an odd last node moves up unchanged. Both
+   the root hash and total must match the recorded month. Creating an award
+   uses the existing reservation without reserving its gross a second time.
+   Later owner cap changes or opt-out affect new months only. The award then
+   commits as an ordinary award with the 2% fee
+   through the same `origin` and `award` PDAs, so a source commits once, by
+   hand or monthly.
+
+Two steps are necessary because one Solana transaction cannot create the
+accounts of a full month. The attester's role grows from wallet binding to
+monthly attestation. It cannot withdraw, redirect or pay funds, and it cannot
+commit more than one owner cap in each calendar month. Payment stays
+permissionless `pay` through the ordinary binding and delay rules. The adapter
+verifies a `commit_monthly_award` reservation like a `commit` reservation.
 
 All transfer instructions validate the classic token program, mint, token account
 owners, vault PDA, project account and signer. Failed token transfers roll back the
@@ -359,12 +407,12 @@ both come from one slot. `blockNumber` is that slot and `blockTime` is its
 finalized block time. `vault` is the project PDA, `asset` the mint, and
 `decimals` comes from the mint account. Counters are decimal text in token base
 units. `freeBalance` is `deposited - paid - payout_fees - withdrawn_gross -
-service_fees - reserved`; the function throws when it is negative. Solana keeps
+reserved`; the function throws when it is negative. Solana keeps
 one combined `reserved`, so `reservedPrincipal`, `reservedFees` and
 `accruedFees` are null.
 
 `owner-plan.mjs` creates unsigned initialize/deposit/commit/veto/withdraw,
-migrate, propose-rotation and cancel-rotation transactions; a veto may name an
+propose-rotation and cancel-rotation transactions; a veto may name an
 unpaid award (`obligationId`) to use its commit-delay window. `initialize`
 refuses reviewed authorities that differ from the Config, and passes the Config
 account. `deposit` takes an optional `depositor`; the depositor then pays the
@@ -376,23 +424,16 @@ that no Config exists. `config-plan.mjs projects` lists every Project account
 and marks which ones the Config pins. Neither mode reads keys or sends a
 transaction.
 
-### Project account migration
+### Project account layout
 
-The rotation fields (`pending_identity_authority`, `rotation_effective_at`,
-`rotation_confirmed`, `rotation_delay`) are appended to `Project`, which grows
-from 265 to 314 bytes. Borsh keeps every earlier field at its offset. A project
-created by an earlier build of this program keeps its 265-byte account after an
-upgrade, and Anchor cannot read it, so every instruction on it fails until the
-owner runs `migrate_project(rotation_delay)` (owner-plan operation `migrate`).
-The instruction accepts only this program's 265-byte project account whose
-stored owner signed, tops up rent from the owner, grows the account, sets the
-rotation delay within the same bounds as `initialize` and leaves no rotation
-pending. A second migration fails. The vault, awards, bindings and reserves are
-untouched. Mainnet requires an immutable program, so this path applies to test
-deployments upgraded in place; a mainnet layout change is a new deployment.
-`test-e2e.sh` preloads a 265-byte project into the validator
-(`integration/legacy-project.mjs`) and the owner-plan suite migrates it.
-Give it the reviewed input file; private RPC URL, expected genesis and a fresh
+The `Project` account is 316 bytes. The D13 revision removed `service_fees` and
+appended `purpose`, `monthly_cap` and `monthly_enabled`, and the purpose is a
+project PDA seed. A project from an earlier build cannot sign with the new
+seeds, so the D13 revision is a new deployment, and the earlier
+`migrate_project` path is removed. Mainnet requires an immutable program, so
+any later layout change is also a new deployment.
+
+`owner-plan.mjs` takes the reviewed deployment input file;private RPC URL, expected genesis and a fresh
 blockhash come separately from `SLOP_SOLANA_RPC_URL`, `SLOP_SOLANA_GENESIS`, and
 `SLOP_SOLANA_RECENT_BLOCKHASH`. It verifies deployed code and authorities and never
 reads keys or sends a transaction. Its output omits the RPC URL. The checked-in

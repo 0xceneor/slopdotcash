@@ -125,18 +125,22 @@ and `bytecode_hash = "none"`; the verifier reads them from the project.
 
 ### 1.6 Each vault
 
-For each reviewed project manifest the registrar sends:
+Vault creation is permissionless. The project owner sends the transaction from
+its own account and becomes the owner. `PURPOSE` is `0` for the ordinary vault
+and `1` for a private bounty vault:
 
 ```sh
-cast send "$FACTORY" 'create(bytes32,address,address,address)' \
-  "$PROJECT_ID" "$TOKEN" "$OWNER" "$OWNER" --rpc-url "$RPC" --ledger
-VAULT=$(cast call "$FACTORY" 'vaults(bytes32,address)(address)' "$PROJECT_ID" "$TOKEN" --rpc-url "$RPC")
+cast send "$FACTORY" 'create(bytes32,address,uint8)' \
+  "$PROJECT_ID" "$TOKEN" "$PURPOSE" --rpc-url "$RPC" --ledger
+KEY=$(cast call "$FACTORY" 'vaultKey(address,bytes32,address,uint8)(bytes32)' \
+  "$OWNER" "$PROJECT_ID" "$TOKEN" "$PURPOSE" --rpc-url "$RPC")
+VAULT=$(cast call "$FACTORY" 'vaults(bytes32)(address)' "$KEY" --rpc-url "$RPC")
 ```
 
 Before you create a vault, check that the token is a standard ERC-20 with
 exact transfers: no fee on transfer, no rebasing. Read `decimals()` and record
 it. After creation, verify the vault source like the factory (the constructor
-arguments are `projectId, token, owner, refundDestination, feeRecipient,
+arguments are `projectId, token, owner, purpose, feeRecipient,
 bindingDelay`), record its runtime code SHA-256 as `codeSha256`, and run
 `verifyEvmDeployment` from `contracts/evm/adapter.ts` against the manifest
 before activation.

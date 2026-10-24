@@ -1,9 +1,13 @@
-# EVM escrow v4
+# EVM escrow v5
 
-This is an immutable escrow implementation for one project and one token. The
-token can be any standard ERC-20 with any decimals: Circle USDC, Paxos USDG or
-a project token. One factory on each chain creates one vault for each
-(project ID, token) pair. It
+This is an immutable escrow implementation for one project, one token and one
+purpose. The token can be any standard ERC-20 with any decimals: Circle USDC,
+Paxos USDG or a project token. Anyone can call the factory to create a vault
+for itself. The caller is the owner, and the factory keeps one vault for each
+(owner, project ID, token, purpose). The purpose is `Ordinary` (0) for ordinary
+awards or `Bounty` (1) for private bounties, so one project can hold separate
+ordinary and bounty vaults for the same token (owner decision D13, 24 October
+2026). It
 has no proxy, owner change, token approval, arbitrary call, rescue, claim
 expiry, or award cancellation entry point. An approved award remains reserved until it is paid. The owner can cancel only a wallet binding that has
 not paid yet, and only inside a bounded window. The only mutable authority is
@@ -33,17 +37,21 @@ The contract reads only `block.timestamp` and `block.chainid`, never `block.numb
 
 ## Authority and identity
 
-The factory registrar creates one vault for each nonzero project ID and token
-in that factory and holds no money power. The registrar, the fee recipient and
-the identity authority are explicit constructor parameters; the deploying
-account holds no role. Anyone can deposit. The project owner approves awards
-and withdraws free funds to an immutable refund address. The identity authority
+`create(projectId, token, purpose)` is permissionless and makes `msg.sender`
+the owner. A vault proves only which account created it. The project registry
+decides which owner's vault a project uses, so a vault that another account
+creates for the same project ID never replaces or reaches the owner's vault.
+The registrar creates no vaults and holds no money power. The registrar, the
+fee recipient and the identity authority are explicit constructor parameters;
+the deploying account holds no role. Anyone can deposit. The project owner
+approves awards and withdraws free funds to itself. An ordinary vault also
+takes the bounded monthly commitment below. The identity authority
 is a factory-level address that every vault reads; it is Slop's attester key. A
 binding needs two signatures. The identity authority submits the
 `bindDestination` transaction, and the destination wallet signs an EIP-712
 message over the chain ID, vault, actor ID, destination, expected predecessor
 version, wallet-claim digest and expiry (`DestinationBinding` under the
-`SlopProjectEscrow` version `4` domain). The vault recovers the signer with
+`SlopProjectEscrow` version `5` domain). The vault recovers the signer with
 `ecrecover` and rejects a binding whose signer is not the destination, so the
 authority alone cannot point funds at a wallet it does not hold. Only an
 externally owned account can produce that signature; a contract wallet cannot
@@ -105,7 +113,9 @@ nonzero and differ from the current authority and the registrar. Vaults are
 created only by the factory and read `factory.identityAuthority()`. The reviewed
 manifest pins the factory address, its runtime code digest
 (`factoryCodeSha256`) and its registrar, and the adapter checks that the factory
-created the vault for its project ID and has the reviewed asset, fee recipient,
+created the vault under `vaultKey(owner, projectId, token, purpose)`, that the
+vault purpose matches the payout policy, and that the factory has the reviewed
+asset, fee recipient,
 binding delay and 7-day `AUTHORITY_ROTATION_DELAY`. A vault from a factory with
 other rotation rules therefore fails verification. The manifest's
 `identityAuthority` is the authority at activation; the adapter does not compare
@@ -176,6 +186,51 @@ equal `awardId(sourceDigest)`, which is
 `keccak256(abi.encode(chainId, vault, sourceDigest))`. Another vault cannot
 claim the same ID first, so ledger IDs stay unique across projects.
 
+## Bounded monthly commitment
+
+`commitAward` stays owner-only. To let the monthly coordinator commit a month
+without the owner's wallet, an ordinary vault has one more path:
+
+- The owner calls `setMonthlyCommitment(cap, enabled)`. It is off with a zero
+  cap when the vault is created. "On" needs a positive cap. The owner can turn
+  it off at any time (the opt-out); while it is off, no monthly allocation can
+  commit. Awards that are already committed stay committed.
+- A period is a calendar UTC month written as `YYYYMM` (owner decision D1). Its
+  window opens `MONTHLY_CUTOFF_DELAY` (72 hours) after the month ends, at 00:00
+  UTC on the 4th, and closes when the next month's window opens.
+  `monthlyWindow(period)` returns both times. Only one period is open at a
+  time.
+- The identity authority signs the EIP-712 message
+  `MonthlyAllocation(uint32 period, bytes32 allocationRoot)` under the vault's
+  `SlopProjectEscrow` version `5` domain, which binds the chain and the vault.
+  `monthlyDigest(period, root)` returns the digest.
+- Anyone calls `commitMonthly(period, awards, signature)` inside the window.
+  `awards` is the list of `(actorId, gross, sourceDigest)` in allocation order.
+  The vault rebuilds `allocationRoot(awards)` and requires the authority's
+  signature over it. The gross total must be within `monthlyCap` and the free
+  balance. `monthlyRoots(period)` must be empty, so each period commits once.
+  Each award then commits as an ordinary award: it takes the 2% payout fee,
+  consumes its source digest, gets the ID `awardId(sourceDigest)`, and pays
+  through the ordinary binding and delay rules. A source digest that the owner
+  already committed by hand makes the whole call revert.
+- The allocation root is a Merkle tree over the awards in order. A leaf is
+  `keccak256(0x00, actorId, gross, sourceDigest)` and a node is
+  `keccak256(0x01, left, right)`, both packed. An odd last node moves up
+  unchanged. Solana uses the same tree with sha256.
+
+The authority's role therefore grows from wallet binding to monthly
+attestation. It still cannot withdraw, redirect or pay funds, and it cannot
+commit more than one owner cap in each calendar month. A monthly award, like
+any award, pays only to a binding that the destination wallet signed, after the
+binding delay and the commit delay, and the owner can still cancel a binding in
+those windows. A stolen authority key can reserve at most one cap for each
+month until the registrar's rotation executes; the owner limits that exposure
+with the cap and the opt-out. `test/MonthlyCommitment.t.sol` tests the cap, one
+commitment per period, the opt-out, the window, the signature binding over vault,
+period and root, replay, the wrong attester, the rotation, purpose isolation and
+permissionless creation. The invariant handler in `test/OpusInvariant.t.sol`
+commits signed monthly allocations from random callers.
+
 The first version uses individual commit and pay calls. Dispatchers isolate
 failed recipients by submitting separate transactions. No account can sweep
 unclaimed awards. Missing destinations cause a revert and leave reserves intact.
@@ -190,7 +245,7 @@ and the recipient receives `gross - fee`. A 100-USDC award costs the project
 paid in the vault token. Each unused-fund withdrawal pays the same 2%:
 `withdrawalFee(gross) = payoutFee(gross) = floor(gross / 50)`, rounded down once
 per withdrawal (PRD section 18). Withdrawing 850 USDC of free funds pays 17 USDC
-and sends 833 USDC to the refund destination. A withdrawal under 50 base units
+and sends 833 USDC to the owner. A withdrawal under 50 base units
 pays no fee, so a split saves under one base unit per transaction, far less than its
 gas. A one-unit award requires one unit of funding and has a zero fee; tiny
 award rounding is intentional.
@@ -198,14 +253,13 @@ award rounding is intentional.
 Payout and withdrawal fees accrue in the vault as `accruedFees`. Anyone can
 call `claimFees()` to move them to the immutable fee recipient. A blocked fee
 recipient (for example, a USDC blacklist) stops only `claimFees`; payouts and
-refunds continue. Refunds go only to the owner: the constructor requires
-`refundDestination == owner`.
+refunds continue. Refunds go only to the owner.
 
 `deposit(amount)` is permissionless. Any account approves the vault and calls
 it; the vault pulls the exact amount from the caller, credits `freeBalance`,
 and emits `Deposited(depositor, amount)`. All deposits join one free balance.
 A depositor gets no refund right: only the owner commits free funds to awards
-or withdraws them to its refund destination. Direct transfers to the vault are
+or withdraws them to itself. Direct transfers to the vault are
 not credited and cannot be rescued.
 
 Deposits and transfers must move exact amounts. The vault compares balances
@@ -226,11 +280,9 @@ The conservation identities are unchanged by the binding lifecycle:
 ```
 totalDeposited = freeBalance + reservedPrincipal + reservedFees
                + totalPaid + totalPayoutFees + totalGrossWithdrawn
-               + totalServiceFees
 vault balance  = freeBalance + reservedPrincipal + reservedFees + accruedFees
                + unsolicited direct transfers
 accruedFees + claimed fees = totalPayoutFees + totalWithdrawalFees
-                           + totalServiceFees
 ```
 
 `totals()` returns every counter and the vault token balance in one call, so a
@@ -238,10 +290,9 @@ reader gets one consistent block. Each counter also has its own public getter.
 The adapter's `readVaultTotals` reads `totals()`, `token()` and `decimals()` at
 one pinned finalized block and checks the first identity.
 
-`chargeService(amount, invoiceDigest)` (PAY-10) lets only the owner pay one
-Slopbot invoice from `freeBalance`. The amount accrues for the fee recipient
-like other fees. Each nonzero invoice digest can be charged once. It cannot
-spend reserved principal or reserved fees.
+The vault has no service charge. Slopbot is free (PRD section 5), so no call
+moves free funds to the fee recipient except the payout and withdrawal fees
+(owner decision D13 removed `chargeService`).
 
 The owner can commit an award to any GitHub actor, including an account the
 owner controls. Because the withdrawal fee equals the payout fee (repository
@@ -256,13 +307,12 @@ counters are not finality proof; backend receipts must use finalized chain
 state. Before indexing an event or signing, the adapter verifies the finalized
 runtime code SHA-256 and the token, owner, fee recipient, binding delay and
 factory (address, runtime code digest, registrar and rotation delay) against
-the reviewed manifest, and that the factory indexed this vault under its
-project ID and token. `codeSha256` hashes decoded `eth_getCode` bytes,
-including constructor immutables. The current manifest has one sponsor
-address, so activation also requires the refund destination to equal that
-owner.
+the reviewed manifest, that the vault purpose matches the payout policy, and
+that the factory indexed this vault under its owner, project ID, token and
+purpose. `codeSha256` hashes decoded `eth_getCode` bytes, including
+constructor immutables.
 
-## Events and ABI (v4)
+## Events and ABI (v5)
 
 ```
 ProjectEscrow
@@ -272,16 +322,20 @@ ProjectEscrow
   BindingCancelled(uint64 indexed actorId, uint64 version)
   Paid(bytes32 indexed id, uint64 indexed actorId, address indexed destination, uint64 version, uint128 gross, uint128 net, uint128 fee)
   UnusedWithdrawn(address indexed destination, uint128 gross, uint128 net, uint128 fee)
-  ServiceCharged(bytes32 indexed invoiceDigest, uint128 amount)
   FeesClaimed(address indexed feeRecipient, uint128 amount)
-  deposit(uint128) commitAward(bytes32,uint64,uint128,bytes32) withdrawUnused(uint128)
-  chargeService(uint128,bytes32) pay(bytes32,uint64) claimFees() totals() decimals()
+  MonthlyCommitmentSet(uint128 cap, bool enabled)
+  MonthlyCommitted(uint32 indexed period, bytes32 allocationRoot, uint128 gross, uint256 awards)
+  deposit(uint128) commitAward(bytes32,uint64,uint128,bytes32) commitBountyAward(bytes32,uint64,uint128,bytes32)
+  withdrawUnused(uint128) pay(bytes32,uint64) claimFees() totals() decimals() purpose()
+  setMonthlyCommitment(uint128,bool) commitMonthly(uint32,(uint64,uint128,bytes32)[],bytes)
+  monthlyCap() monthlyEnabled() monthlyRoots(uint32) monthlyWindow(uint32)
+  monthlyDigest(uint32,bytes32) allocationRoot((uint64,uint128,bytes32)[])
   payoutFee(uint128) = gross / 50   withdrawalFee(uint128) = payoutFee(gross)
 EscrowFactory
   constructor(address registrar, address feeRecipient, address identityAuthority, uint64 bindingDelay)
-  create(bytes32 projectId, address token, address owner, address refundDestination)
-  vaults(bytes32 projectId, address token) vaultSalt(bytes32,address)
-  VaultCreated(bytes32 indexed projectId, address indexed token, address indexed vault, address owner, address refundDestination, uint8 decimals)
+  create(bytes32 projectId, address token, uint8 purpose)   (owner = msg.sender)
+  vaults(bytes32 key) vaultKey(address owner, bytes32 projectId, address token, uint8 purpose)
+  VaultCreated(bytes32 indexed projectId, address indexed token, address indexed vault, address owner, uint8 purpose, uint8 decimals)
 ```
 
 The adapter exports the topics as `EVM_ESCROW_EVENT_TOPICS`, computed from
@@ -302,8 +356,9 @@ bun contracts/evm/adapter.integration.ts
 `forge test` runs the Foundry suites under `test/`. `test/AnyToken.t.sol`
 covers 0-, 2-, 9- and 18-decimal tokens, amounts beyond `uint64`, `uint128`
 overflow, permissionless deposit, the 2% withdrawal fee, fee-on-transfer
-rejection, tokens without valid decimals, one vault per project and token, and
-`totals()`. The invariant suite runs at 6 and 18 decimals with random
+rejection, tokens without valid decimals, one vault per owner, project, token
+and purpose, and `totals()`. `test/MonthlyCommitment.t.sol` covers the monthly
+commitment and purpose isolation. The invariant suite runs at 6 and 18 decimals with random
 depositors. The suites also include regression tests for the
 binding lifecycle (commit delay, payment frozen during a rotation and after its
 cancel, cancel cap between payments and its waiver during a pending rotation,
@@ -316,8 +371,9 @@ and `forge test` on every escrow change.
 The integration deploys `integration/TestDollar.sol`, a six-decimal test
 ERC-20, and `test/WideToken.sol` at 18 decimals with amounts beyond `uint64`. The test token is not Circle USDC; Circle integration, wallet signatures, OAuth, indexer finality,
 and live broadcast require separate public-chain acceptance. The adapter integration
-script starts an isolated Anvil on port 18546, executes actual deployment, award,
-and payment transactions, and checks canonical finalized receipts plus rejection
+script starts an isolated Anvil on port 18546, executes actual deployment,
+permissionless vault creation, award, monthly commitment and payment
+transactions, and checks canonical finalized receipts plus rejection
 of wrong chains, vaults, obligations, event indices, and nonfinalized receipts.
 
 ## Testnet deployment
@@ -352,10 +408,10 @@ publish only reviewed safe deployment evidence.
 
 Record the source SHA, compiler settings, factory address, deployment
 transaction, chain ID, registrar and its custody, fee address, and identity
-authority. Verify runtime bytecode and constructor configuration. Create each
-vault from its reviewed project manifest with
-`create(projectId, token, owner, owner)`, then verify its owner, refund
-address, token, decimals, project ID, and authority. Export the ABI from
+authority. Verify runtime bytecode and constructor configuration. The project
+owner creates each vault from its own account with
+`create(projectId, token, purpose)`; then verify its owner, purpose, token,
+decimals, project ID, and authority. Export the ABI from
 `forge inspect ProjectEscrow abi` as build output for the adapter; do not
 maintain a handwritten second ABI. Run the full acceptance scenario with
 actual test tokens and finalized receipts. Independent review, a rehearsed run

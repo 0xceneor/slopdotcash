@@ -23,7 +23,6 @@ export interface VaultTotals {
   totalGrossWithdrawn: string;
   /** Included in totalGrossWithdrawn. */
   totalWithdrawalFees: string;
-  totalServiceFees: string;
   freeBalance: string | null;
   /** EVM only; Solana stores one combined reserve. */
   reservedPrincipal: string | null;

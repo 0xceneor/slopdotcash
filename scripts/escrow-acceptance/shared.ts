@@ -817,7 +817,6 @@ const COUNTERS = [
   "totalPayoutFees",
   "totalGrossWithdrawn",
   "totalWithdrawalFees",
-  "totalServiceFees",
   "freeBalance",
   "reservedPrincipal",
   "reservedFees",

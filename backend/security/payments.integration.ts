@@ -10,6 +10,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import {
   buildBindCalldata,
   evmBindingTypedData,
+  evmVaultKey,
 } from "../../contracts/evm/adapter";
 import { sqliteD1 } from "../../tests/sqlite-d1";
 import {
@@ -188,20 +189,24 @@ try {
     "3600",
   ]);
   const projectKey = `0x${"9".repeat(64)}`;
-  await send(factory, "create(bytes32,address,address,address)", [
+  // Private bounties use the owner's separate bounty-purpose vault (purpose 1).
+  await send(factory, "create(bytes32,address,uint8)", [
     projectKey,
     token,
-    owner,
-    owner,
+    "1",
   ]);
   const vault = execFileSync(
     "cast",
     [
       "call",
       factory,
-      "vaults(bytes32,address)(address)",
-      projectKey,
-      token,
+      "vaults(bytes32)(address)",
+      evmVaultKey({
+        owner,
+        projectId: projectKey,
+        asset: token,
+        payoutPolicy: "security-bounty",
+      }),
       "--rpc-url",
       rpcUrl,
     ],

@@ -17,8 +17,6 @@ import {
 } from "@solana/web3.js";
 
 const { Program, BN } = anchor;
-/** A project account created before the identity authority rotation fields existed. */
-const LEGACY_PROJECT_SIZE = 265;
 const hash = (value) => {
   if (typeof value !== "string" || !/^(?:0x)?[a-fA-F0-9]{64}$/.test(value))
     throw new Error("Expected 32-byte digest");
@@ -119,6 +117,8 @@ export async function ownerPlan(input, runtime) {
     throw new Error("Wrong vault PDA");
   await verifyProgram(connection, program.programId, d);
   const instructions = [];
+  // The project purpose is the last project PDA seed: a private bounty project is separate.
+  const bounty = d.payoutPolicy === "security-bounty";
   // The transaction fee payer and only signer: the owner, or the depositor of a deposit.
   let signer = owner;
   if (input.operation === "initialize") {
@@ -142,6 +142,7 @@ export async function ownerPlan(input, runtime) {
         Buffer.from("project"),
         owner.toBuffer(),
         Buffer.from(hash(input.projectDigest)),
+        Buffer.from([bounty ? 1 : 0]),
       ).equals(project)
     )
       throw new Error("Wrong project PDA");
@@ -154,6 +155,7 @@ export async function ownerPlan(input, runtime) {
           new PublicKey(d.feeRecipient),
           delay(d.bindingDelaySeconds),
           delay(d.rotationDelaySeconds),
+          bounty ? { bounty: {} } : { ordinary: {} },
         )
         .accountsStrict({
           owner,
@@ -163,34 +165,6 @@ export async function ownerPlan(input, runtime) {
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
           config: configAddress,
-        })
-        .instruction(),
-    );
-  } else if (input.operation === "migrate") {
-    // Grows a project created before the rotation fields existed. The account
-    // must be this program's 265-byte project for the reviewed owner, mint
-    // and network; the reviewed rotation delay becomes its rotation delay.
-    const legacy = await connection.getAccountInfo(project, "finalized");
-    if (
-      !legacy?.owner.equals(program.programId) ||
-      legacy.data.length !== LEGACY_PROJECT_SIZE ||
-      !legacy.data
-        .subarray(0, 8)
-        .equals(Buffer.from("cda8bdcab5f78e13", "hex")) ||
-      !new PublicKey(legacy.data.subarray(8, 40)).equals(owner) ||
-      !Buffer.from(legacy.data.subarray(72, 104)).equals(
-        Buffer.from(hash(d.networkDomain)),
-      ) ||
-      !new PublicKey(legacy.data.subarray(168, 200)).equals(mint)
-    )
-      throw new Error("Not a legacy project for this reviewed deployment");
-    instructions.push(
-      await program.methods
-        .migrateProject(delay(d.rotationDelaySeconds))
-        .accountsStrict({
-          owner,
-          project,
-          systemProgram: SystemProgram.programId,
         })
         .instruction(),
     );
@@ -204,6 +178,7 @@ export async function ownerPlan(input, runtime) {
       !state.feeRecipient.equals(new PublicKey(d.feeRecipient)) ||
       !state.bindingDelay.eq(delay(d.bindingDelaySeconds)) ||
       !state.rotationDelay.eq(delay(d.rotationDelaySeconds)) ||
+      Boolean(state.purpose.bounty) !== bounty ||
       !Buffer.from(state.network).equals(Buffer.from(hash(d.networkDomain)))
     )
       throw new Error("Reviewed project configuration mismatch");

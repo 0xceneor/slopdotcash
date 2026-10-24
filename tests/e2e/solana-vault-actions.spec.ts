@@ -151,6 +151,7 @@ test.beforeAll(async () => {
     Buffer.from("project"),
     owner.publicKey.toBuffer(),
     digest,
+    Buffer.from([0]),
   );
   const vault = pda(Buffer.from("vault"), projectPda.toBuffer());
   const initialized = await program.methods
@@ -161,6 +162,7 @@ test.beforeAll(async () => {
       fee.publicKey,
       new anchor.BN(3600),
       new anchor.BN(7200),
+      { ordinary: {} },
     )
     .accountsStrict({
       owner: owner.publicKey,

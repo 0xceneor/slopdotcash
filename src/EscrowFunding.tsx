@@ -29,7 +29,6 @@ const CUMULATIVE = [
   "totalPayoutFees",
   "totalGrossWithdrawn",
   "totalWithdrawalFees",
-  "totalServiceFees",
 ] as const;
 const CURRENT = [
   "freeBalance",

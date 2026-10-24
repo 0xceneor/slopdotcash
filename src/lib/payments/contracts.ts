@@ -144,7 +144,6 @@ export interface VaultSnapshot extends PaymentAsset {
   totalPayoutFees: string;
   totalGrossWithdrawn: string;
   totalWithdrawalFees: string;
-  totalServiceFees: string;
   /** Null when this vault type has no such counter; never shown as zero. */
   freeBalance: string | null;
   reservedPrincipal: string | null;

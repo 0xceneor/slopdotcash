@@ -142,6 +142,7 @@ test("durable executor verifies SQLite consent, binds, creates ATAs, pays and re
       Buffer.from("project"),
       payer.publicKey.toBuffer(),
       projectId,
+      Buffer.from([0]),
     ),
     vault = pda(Buffer.from("vault"), project.toBuffer()),
     awardId = Buffer.from(
@@ -157,6 +158,7 @@ test("durable executor verifies SQLite consent, binds, creates ATAs, pays and re
       fee.publicKey,
       bn(2),
       bn(2),
+      { ordinary: {} },
     )
     .accountsStrict({
       owner: payer.publicKey,
@@ -717,6 +719,7 @@ test("durable executor verifies SQLite consent, binds, creates ATAs, pays and re
       Buffer.from("project"),
       payer.publicKey.toBuffer(),
       foreignId,
+      Buffer.from([0]),
     ),
     foreignVault = pda(Buffer.from("vault"), foreign.toBuffer()),
     foreignAward = Buffer.from(
@@ -731,6 +734,7 @@ test("durable executor verifies SQLite consent, binds, creates ATAs, pays and re
       fee.publicKey,
       bn(2),
       bn(2),
+      { ordinary: {} },
     )
     .accountsStrict({
       owner: payer.publicKey,

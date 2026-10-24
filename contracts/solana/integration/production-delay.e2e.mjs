@@ -122,6 +122,7 @@ test("the deployable build rejects a binding delay below one hour", async () => 
       Buffer.from("project"),
       payer.publicKey.toBuffer(),
       Buffer.from(id),
+      Buffer.from([0]),
     );
     return program.methods
       .initialize(
@@ -131,6 +132,7 @@ test("the deployable build rejects a binding delay below one hour", async () => 
         configFees.publicKey,
         new BN(delay),
         new BN(rotationDelay),
+        { ordinary: {} },
       )
       .accountsStrict({
         owner: payer.publicKey,

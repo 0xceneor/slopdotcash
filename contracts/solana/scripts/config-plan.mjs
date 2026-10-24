@@ -144,7 +144,7 @@ export async function listProjects(input, runtime) {
           mint: base58(data.subarray(168, 200)),
           pinned:
             pinned !== null &&
-            data.length === 314 &&
+            data.length === 316 &&
             feeRecipient === pinned.feeRecipient.toBase58(),
         };
       })

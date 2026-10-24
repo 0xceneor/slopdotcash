@@ -13,8 +13,10 @@ import {
   thawAccount,
 } from "@solana/spl-token";
 import {
+  Ed25519Program,
   Keypair,
   PublicKey,
+  SYSVAR_INSTRUCTIONS_PUBKEY,
   SystemProgram,
   sendAndConfirmTransaction,
   Transaction,
@@ -22,7 +24,11 @@ import {
 import {
   escrowInvocations,
   readVaultTotals,
+  solanaAllocationProof,
+  solanaAllocationRoot,
+  solanaAllocationTotal,
   solanaAwardId,
+  solanaMonthlyMessage,
   solanaPaymentAdapter,
 } from "../.local/adapter.mjs";
 import {
@@ -50,6 +56,11 @@ const pda = (...seeds) =>
   PublicKey.findProgramAddressSync(seeds, program.programId)[0];
 const key = (x) => x.toBuffer();
 const seed = (s) => Buffer.from(s);
+// The project PDA's last seed is its purpose: 0 ordinary awards, 1 private bounties.
+const ORDINARY = { ordinary: {} };
+const BOUNTY = { bounty: {} };
+const purposeSeed = (purpose = ORDINARY) =>
+  Buffer.from([purpose.bounty ? 1 : 0]);
 const actorSeed = (id) => bn(id).toArrayLike(Buffer, "le", 8);
 const DELAY = 8;
 const ROTATION_DELAY = 4;
@@ -246,24 +257,6 @@ function withdraw(amount) {
     })
     .rpc();
 }
-const service = (digest) =>
-  pda(seed("service"), key(project), Buffer.from(digest));
-function chargeService(amount, digest, signer = payer) {
-  return program.methods
-    .chargeService(bn(amount), digest)
-    .accountsStrict({
-      owner: signer.publicKey,
-      project,
-      mint,
-      vault,
-      feeAccount,
-      charge: service(digest),
-      tokenProgram: TOKEN_PROGRAM_ID,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers(signer === payer ? [] : [signer])
-    .rpc();
-}
 const balance = async (address) =>
   (await getAccount(provider.connection, address)).amount;
 test("actual SPL escrow lifecycle, late wallet claim, reserve and authority attacks", async () => {
@@ -304,6 +297,7 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
     seed("project"),
     key(payer.publicKey),
     Buffer.from(hash(`project${RUN}`)),
+    purposeSeed(),
   );
   vault = pda(seed("vault"), key(project));
   await program.methods
@@ -314,6 +308,7 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
       feeOwner.publicKey,
       bn(DELAY),
       bn(ROTATION_DELAY),
+      ORDINARY,
     )
     .accountsStrict({
       owner: payer.publicKey,
@@ -425,41 +420,16 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
     pay("late", 102, wrongDestination),
     /ConstraintTokenMint|WrongDestination/,
   );
-  // PAY-10: the owner pays one Slopbot invoice from free funds only. The 50
-  // reserved for actor 102 cannot be charged, and an invoice pays once.
-  const invoice = hash("invoice:local:2026-10");
-  await assert.rejects(
-    chargeService(850_000_001, invoice),
-    /InsufficientFreeBalance/,
-  );
-  await assert.rejects(chargeService(1, Array(32).fill(0)), /InvalidAmount/);
-  const stranger = Keypair.generate();
-  await sendAndConfirmTransaction(
-    provider.connection,
-    new Transaction().add(
-      SystemProgram.transfer({
-        fromPubkey: payer.publicKey,
-        toPubkey: stranger.publicKey,
-        lamports: 100_000_000,
-      }),
-    ),
-    [payer],
-  );
-  await assert.rejects(chargeService(1, invoice, stranger), /ConstraintHasOne/);
-  await chargeService(20_000_000, invoice);
-  assert.equal(await balance(feeAccount), 22_000_000n);
-  await assert.rejects(chargeService(20_000_000, invoice));
-  const charged = await program.account.serviceCharge.fetch(service(invoice));
-  assert.equal(charged.amount.toString(), "20000000");
-  assert.equal(await balance(feeAccount), 22_000_000n);
-  // The 2% fee rounds down once per withdrawal: 1 pays 0, and
-  // 829,999,999 pays floor(829,999,999 / 50) = 16,599,999.
+  // The 50 reserved for actor 102 cannot be withdrawn. The 2% fee rounds down
+  // once per withdrawal: 1 pays 0, and 849,999,999 pays
+  // floor(849,999,999 / 50) = 16,999,999.
+  await assert.rejects(withdraw(850_000_001), /InsufficientFreeBalance/);
   await withdraw(1);
   assert.equal(await balance(source), 1n);
-  assert.equal(await balance(feeAccount), 22_000_000n);
-  await withdraw(829_999_999);
-  assert.equal(await balance(source), 813_400_001n);
-  assert.equal(await balance(feeAccount), 38_599_999n);
+  assert.equal(await balance(feeAccount), 2_000_000n);
+  await withdraw(849_999_999);
+  assert.equal(await balance(source), 833_000_001n);
+  assert.equal(await balance(feeAccount), 18_999_999n);
   await assert.rejects(withdraw(1), /InsufficientFreeBalance/);
   // A stolen authority key rebinds actor 102 to a thief, who must expose a
   // wallet by co-signing. Only the owner can veto it, and only while it is
@@ -510,14 +480,13 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
     [payer],
   );
   assert.equal(await balance(destination), 147_000_001n);
-  assert.equal(await balance(feeAccount), 39_599_999n);
+  assert.equal(await balance(feeAccount), 19_999_999n);
   assert.equal(await balance(vault), 0n);
   const state = await program.account.project.fetch(project);
   assert.equal(state.reserved.toString(), "0");
   assert.equal(state.paid.toString(), "147000000");
   assert.equal(state.payoutFees.toString(), "3000000");
-  assert.equal(state.withdrawalFees.toString(), "16599999");
-  assert.equal(state.serviceFees.toString(), "20000000");
+  assert.equal(state.withdrawalFees.toString(), "16999999");
   assert.equal(
     (await balance(source)) +
       (await balance(destination)) +
@@ -631,7 +600,6 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
     ["totalPayoutFees", counters.payoutFees],
     ["totalGrossWithdrawn", counters.withdrawnGross],
     ["totalWithdrawalFees", counters.withdrawalFees],
-    ["totalServiceFees", counters.serviceFees],
     ["reserved", counters.reserved],
   ])
     assert.equal(totals[field], value.toString(), field);
@@ -646,7 +614,6 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
       totals.totalPaid,
       totals.totalPayoutFees,
       totals.totalGrossWithdrawn,
-      totals.totalServiceFees,
     ].reduce((sum, value) => sum + BigInt(value), 0n),
   );
   await mintTo(provider.connection, payer, mint, vault, payer, 1_000_000n);
@@ -895,7 +862,12 @@ test("commit delay, rotation freezes the earlier wallet, veto cap, bounded delay
     identity = authority,
   ) => {
     const id = hash(`bounds:${label}:${delay}${RUN}`);
-    const p = pda(seed("project"), key(payer.publicKey), Buffer.from(id));
+    const p = pda(
+      seed("project"),
+      key(payer.publicKey),
+      Buffer.from(id),
+      purposeSeed(),
+    );
     return program.methods
       .initialize(
         id,
@@ -904,6 +876,7 @@ test("commit delay, rotation freezes the earlier wallet, veto cap, bounded delay
         feeRecipient,
         bn(delay),
         bn(ROTATION_DELAY),
+        ORDINARY,
       )
       .accountsStrict({
         owner: payer.publicKey,
@@ -932,7 +905,12 @@ test("commit delay, rotation freezes the earlier wallet, veto cap, bounded delay
   await assert.rejects(
     initialize(
       DELAY,
-      pda(seed("project"), key(payer.publicKey), Buffer.from(selfId)),
+      pda(
+        seed("project"),
+        key(payer.publicKey),
+        Buffer.from(selfId),
+        purposeSeed(),
+      ),
       "self",
     ),
     /InvalidIdentity/,
@@ -946,6 +924,7 @@ test("commit delay, rotation freezes the earlier wallet, veto cap, bounded delay
     seed("project"),
     key(payer.publicKey),
     Buffer.from(hash(`bounds:other:${DELAY}${RUN}`)),
+    purposeSeed(),
   );
   assert.notEqual(bindingIn(other, 201).toBase58(), binding(201).toBase58());
   assert.equal(
@@ -1050,7 +1029,12 @@ test("permissionless deposit, 18-, 9- and 0-decimal mints, 2% withdrawal fee, To
     tokenProgram = TOKEN_PROGRAM_ID,
   ) => {
     const id = hash(`decimals:${label}${RUN}`);
-    const p = pda(seed("project"), key(payer.publicKey), Buffer.from(id));
+    const p = pda(
+      seed("project"),
+      key(payer.publicKey),
+      Buffer.from(id),
+      purposeSeed(),
+    );
     return {
       address: p,
       send: () =>
@@ -1062,6 +1046,7 @@ test("permissionless deposit, 18-, 9- and 0-decimal mints, 2% withdrawal fee, To
             feeOwner.publicKey,
             bn(DELAY),
             bn(ROTATION_DELAY),
+            ORDINARY,
           )
           .accountsStrict({
             owner: payer.publicKey,
@@ -1255,13 +1240,45 @@ test("permissionless deposit, 18-, 9- and 0-decimal mints, 2% withdrawal fee, To
   );
 });
 
-test("private bounty pays exactly 75/25 and ordinary verification refuses its policy", async () => {
+test("private bounty pays exactly 75/25 from its own bounty project, and purposes never mix", async () => {
   destination = await createAccount(
     provider.connection,
     payer,
     mint,
     recipient.publicKey,
   );
+  // The same owner, project ID and mint hold a separate bounty project and vault.
+  const ordinaryProject = project;
+  const id = hash(`decimals:0${RUN}`);
+  project = pda(
+    seed("project"),
+    key(payer.publicKey),
+    Buffer.from(id),
+    purposeSeed(BOUNTY),
+  );
+  assert.notEqual(project.toBase58(), ordinaryProject.toBase58());
+  vault = pda(seed("vault"), key(project));
+  await program.methods
+    .initialize(
+      id,
+      network,
+      authority.publicKey,
+      feeOwner.publicKey,
+      bn(DELAY),
+      bn(ROTATION_DELAY),
+      BOUNTY,
+    )
+    .accountsStrict({
+      owner: payer.publicKey,
+      project,
+      mint,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+      config: configAddress(program.programId),
+    })
+    .rpc();
+  // A bounty project refuses an ordinary award and every monthly instruction.
   await mintTo(provider.connection, payer, mint, source, payer, 100_000_000n);
   await program.methods
     .deposit(bn(100_000_000))
@@ -1274,6 +1291,17 @@ test("private bounty pays exactly 75/25 and ordinary verification refuses its po
       tokenProgram: TOKEN_PROGRAM_ID,
     })
     .rpc();
+  await assert.rejects(
+    commit("bounty-as-ordinary", 981, 100_000_000),
+    /WrongPurpose/,
+  );
+  await assert.rejects(
+    program.methods
+      .setMonthlyCommitment(bn(1), true)
+      .accountsStrict({ owner: payer.publicKey, project })
+      .rpc(),
+    /WrongPurpose/,
+  );
   const actor = 981;
   await bind(actor, recipient);
   const beforeNet = await balance(destination);
@@ -1337,4 +1365,430 @@ test("private bounty pays exactly 75/25 and ordinary verification refuses its po
   assert.equal((await balance(destination)) - beforeNet, 75_000_000n);
   assert.equal((await balance(feeAccount)) - beforeFee, 25_000_000n);
   await assert.rejects(pay("private-bounty", actor, destination));
+  // The ordinary project refuses a bounty award.
+  const bountyProject = project;
+  project = ordinaryProject;
+  vault = pda(seed("vault"), key(project));
+  await assert.rejects(
+    commit(
+      "ordinary-as-bounty",
+      actor,
+      100_000_000,
+      "ordinary-as-bounty",
+      awardOf("ordinary-as-bounty"),
+      true,
+    ),
+    /WrongPurpose/,
+  );
+  project = bountyProject;
+  vault = pda(seed("vault"), key(project));
+});
+
+// Owner decision D13: after the period cutoff anyone records the month's allocation
+// root signed by the identity authority, then anyone commits each award with its
+// Merkle sum proof against the fully funded reservation, once per period and source.
+// Later owner settings affect new months only. Payment stays permissionless.
+test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs and permissionless pay", async () => {
+  const stranger = Keypair.generate();
+  await sendAndConfirmTransaction(
+    provider.connection,
+    new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: stranger.publicKey,
+        lamports: 1_000_000_000,
+      }),
+    ),
+    [payer],
+  );
+  currentAuthority = authority;
+  const id = hash(`monthly${RUN}`);
+  project = pda(
+    seed("project"),
+    key(payer.publicKey),
+    Buffer.from(id),
+    purposeSeed(),
+  );
+  vault = pda(seed("vault"), key(project));
+  await program.methods
+    .initialize(
+      id,
+      network,
+      authority.publicKey,
+      feeOwner.publicKey,
+      bn(DELAY),
+      bn(ROTATION_DELAY),
+      ORDINARY,
+    )
+    .accountsStrict({
+      owner: payer.publicKey,
+      project,
+      mint,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+      config: configAddress(program.programId),
+    })
+    .rpc();
+  await mintTo(provider.connection, payer, mint, source, payer, 100_000_000n);
+  await program.methods
+    .deposit(bn(55_000_000))
+    .accountsStrict({
+      depositor: payer.publicKey,
+      project,
+      mint,
+      source,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+  // The open period is the month before the month that contains now - 72 hours.
+  const shifted = new Date(((await chainTime()) - 259_200) * 1000);
+  const open = new Date(
+    Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth() - 1, 1),
+  );
+  const nextOpen = new Date(
+    Date.UTC(open.getUTCFullYear(), open.getUTCMonth() + 1, 1),
+  );
+  const label = (d) =>
+    `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+  const period = label(open);
+  const later = label(nextOpen);
+  const number = (p) => Number(p.replace("-", ""));
+  const periodSeed = (n) => Buffer.from(new Uint32Array([n]).buffer);
+  const month = (p) => pda(seed("month"), key(project), periodSeed(number(p)));
+  const sourceOf = (actor) =>
+    Buffer.from(hash(`monthly:${RUN}:${actor}`)).toString("hex");
+  const entries = [
+    {
+      githubUserId: "401",
+      grossMicro: "30000000",
+      sourceDigest: sourceOf(401),
+    },
+    {
+      githubUserId: "402",
+      grossMicro: "20000000",
+      sourceDigest: sourceOf(402),
+    },
+    {
+      githubUserId: "403",
+      grossMicro: "10000000",
+      sourceDigest: sourceOf(403),
+    },
+  ];
+  const root = solanaAllocationRoot(entries);
+  const total = solanaAllocationTotal(entries);
+  const message = (p = period, r = root, at = project, domain = network) =>
+    solanaMonthlyMessage(
+      program.programId.toBase58(),
+      at.toBase58(),
+      p,
+      r,
+      total,
+      Buffer.from(domain).toString("hex"),
+    );
+  const attestation = (signer = authority, bytes = message()) =>
+    Ed25519Program.createInstructionWithPrivateKey({
+      privateKey: signer.secretKey,
+      message: bytes,
+    });
+  const recordAt = (n, r, pre) =>
+    program.methods
+      .commitMonthly(n, [...Buffer.from(r, "hex")], bn(total))
+      .accountsStrict({
+        payer: stranger.publicKey,
+        project,
+        vault,
+        month: pda(seed("month"), key(project), periodSeed(n)),
+        instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      })
+      .preInstructions(pre)
+      .signers([stranger])
+      .rpc();
+  const record = (
+    p = period,
+    r = root,
+    pre = [attestation(authority, message(p, r))],
+  ) => recordAt(number(p), r, pre);
+  const award = (entry) =>
+    Buffer.from(solanaAwardId(project.toBase58(), entry.sourceDigest), "hex");
+  const commitEntry = (index, entry = entries[index], proof = undefined) =>
+    program.methods
+      .commitMonthlyAward(
+        number(period),
+        [...award(entry)],
+        [...Buffer.from(entry.sourceDigest, "hex")],
+        bn(entry.githubUserId),
+        bn(entry.grossMicro),
+        index,
+        entries.length,
+        (proof ?? solanaAllocationProof(entries, index)).map((sibling) => ({
+          hash: [...Buffer.from(sibling.hash, "hex")],
+          total: bn(sibling.total),
+        })),
+      )
+      .accountsStrict({
+        payer: stranger.publicKey,
+        project,
+        vault,
+        month: month(period),
+        origin: pda(
+          seed("origin"),
+          key(project),
+          Buffer.from(entry.sourceDigest, "hex"),
+        ),
+        obligation: pda(seed("award"), key(project), award(entry)),
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([stranger])
+      .rpc();
+  const setMonthly = (cap, enabled, signer = payer) =>
+    program.methods
+      .setMonthlyCommitment(bn(cap), enabled)
+      .accountsStrict({ owner: signer.publicKey, project })
+      .signers(signer === payer ? [] : [signer])
+      .rpc();
+
+  // Off by default; only the owner turns it on, and "on" needs a positive cap.
+  let state = await program.account.project.fetch(project);
+  assert.equal(state.monthlyEnabled, false);
+  assert.equal(state.monthlyCap.toString(), "0");
+  await assert.rejects(record(), /MonthlyDisabled/);
+  await assert.rejects(
+    setMonthly(50_000_000, true, stranger),
+    /ConstraintHasOne/,
+  );
+  await assert.rejects(setMonthly(0, true), /InvalidAmount/);
+  await setMonthly(50_000_000, true);
+  await assert.rejects(record(), /MonthlyCapExceeded/);
+  await setMonthly(60_000_000, true);
+  // No obligation or reservation is admitted until the entire month is funded.
+  await assert.rejects(record(), /InsufficientFreeBalance/);
+  assert.equal(
+    (await program.account.project.fetch(project)).reserved.toString(),
+    "0",
+  );
+  assert.equal(
+    await program.account.monthlyAllocation.fetchNullable(month(period)),
+    null,
+  );
+  await program.methods
+    .deposit(bn(45_000_000))
+    .accountsStrict({
+      depositor: payer.publicKey,
+      project,
+      mint,
+      source,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+
+  // The window: an invalid period, and next month's period before its cutoff.
+  await assert.rejects(
+    recordAt(202613, root, [attestation()]),
+    /InvalidPeriod/,
+  );
+  await assert.rejects(record(later), /MonthlyWindowClosed/);
+
+  // The signature binds the network, program, project, period, root and total. Only the
+  // project's identity authority attests.
+  await assert.rejects(record(period, root, []), /InvalidAttestation/);
+  await assert.rejects(
+    record(period, root, [attestation(stranger)]),
+    /InvalidAttestation/,
+  );
+  await assert.rejects(
+    record(period, root, [attestation(authority, message(later))]),
+    /InvalidAttestation/,
+  );
+  await assert.rejects(
+    record(period, root, [
+      attestation(
+        authority,
+        solanaMonthlyMessage(
+          program.programId.toBase58(),
+          project.toBase58(),
+          period,
+          root,
+          "59000000",
+          Buffer.from(network).toString("hex"),
+        ),
+      ),
+    ]),
+    /InvalidAttestation/,
+  );
+  await assert.rejects(
+    record(period, root, [
+      attestation(
+        authority,
+        message(period, root, project, hash("another-network")),
+      ),
+    ]),
+    /InvalidAttestation/,
+  );
+  const otherRoot = solanaAllocationRoot(entries.slice(0, 2));
+  await assert.rejects(
+    record(period, root, [attestation(authority, message(period, otherRoot))]),
+    /InvalidAttestation/,
+  );
+  const elsewhere = pda(
+    seed("project"),
+    key(payer.publicKey),
+    Buffer.from(hash("elsewhere")),
+    purposeSeed(),
+  );
+  await assert.rejects(
+    record(period, root, [
+      attestation(authority, message(period, root, elsewhere)),
+    ]),
+    /InvalidAttestation/,
+  );
+  // A signature that the Ed25519 program cannot verify fails the transaction.
+  const forged = attestation(authority, message());
+  forged.data[16 + 32 + 1] ^= 1;
+  await assert.rejects(record(period, root, [forged]));
+
+  // Anyone records the signed root; the period records once.
+  await record();
+  const recorded = await program.account.monthlyAllocation.fetch(month(period));
+  assert.equal(Buffer.from(recorded.allocationRoot).toString("hex"), root);
+  assert.equal(recorded.committed.toString(), "0");
+  assert.equal(recorded.total.toString(), total);
+  assert.equal(
+    (await program.account.project.fetch(project)).reserved.toString(),
+    total,
+  );
+  await assert.rejects(withdraw(50_000_000), /InsufficientFreeBalance/);
+  await assert.rejects(record(), /already in use/);
+  await assert.rejects(record(period, otherRoot), /already in use/);
+
+  // Awards commit with their proofs, at the ordinary 2% fee, within the cap.
+  await assert.rejects(
+    commitEntry(0, { ...entries[0], grossMicro: "30000001" }),
+    /InvalidAllocationProof/,
+  );
+  await assert.rejects(
+    commitEntry(0, entries[0], solanaAllocationProof(entries, 1)),
+    /InvalidAllocationProof/,
+  );
+  await assert.rejects(
+    commitEntry(0, entries[0], solanaAllocationProof(entries, 0).slice(1)),
+    /InvalidAllocationProof/,
+  );
+  await commitEntry(0);
+  await commitEntry(1);
+  await assert.rejects(commitEntry(0), /already in use/);
+  // Later owner settings cannot cancel or expand the admitted funded month.
+  await setMonthly(10_000_000, false);
+  const altered = solanaAllocationProof(entries, 2).map((node) => ({
+    ...node,
+    total: String(BigInt(node.total) + 1n),
+  }));
+  await assert.rejects(
+    commitEntry(2, entries[2], altered),
+    /InvalidAllocationProof/,
+  );
+  await commitEntry(2);
+  assert.equal(
+    (
+      await program.account.monthlyAllocation.fetch(month(period))
+    ).committed.toString(),
+    "60000000",
+  );
+  state = await program.account.project.fetch(project);
+  assert.equal(state.reserved.toString(), "60000000");
+  const awardAddress = pda(seed("award"), key(project), award(entries[0]));
+  const first = await program.account.obligation.fetch(awardAddress);
+  assert.equal(first.fee.toString(), "600000");
+  assert.equal(first.actorId.toString(), "401");
+  // A monthly award pays through the ordinary binding and delay rules; pay needs no owner signature.
+  const wallet = Keypair.generate();
+  const walletAccount = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    wallet.publicKey,
+  );
+  await bind(401, wallet);
+  await activate();
+  const paid = await program.methods
+    .pay(bn(1))
+    .accountsStrict({
+      project,
+      obligation: awardAddress,
+      binding: binding(401),
+      mint,
+      vault,
+      destination: walletAccount,
+      feeAccount,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      veto: veto(401, 1),
+    })
+    .rpc();
+  assert.equal(await balance(walletAccount), 29_400_000n);
+  // The adapter verifies the monthly reservation and its payment as ordinary awards.
+  const reserveSignature = (
+    await provider.connection.getSignaturesForAddress(
+      awardAddress,
+      {},
+      "confirmed",
+    )
+  )
+    .map((s) => s.signature)
+    .at(-1);
+  await provider.connection.confirmTransaction(paid, "finalized");
+  const deployment = {
+    rpcUrl: provider.connection.rpcEndpoint,
+    genesisHash: await provider.connection.getGenesisHash(),
+    programId: program.programId.toBase58(),
+    projectPda: project.toBase58(),
+    projectId: "monthly",
+    network: "solana:localnet",
+    networkDomain: Buffer.from(network).toString("hex"),
+    vault: vault.toBase58(),
+    mint: mint.toBase58(),
+    owner: payer.publicKey.toBase58(),
+    identityAuthority: authority.publicKey.toBase58(),
+    feeRecipient: feeOwner.publicKey.toBase58(),
+    ...expectedDeployment,
+    bindingDelaySeconds: String(DELAY),
+    rotationDelaySeconds: String(ROTATION_DELAY),
+  };
+  const adapter = solanaPaymentAdapter(deployment);
+  const [reserveInvocation] = escrowInvocations(
+    await parsedTransaction(reserveSignature),
+    program.programId.toBase58(),
+  );
+  const reserved = await adapter.verifyFinalized({
+    transactionId: reserveSignature,
+    eventIndex: reserveInvocation.index,
+    kind: "reserved",
+    obligationId: award(entries[0]).toString("hex"),
+  });
+  assert.equal(reserved.githubUserId, "401");
+  assert.equal(reserved.grossMicro, "30000000");
+  const [payInvocation] = escrowInvocations(
+    await parsedTransaction(paid),
+    program.programId.toBase58(),
+  );
+  const paidEvidence = {
+    transactionId: paid,
+    eventIndex: payInvocation.index,
+    kind: "paid",
+    obligationId: award(entries[0]).toString("hex"),
+  };
+  assert.equal(
+    (await adapter.verifyFinalized(paidEvidence)).netMicro,
+    "29400000",
+  );
+  await assert.rejects(
+    solanaPaymentAdapter({
+      ...deployment,
+      payoutPolicy: "security-bounty",
+    }).verifyFinalized(paidEvidence),
+    /purpose/,
+    "a bounty policy refuses an ordinary project",
+  );
 });

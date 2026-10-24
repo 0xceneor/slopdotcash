@@ -60,9 +60,8 @@ export const EVM_ESCROW_EVENT_SIGNATURES = Object.freeze({
   BindingCancelled: "BindingCancelled(uint64,uint64)",
   Paid: "Paid(bytes32,uint64,address,uint64,uint128,uint128,uint128)",
   UnusedWithdrawn: "UnusedWithdrawn(address,uint128,uint128,uint128)",
-  ServiceCharged: "ServiceCharged(bytes32,uint128)",
   FeesClaimed: "FeesClaimed(address,uint128)",
-  VaultCreated: "VaultCreated(bytes32,address,address,address,address,uint8)",
+  VaultCreated: "VaultCreated(bytes32,address,address,address,uint8,uint8)",
   IdentityAuthorityRotationProposed:
     "IdentityAuthorityRotationProposed(address,address,uint64)",
   IdentityAuthorityRotationCancelled:
@@ -167,11 +166,32 @@ async function getter(
 const addressWord = (value: string) =>
   `0x${value.slice(2).toLowerCase().padStart(64, "0")}`;
 
+/** The ProjectEscrow v5 purpose for a payout policy: 0 ordinary awards, 1 private bounties. */
+export function evmVaultPurpose(policy: PayoutPolicy = "ordinary") {
+  return policy === "security-bounty" ? 1n : 0n;
+}
+/** EscrowFactory.vaultKey: keccak256(abi.encode(owner, projectId, token, purpose)), also the CREATE2 salt. */
+export function evmVaultKey(input: {
+  owner: string;
+  projectId: string;
+  asset: string;
+  payoutPolicy?: PayoutPolicy;
+}) {
+  if (![input.owner, input.asset].every((value) => ADDRESS.test(value)))
+    throw new Error("Invalid vault key");
+  return keccakHex(
+    unhex(
+      `${addressWord(input.owner).slice(2)}${hash(input.projectId).slice(2)}${addressWord(input.asset).slice(2)}${evmVaultPurpose(input.payoutPolicy).toString(16).padStart(64, "0")}`,
+    ),
+  );
+}
+
 /**
  * codeSha256 and factoryCodeSha256 hash decoded immutable runtime code bytes, not hex text or
- * creation code. The vault must be the one its pinned factory created for its project and asset,
- * and the factory must have the reviewed registrar, fee recipient, delays and code, so a vault
- * from a factory with other rotation rules fails. The asset is a per-vault parameter in v4.
+ * creation code. The vault must be the one its pinned factory created for its owner, project,
+ * asset and purpose, and the factory must have the reviewed registrar, fee recipient, delays and
+ * code, so a vault from a factory with other rotation rules fails. The purpose follows the payout
+ * policy: a private bounty deployment must be a bounty vault.
  */
 export async function verifyEvmDeployment(
   config: EvmEscrowConfig,
@@ -207,7 +227,6 @@ export async function verifyEvmDeployment(
   for (const [target, signature, expected] of [
     [config.vault, "token()", config.asset],
     [config.vault, "owner()", config.owner],
-    [config.vault, "refundDestination()", config.owner],
     [config.vault, "feeRecipient()", config.feeRecipient],
     [config.vault, "factory()", config.factory],
     [config.factory, "registrar()", config.registrar],
@@ -233,14 +252,25 @@ export async function verifyEvmDeployment(
     if (BigInt(await getter(config, target, signature, blockTag)) !== expected)
       throw new Error("Escrow delays do not match reviewed deployment");
   }
+  if (
+    BigInt(await getter(config, config.vault, "purpose()", blockTag)) !==
+    evmVaultPurpose(config.payoutPolicy)
+  )
+    throw new Error("Escrow purpose does not match the payout policy");
   const projectId = await getter(config, config.vault, "projectId()", blockTag);
+  const key = evmVaultKey({
+    owner: config.owner,
+    projectId,
+    asset: config.asset,
+    payoutPolicy: config.payoutPolicy,
+  });
   if (
     (await getter(
       config,
       config.factory,
-      "vaults(bytes32,address)",
+      "vaults(bytes32)",
       blockTag,
-      `${projectId.slice(2)}${addressWord(config.asset).slice(2)}`,
+      key.slice(2),
     )) !== addressWord(config.vault)
   )
     throw new Error("Escrow vault was not created by the reviewed factory");
@@ -525,13 +555,25 @@ const DOMAIN_TYPEHASH =
 /** keccak256("DestinationBinding(uint64 actorId,address destination,uint64 expectedVersion,bytes32 claimDigest,uint64 expiresAt)") */
 const BINDING_TYPEHASH =
   "da5a17ebadee256f10c42cd35247bcea3c3b77ba8772bea3807f7d5023a4489e";
-/** keccak256("SlopProjectEscrow") and keccak256("4"): the vault's EIP-712 name and version. */
+/** keccak256("MonthlyAllocation(uint32 period,bytes32 allocationRoot)") */
+const MONTHLY_TYPEHASH =
+  "76c1450f2bf1fd8f9417f688d54a1a8fb8bbdce95664adbbab3d5e9b064a3b25";
+/** keccak256("SlopProjectEscrow") and keccak256("5"): the vault's EIP-712 name and version. */
 const DOMAIN_NAME_HASH =
   "3c605d82f7aa4ceb74cffe80a28c3f9b810fb40c95cdc887dea666b075537518";
 const DOMAIN_VERSION_HASH =
-  "13600b294191fc92924bb3ce4b969c1e7e2bab8f4c93c3fc6d0a51733df3c060";
-/** The EIP-712 domain version of ProjectEscrow v4. */
-export const EVM_ESCROW_DOMAIN_VERSION = "4";
+  "ceebf77a833b30520287ddd9478ff51abbdffa30aa90a8d655dba0e8a79ce0c1";
+/** The EIP-712 domain version of ProjectEscrow v5. */
+export const EVM_ESCROW_DOMAIN_VERSION = "5";
+function domainSeparator(chainId: bigint, vault: string) {
+  if (!ADDRESS.test(vault) || chainId <= 0n || chainId > U64)
+    throw new Error("Invalid escrow domain");
+  return keccakHex(
+    unhex(
+      `${DOMAIN_TYPEHASH}${DOMAIN_NAME_HASH}${DOMAIN_VERSION_HASH}${chainId.toString(16).padStart(64, "0")}${vault.slice(2).toLowerCase().padStart(64, "0")}`,
+    ),
+  );
+}
 /** The EIP-712 typed data a destination wallet signs to accept a binding (eth_signTypedData_v4). */
 export function evmBindingTypedData(
   chainId: bigint,
@@ -580,13 +622,7 @@ export function evmBindingDigest(
   input: BindingInput,
 ): string {
   assertBindingInput(input);
-  if (!ADDRESS.test(vault) || chainId <= 0n || chainId > U64)
-    throw new Error("Invalid binding domain");
-  const domain = keccakHex(
-    unhex(
-      `${DOMAIN_TYPEHASH}${DOMAIN_NAME_HASH}${DOMAIN_VERSION_HASH}${chainId.toString(16).padStart(64, "0")}${vault.slice(2).toLowerCase().padStart(64, "0")}`,
-    ),
-  );
+  const domain = domainSeparator(chainId, vault);
   const struct = keccakHex(
     unhex(
       `${BINDING_TYPEHASH}${word(input.githubUserId)}${input.destination.slice(2).toLowerCase().padStart(64, "0")}${word(input.expectedVersion)}${hash(input.claimDigest).slice(2)}${word(input.expiresAt)}`,
@@ -724,29 +760,87 @@ export async function verifyVaultFundingAction(
     net: (gross - fee).toString(),
   };
 }
-/** Owner-only PAY-10 charge from free funds, once per invoice digest. */
-export function buildChargeServiceCalldata(
-  amount: string | bigint,
-  invoiceDigest: string,
-) {
-  if (BigInt(hash(invoiceDigest)) === 0n) throw new Error("Invalid invoice");
-  return `0x${selector("chargeService(uint128,bytes32)")}${amountWord(amount)}${hash(invoiceDigest).slice(2)}`;
-}
-/** Registrar-only: creates the vault for one project and token. */
+/** Permissionless: the sender creates and owns its vault for one project, token and purpose. */
 export function buildCreateVaultCalldata(input: {
   projectId: string;
   asset: string;
-  owner: string;
-  refundDestination: string;
+  payoutPolicy?: PayoutPolicy;
 }) {
-  if (
-    BigInt(hash(input.projectId)) === 0n ||
-    ![input.asset, input.owner, input.refundDestination].every((value) =>
-      ADDRESS.test(value),
-    )
-  )
+  if (BigInt(hash(input.projectId)) === 0n || !ADDRESS.test(input.asset))
     throw new Error("Invalid vault input");
-  return `0x${selector("create(bytes32,address,address,address)")}${hash(input.projectId).slice(2)}${addressWord(input.asset).slice(2)}${addressWord(input.owner).slice(2)}${addressWord(input.refundDestination).slice(2)}`;
+  return `0x${selector("create(bytes32,address,uint8)")}${hash(input.projectId).slice(2)}${addressWord(input.asset).slice(2)}${evmVaultPurpose(input.payoutPolicy).toString(16).padStart(64, "0")}`;
+}
+/** One award of a monthly allocation, in allocation order. */
+export interface MonthlyAllocationEntry {
+  githubUserId: string;
+  grossMicro: string | bigint;
+  sourceDigest: string;
+}
+/** A period key "YYYY-MM" (the monthly coordinator's month) as the contract's YYYYMM number. */
+function periodNumber(period: string) {
+  const match = /^([2-9][0-9]{3})-(0[1-9]|1[0-2])$/.exec(period);
+  if (!match) throw new Error("Invalid monthly period");
+  return BigInt(`${match[1]}${match[2]}`);
+}
+function monthlyLeaf(entry: MonthlyAllocationEntry) {
+  if (entry.githubUserId === "0" || BigInt(hash(entry.sourceDigest)) === 0n)
+    throw new Error("Invalid monthly award");
+  // abi.encodePacked(uint8 0, uint64 actorId, uint128 gross, bytes32 sourceDigest)
+  return keccakHex(
+    unhex(
+      `00${word(entry.githubUserId).slice(48)}${amountWord(entry.grossMicro).slice(32)}${hash(entry.sourceDigest).slice(2)}`,
+    ),
+  );
+}
+/** ProjectEscrow.allocationRoot: the Merkle root over the awards in order; an odd last node moves up. */
+export function evmAllocationRoot(entries: readonly MonthlyAllocationEntry[]) {
+  if (entries.length === 0) throw new Error("Empty monthly allocation");
+  let level = entries.map(monthlyLeaf);
+  while (level.length > 1) {
+    const next: string[] = [];
+    for (let i = 0; i < level.length; i += 2)
+      next.push(
+        i + 1 < level.length
+          ? keccakHex(unhex(`01${level[i].slice(2)}${level[i + 1].slice(2)}`))
+          : level[i],
+      );
+    level = next;
+  }
+  return level[0];
+}
+/** ProjectEscrow.monthlyDigest: the EIP-712 digest the identity authority signs for one period and root. */
+export function evmMonthlyDigest(
+  chainId: bigint,
+  vault: string,
+  period: string,
+  allocationRoot: string,
+) {
+  const struct = keccakHex(
+    unhex(
+      `${MONTHLY_TYPEHASH}${periodNumber(period).toString(16).padStart(64, "0")}${hash(allocationRoot).slice(2)}`,
+    ),
+  );
+  return keccakHex(
+    unhex(`1901${domainSeparator(chainId, vault).slice(2)}${struct.slice(2)}`),
+  );
+}
+/** Permissionless commitMonthly(uint32,(uint64,uint128,bytes32)[],bytes) with the authority's signature. */
+export function buildCommitMonthlyCalldata(
+  period: string,
+  entries: readonly MonthlyAllocationEntry[],
+  attestation: string,
+) {
+  if (!SIGNATURE.test(attestation)) throw new Error("Invalid attestation");
+  evmAllocationRoot(entries);
+  const count = BigInt(entries.length);
+  const tail = entries
+    .map(
+      (entry) =>
+        `${word(entry.githubUserId)}${amountWord(entry.grossMicro)}${hash(entry.sourceDigest).slice(2)}`,
+    )
+    .join("");
+  const bytesOffset = 0x60n + 0x20n + count * 0x60n;
+  return `0x${selector("commitMonthly(uint32,(uint64,uint128,bytes32)[],bytes)")}${periodNumber(period).toString(16).padStart(64, "0")}${0x60n.toString(16).padStart(64, "0")}${bytesOffset.toString(16).padStart(64, "0")}${count.toString(16).padStart(64, "0")}${tail}${65n.toString(16).padStart(64, "0")}${attestation.slice(2).toLowerCase().padEnd(192, "0")}`;
 }
 
 export type { VaultTotals } from "../vault-totals";
@@ -759,7 +853,7 @@ export type EvmVaultTotalsConfig = EvmRpc & {
 /**
  * Reads every counter of a vault with one totals() call, plus its token and decimals, all at one
  * pinned finalized block number. It checks the chain and the conservation identity
- * deposited = free + reserved + paid + payoutFees + withdrawnGross + serviceFees. It does not
+ * deposited = free + reserved + paid + payoutFees + withdrawnGross. It does not
  * verify the reviewed deployment; call verifyEvmDeployment first for that.
  */
 export async function readVaultTotals(
@@ -778,9 +872,9 @@ export async function readVaultTotals(
     { to: vault, data: `0x${selector("totals()")}` },
     blockTag,
   ]);
-  if (typeof data !== "string" || !/^0x[0-9a-fA-F]{704}$/.test(data))
+  if (typeof data !== "string" || !/^0x[0-9a-fA-F]{640}$/.test(data))
     throw new Error("Malformed vault totals");
-  const words = Array.from({ length: 11 }, (_, i) =>
+  const words = Array.from({ length: 10 }, (_, i) =>
     data.slice(2 + i * 64, 66 + i * 64),
   );
   const [
@@ -789,13 +883,12 @@ export async function readVaultTotals(
     payoutFees,
     withdrawnGross,
     withdrawalFees,
-    serviceFees,
     free,
     reservedPrincipal,
     reservedFees,
     accruedFees,
-  ] = words.slice(0, 10).map(uint128);
-  const vaultBalance = BigInt(`0x${words[10]}`);
+  ] = words.slice(0, 9).map(uint128);
+  const vaultBalance = BigInt(`0x${words[9]}`);
   const token = await getter(config, vault, "token()", blockTag);
   const decimals = BigInt(await getter(config, vault, "decimals()", blockTag));
   if (!/^0x0{24}[0-9a-f]{40}$/.test(token) || decimals > 255n)
@@ -807,8 +900,7 @@ export async function readVaultTotals(
         reservedFees +
         paid +
         payoutFees +
-        withdrawnGross +
-        serviceFees ||
+        withdrawnGross ||
     vaultBalance < free + reservedPrincipal + reservedFees + accruedFees
   )
     throw new Error("Vault totals do not conserve");
@@ -824,7 +916,6 @@ export async function readVaultTotals(
     totalPayoutFees: payoutFees.toString(),
     totalGrossWithdrawn: withdrawnGross.toString(),
     totalWithdrawalFees: withdrawalFees.toString(),
-    totalServiceFees: serviceFees.toString(),
     freeBalance: free.toString(),
     reservedPrincipal: reservedPrincipal.toString(),
     reservedFees: reservedFees.toString(),

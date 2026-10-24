@@ -30,7 +30,6 @@ const CUMULATIVE = [
   "totalPayoutFees",
   "totalGrossWithdrawn",
   "totalWithdrawalFees",
-  "totalServiceFees",
 ] as const;
 const CURRENT = [
   "freeBalance",
@@ -45,7 +44,6 @@ const COLUMNS: Record<(typeof CUMULATIVE | typeof CURRENT)[number], string> = {
   totalPayoutFees: "total_payout_fees",
   totalGrossWithdrawn: "total_gross_withdrawn",
   totalWithdrawalFees: "total_withdrawal_fees",
-  totalServiceFees: "total_service_fees",
   freeBalance: "free_balance",
   reservedPrincipal: "reserved_principal",
   reservedFees: "reserved_fees",
@@ -108,6 +106,9 @@ export async function storeVaultSnapshot(
   }
   const blockTime = new Date(totals.blockTime).toISOString();
   const keys = [...CUMULATIVE, ...CURRENT];
+  // total_service_fees stays in the append-only schema for earlier rows. The
+  // vault contracts have no service charge (owner decision D13), so a new row
+  // records 0 and an update never changes the stored value.
   // Compare canonical decimal text exactly, including values above SQLite int64.
   // These write-time guards also cover refreshes that read the same prior row.
   const monotonicCounters = CUMULATIVE.map((key) => {
@@ -116,8 +117,8 @@ export async function storeVaultSnapshot(
   }).join(" AND ");
   const result = await db
     .prepare(
-      `INSERT INTO vault_snapshots(project_id,network,chain,vault,asset_address,asset_decimals,${keys.map((k) => COLUMNS[k]).join(",")},block_number,block_time,observed_at) VALUES(${Array(
-        9 + keys.length,
+      `INSERT INTO vault_snapshots(project_id,network,chain,vault,asset_address,asset_decimals,${keys.map((k) => COLUMNS[k]).join(",")},total_service_fees,block_number,block_time,observed_at) VALUES(${Array(
+        10 + keys.length,
       )
         .fill("?")
         .join(
@@ -132,6 +133,7 @@ export async function storeVaultSnapshot(
       deployment.asset,
       totals.decimals,
       ...keys.map((k) => totals[k]),
+      "0",
       totals.blockNumber,
       blockTime,
       observedAt,

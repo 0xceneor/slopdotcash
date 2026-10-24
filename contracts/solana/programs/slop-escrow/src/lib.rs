@@ -1,4 +1,7 @@
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program::sysvar::instructions::{
+    load_current_index_checked, load_instruction_at_checked,
+};
 use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{self, Mint, Token, TokenAccount, TransferChecked};
 use solana_sha256_hasher::hashv;
@@ -16,9 +19,15 @@ const MAX_BINDING_DELAY: i64 = 30 * 86400;
 /// An identity authority rotation is public for at least the binding delay floor and at most
 /// 90 days; production manifests require at least 7 days.
 const MAX_ROTATION_DELAY: i64 = 90 * 86400;
-/// Size of a Project account created before the identity authority rotation fields existed.
-/// `migrate_project` grows such an account to the current layout.
-pub const LEGACY_PROJECT_SIZE: usize = 265;
+/// A monthly allocation for calendar UTC month M can be recorded from this delay after M ends
+/// until this delay after the next month ends (owner decision D1: 00:00 UTC on the 4th).
+const MONTHLY_CUTOFF_DELAY: i64 = 72 * 3600;
+/// The identity authority signs this prefix, the program ID, the project, the period (u32 LE,
+/// YYYYMM), the allocation root, total and stored network domain.
+pub const MONTHLY_MESSAGE_PREFIX: &[u8] = b"slop-monthly-allocation-v2";
+/// The native Ed25519 signature verification program.
+const ED25519_PROGRAM: Pubkey =
+    anchor_lang::solana_program::pubkey::pubkey!("Ed25519SigVerify111111111111111111111111111");
 /// Vetoes a project owner may record for an actor between two payments to that actor in
 /// the project. Each veto can only delay the actor by one more binding delay, so this
 /// bounds the owner's delay power. The cap is waived, and the count untouched, while the
@@ -64,6 +73,7 @@ pub mod slop_escrow {
         fee_recipient: Pubkey,
         binding_delay: i64,
         rotation_delay: i64,
+        purpose: Purpose,
     ) -> Result<()> {
         require!(
             identity_authority != Pubkey::default()
@@ -95,53 +105,7 @@ pub mod slop_escrow {
         p.bump = ctx.bumps.project;
         p.binding_delay = binding_delay;
         p.rotation_delay = rotation_delay;
-        Ok(())
-    }
-    // Grows a Project account created before the rotation fields existed to the current
-    // layout. Only the project owner can run it, once, and it sets the rotation delay that
-    // `initialize` sets for new projects. Borsh appends the new fields after the old ones, so
-    // every existing field keeps its offset; the new bytes start as zero (no pending rotation).
-    pub fn migrate_project(ctx: Context<MigrateProject>, rotation_delay: i64) -> Result<()> {
-        require!(
-            valid_rotation_delay(rotation_delay),
-            EscrowError::InvalidDelay
-        );
-        let info = ctx.accounts.project.to_account_info();
-        {
-            let data = info.try_borrow_data()?;
-            require!(
-                data.len() == LEGACY_PROJECT_SIZE && &data[..8] == Project::DISCRIMINATOR,
-                EscrowError::NotLegacyProject
-            );
-            require!(
-                data[8..40] == ctx.accounts.owner.key().to_bytes(),
-                EscrowError::InvalidIdentity
-            );
-        }
-        let size = 8 + Project::INIT_SPACE;
-        let rent = Rent::get()?.minimum_balance(size);
-        let lamports = info.lamports();
-        if rent > lamports {
-            anchor_lang::system_program::transfer(
-                CpiContext::new(
-                    ctx.accounts.system_program.to_account_info(),
-                    anchor_lang::system_program::Transfer {
-                        from: ctx.accounts.owner.to_account_info(),
-                        to: info.clone(),
-                    },
-                ),
-                rent - lamports,
-            )?;
-        }
-        info.resize(size)?;
-        let mut data = info.try_borrow_mut_data()?;
-        let mut project = Project::try_deserialize(&mut &data[..])?;
-        project.rotation_delay = rotation_delay;
-        project.try_serialize(&mut &mut data[..])?;
-        emit!(ProjectMigrated {
-            project: info.key(),
-            rotation_delay
-        });
+        p.purpose = purpose;
         Ok(())
     }
     // The owner starts a public two-party rotation of the identity authority. The current
@@ -255,14 +219,22 @@ pub mod slop_escrow {
         Ok(())
     }
     pub fn commit(
-        ctx: Context<Commit>,
+        mut ctx: Context<Commit>,
         award_id: [u8; 32],
         source_digest: [u8; 32],
         actor_id: u64,
         gross: u64,
     ) -> Result<()> {
+        require!(
+            ctx.accounts.project.purpose == Purpose::Ordinary,
+            EscrowError::WrongPurpose
+        );
+        let a = &mut ctx.accounts;
         commit_with_fee(
-            ctx,
+            &mut a.project,
+            &a.vault,
+            &mut a.origin,
+            &mut a.obligation,
             award_id,
             source_digest,
             actor_id,
@@ -270,16 +242,154 @@ pub mod slop_escrow {
             fee_for(gross),
         )
     }
-    /// Bounties reuse ordinary reserves, destination authorization and recovery.
+    /// Bounties reuse ordinary reserves, destination authorization and recovery, in a
+    /// bounty-purpose project only.
     pub fn commit_bounty(
-        ctx: Context<Commit>,
+        mut ctx: Context<Commit>,
         award_id: [u8; 32],
         source_digest: [u8; 32],
         actor_id: u64,
         gross: u64,
     ) -> Result<()> {
+        require!(
+            ctx.accounts.project.purpose == Purpose::Bounty,
+            EscrowError::WrongPurpose
+        );
         require!(gross % 4 == 0, EscrowError::InvalidAmount);
-        commit_with_fee(ctx, award_id, source_digest, actor_id, gross, gross / 4)
+        let a = &mut ctx.accounts;
+        commit_with_fee(
+            &mut a.project,
+            &a.vault,
+            &mut a.origin,
+            &mut a.obligation,
+            award_id,
+            source_digest,
+            actor_id,
+            gross,
+            gross / 4,
+        )
+    }
+    // The owner sets the monthly cap and turns monthly commitments on or off. While they are
+    // off, no new monthly allocation can be recorded. Already reserved awards remain available.
+    pub fn set_monthly_commitment(
+        ctx: Context<SetMonthlyCommitment>,
+        cap: u64,
+        enabled: bool,
+    ) -> Result<()> {
+        let p = &mut ctx.accounts.project;
+        require!(p.purpose == Purpose::Ordinary, EscrowError::WrongPurpose);
+        require!(!enabled || cap > 0, EscrowError::InvalidAmount);
+        p.monthly_cap = cap;
+        p.monthly_enabled = enabled;
+        emit!(MonthlyCommitmentSet {
+            project: p.key(),
+            cap,
+            enabled
+        });
+        Ok(())
+    }
+    // Anyone records one period's allocation root inside the period's window, once per
+    // period, while the owner has monthly commitments on. The instruction just before this
+    // one must be an Ed25519 program check of the project's identity authority signature
+    // over monthly_message(program, project, period, root, total, network).
+    pub fn commit_monthly(
+        ctx: Context<CommitMonthly>,
+        period: u32,
+        allocation_root: [u8; 32],
+        total: u64,
+    ) -> Result<()> {
+        let p = &mut ctx.accounts.project;
+        require!(p.purpose == Purpose::Ordinary, EscrowError::WrongPurpose);
+        require!(p.monthly_enabled, EscrowError::MonthlyDisabled);
+        let (opens_at, closes_at) = monthly_window(period)?;
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now >= opens_at && now < closes_at,
+            EscrowError::MonthlyWindowClosed
+        );
+        require!(total > 0, EscrowError::InvalidAmount);
+        require!(total <= p.monthly_cap, EscrowError::MonthlyCapExceeded);
+        require!(
+            free(p)? >= total && ctx.accounts.vault.amount >= add(p.reserved, total)?,
+            EscrowError::InsufficientFreeBalance
+        );
+        let message = monthly_message(
+            ctx.program_id,
+            &p.key(),
+            period,
+            &allocation_root,
+            total,
+            &p.network,
+        );
+        verify_attestation(&ctx.accounts.instructions, &p.identity_authority, &message)?;
+        let m = &mut ctx.accounts.month;
+        m.project = p.key();
+        m.period = period;
+        m.allocation_root = allocation_root;
+        m.committed = 0;
+        m.total = total;
+        p.reserved = add(p.reserved, total)?;
+        emit!(MonthlyCommitted {
+            project: p.key(),
+            period,
+            allocation_root,
+            total
+        });
+        Ok(())
+    }
+    // Anyone commits one award of a recorded allocation with its Merkle proof. The award
+    // takes the ordinary fee from the period's existing reservation.
+    // The origin PDA commits each source once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_monthly_award(
+        mut ctx: Context<CommitMonthlyAward>,
+        period: u32,
+        award_id: [u8; 32],
+        source_digest: [u8; 32],
+        actor_id: u64,
+        gross: u64,
+        index: u32,
+        count: u32,
+        proof: Vec<AllocationNode>,
+    ) -> Result<()> {
+        let _ = period;
+        // An admitted month is already funded. Later opt-out or cap changes
+        // affect new admissions, never these reserved obligations.
+        let leaf = AllocationNode {
+            hash: monthly_leaf(actor_id, gross, &source_digest),
+            total: gross,
+        };
+        let root = merkle_sum_root(leaf, index, count, &proof)?;
+        require!(
+            root.hash == ctx.accounts.month.allocation_root
+                && root.total == ctx.accounts.month.total,
+            EscrowError::InvalidAllocationProof
+        );
+        let committed = add(ctx.accounts.month.committed, gross)?;
+        require!(
+            committed <= ctx.accounts.month.total,
+            EscrowError::MonthlyCapExceeded
+        );
+        ctx.accounts.month.committed = committed;
+        let a = &mut ctx.accounts;
+        // Move an existing reservation into an obligation. The common commit
+        // path adds it back; any failure rolls back the complete instruction.
+        a.project.reserved = a
+            .project
+            .reserved
+            .checked_sub(gross)
+            .ok_or(error!(EscrowError::Arithmetic))?;
+        commit_with_fee(
+            &mut a.project,
+            &a.vault,
+            &mut a.origin,
+            &mut a.obligation,
+            award_id,
+            source_digest,
+            actor_id,
+            gross,
+            fee_for(gross),
+        )
     }
 
     // The attester and the destination keypair both sign this exact transaction, including
@@ -400,7 +510,8 @@ pub mod slop_escrow {
                     == get_associated_token_address(&destination, &ctx.accounts.mint.key()),
             EscrowError::WrongDestination
         );
-        let seeds: &[&[u8]] = &[b"project", p.owner.as_ref(), &p.project_id, &[p.bump]];
+        let (purpose, bump) = ([p.purpose as u8], [p.bump]);
+        let seeds: &[&[u8]] = &[b"project", p.owner.as_ref(), &p.project_id, &purpose, &bump];
         send(
             &ctx.accounts.token_program,
             &ctx.accounts.vault,
@@ -451,7 +562,8 @@ pub mod slop_escrow {
         );
         let fee = fee_for(gross);
         let returned = gross.checked_sub(fee).ok_or(EscrowError::Arithmetic)?;
-        let seeds: &[&[u8]] = &[b"project", p.owner.as_ref(), &p.project_id, &[p.bump]];
+        let (purpose, bump) = ([p.purpose as u8], [p.bump]);
+        let seeds: &[&[u8]] = &[b"project", p.owner.as_ref(), &p.project_id, &purpose, &bump];
         send(
             &ctx.accounts.token_program,
             &ctx.accounts.vault,
@@ -481,52 +593,17 @@ pub mod slop_escrow {
         });
         Ok(())
     }
-    // PAY-10: the owner pays one Slopbot invoice from free sponsor funds. The
-    // `service` PDA makes each invoice digest chargeable exactly once.
-    pub fn charge_service(
-        ctx: Context<ChargeService>,
-        amount: u64,
-        invoice_digest: [u8; 32],
-    ) -> Result<()> {
-        require!(
-            amount > 0 && invoice_digest != [0u8; 32],
-            EscrowError::InvalidAmount
-        );
-        let p = &ctx.accounts.project;
-        require!(
-            ctx.accounts.vault.amount >= add(p.reserved, amount)? && free(p)? >= amount,
-            EscrowError::InsufficientFreeBalance
-        );
-        let seeds: &[&[u8]] = &[b"project", p.owner.as_ref(), &p.project_id, &[p.bump]];
-        send(
-            &ctx.accounts.token_program,
-            &ctx.accounts.vault,
-            &ctx.accounts.fee_account,
-            &ctx.accounts.mint,
-            p,
-            seeds,
-            amount,
-        )?;
-        let p = &mut ctx.accounts.project;
-        p.service_fees = add(p.service_fees, amount)?;
-        let c = &mut ctx.accounts.charge;
-        c.project = p.key();
-        c.invoice_digest = invoice_digest;
-        c.amount = amount;
-        emit!(ServiceCharged {
-            project: p.key(),
-            invoice_digest,
-            amount
-        });
-        Ok(())
-    }
 }
 /// The only valid award ID for a source in this project.
 pub fn award_id_for(project: &Pubkey, source_digest: &[u8; 32]) -> [u8; 32] {
     hashv(&[b"slop-escrow-award", project.as_ref(), source_digest]).to_bytes()
 }
+#[allow(clippy::too_many_arguments)]
 fn commit_with_fee(
-    ctx: Context<Commit>,
+    p: &mut Account<Project>,
+    vault: &Account<TokenAccount>,
+    origin: &mut Account<Origin>,
+    a: &mut Account<Obligation>,
     award_id: [u8; 32],
     source_digest: [u8; 32],
     actor_id: u64,
@@ -536,22 +613,20 @@ fn commit_with_fee(
     require!(gross > 0 && actor_id > 0, EscrowError::InvalidAmount);
     // Binding the project to the ID stops another project from claiming it first.
     require!(
-        award_id == award_id_for(&ctx.accounts.project.key(), &source_digest),
+        award_id == award_id_for(&p.key(), &source_digest),
         EscrowError::InvalidAward
     );
     let principal = gross - fee;
     let reserve = gross;
-    let p = &mut ctx.accounts.project;
     require!(
-        ctx.accounts.vault.amount >= add(p.reserved, reserve)? && free(p)? >= reserve,
+        vault.amount >= add(p.reserved, reserve)? && free(p)? >= reserve,
         EscrowError::InsufficientFreeBalance
     );
     p.reserved = add(p.reserved, reserve)?;
-    let a = &mut ctx.accounts.obligation;
     a.project = p.key();
     a.award_id = award_id;
     a.source_digest = source_digest;
-    ctx.accounts.origin.obligation = a.key();
+    origin.obligation = a.key();
     a.actor_id = actor_id;
     a.gross = gross;
     a.principal = principal;
@@ -566,6 +641,146 @@ fn commit_with_fee(
         principal,
         fee
     });
+    Ok(())
+}
+
+/// The bytes the identity authority signs for one period's allocation of one project.
+pub fn monthly_message(
+    program_id: &Pubkey,
+    project: &Pubkey,
+    period: u32,
+    allocation_root: &[u8; 32],
+    total: u64,
+    network: &[u8; 32],
+) -> Vec<u8> {
+    [
+        MONTHLY_MESSAGE_PREFIX,
+        program_id.as_ref(),
+        project.as_ref(),
+        &period.to_le_bytes(),
+        allocation_root,
+        &total.to_le_bytes(),
+        network,
+    ]
+    .concat()
+}
+/// A leaf of the allocation tree: sha256(0x00, actor ID LE, gross LE, source digest).
+pub fn monthly_leaf(actor_id: u64, gross: u64, source_digest: &[u8; 32]) -> [u8; 32] {
+    hashv(&[
+        &[0u8],
+        &actor_id.to_le_bytes(),
+        &gross.to_le_bytes(),
+        source_digest,
+    ])
+    .to_bytes()
+}
+/// Each sibling authenticates both its digest and aggregate gross amount.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq)]
+pub struct AllocationNode {
+    pub hash: [u8; 32],
+    pub total: u64,
+}
+fn sum_node(left: AllocationNode, right: AllocationNode) -> Result<AllocationNode> {
+    Ok(AllocationNode {
+        hash: hashv(&[
+            &[1u8],
+            &left.hash,
+            &left.total.to_le_bytes(),
+            &right.hash,
+            &right.total.to_le_bytes(),
+        ])
+        .to_bytes(),
+        total: add(left.total, right.total)?,
+    })
+}
+fn merkle_sum_root(
+    leaf: AllocationNode,
+    index: u32,
+    count: u32,
+    proof: &[AllocationNode],
+) -> Result<AllocationNode> {
+    require!(index < count, EscrowError::InvalidAllocationProof);
+    let (mut node, mut index, mut width) = (leaf, index, count);
+    let mut siblings = proof.iter();
+    while width > 1 {
+        if index % 2 == 1 || index + 1 < width {
+            let sibling = *siblings
+                .next()
+                .ok_or(error!(EscrowError::InvalidAllocationProof))?;
+            node = if index % 2 == 1 {
+                sum_node(sibling, node)?
+            } else {
+                sum_node(node, sibling)?
+            };
+        }
+        index /= 2;
+        width = width.div_ceil(2);
+    }
+    require!(
+        siblings.next().is_none(),
+        EscrowError::InvalidAllocationProof
+    );
+    Ok(node)
+}
+/// When a period (YYYYMM, UTC, year 2000 to 9999) may be recorded: from the cutoff delay after
+/// the month ends until the cutoff delay after the next month ends. Only one period is open at
+/// a time, so a stolen authority key can commit at most one cap per month.
+fn monthly_window(period: u32) -> Result<(i64, i64)> {
+    let (year, month) = ((period / 100) as i64, (period % 100) as i64);
+    require!(
+        (2000..=9999).contains(&year) && (1..=12).contains(&month),
+        EscrowError::InvalidPeriod
+    );
+    let next = |(y, m): (i64, i64)| if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+    let first = next((year, month));
+    let second = next(first);
+    Ok((
+        month_start(first.0, first.1) + MONTHLY_CUTOFF_DELAY,
+        month_start(second.0, second.1) + MONTHLY_CUTOFF_DELAY,
+    ))
+}
+/// Unix time of 00:00 UTC on the first day of a month (proleptic Gregorian, days from civil).
+fn month_start(year: i64, month: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y / 400;
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    (era * 146_097 + day_of_era - 719_468) * 86_400
+}
+/// Requires that the instruction just before the current one is an Ed25519 program check of
+/// exactly one signature by `signer` over exactly `message`, with every offset inside that
+/// instruction's own data. The Ed25519 program fails the transaction if the signature is bad.
+fn verify_attestation(
+    instructions: &UncheckedAccount,
+    signer: &Pubkey,
+    message: &[u8],
+) -> Result<()> {
+    let info = instructions.to_account_info();
+    let current = load_current_index_checked(&info)?;
+    require!(current > 0, EscrowError::InvalidAttestation);
+    let check = load_instruction_at_checked(current as usize - 1, &info)?;
+    let data = &check.data;
+    require!(
+        check.program_id == ED25519_PROGRAM
+            && check.accounts.is_empty()
+            && data.len() >= 16
+            && data[0] == 1,
+        EscrowError::InvalidAttestation
+    );
+    let field = |at: usize| u16::from_le_bytes([data[at], data[at + 1]]) as usize;
+    // Offsets: signature, its instruction, public key, its instruction, message, size, its instruction.
+    let (public_key, message_at, size) = (field(6), field(10), field(12));
+    require!(
+        field(4) == u16::MAX as usize
+            && field(8) == u16::MAX as usize
+            && field(14) == u16::MAX as usize
+            && public_key + 32 <= data.len()
+            && message_at + size <= data.len()
+            && &data[public_key..public_key + 32] == signer.as_ref()
+            && &data[message_at..message_at + size] == message,
+        EscrowError::InvalidAttestation
+    );
     Ok(())
 }
 
@@ -596,7 +811,6 @@ fn free(p: &Project) -> Result<u64> {
         .checked_sub(p.paid)
         .and_then(|n| n.checked_sub(p.payout_fees))
         .and_then(|n| n.checked_sub(p.withdrawn_gross))
-        .and_then(|n| n.checked_sub(p.service_fees))
         .and_then(|n| n.checked_sub(p.reserved))
         .ok_or(error!(EscrowError::Arithmetic))
 }
@@ -645,11 +859,13 @@ pub struct InitializeConfig<'info> {
     pub system_program: Program<'info, System>,
 }
 #[derive(Accounts)]
-#[instruction(project_id:[u8;32])]
+#[instruction(project_id:[u8;32],network:[u8;32],identity_authority:Pubkey,fee_recipient:Pubkey,binding_delay:i64,rotation_delay:i64,purpose:Purpose)]
 pub struct Initialize<'info> {
     #[account(mut)]
     pub owner: Signer<'info>,
-    #[account(init,payer=owner,space=8+Project::INIT_SPACE,seeds=[b"project",owner.key().as_ref(),&project_id],bump)]
+    /// One project per owner, project ID and purpose, so ordinary awards and private bounties
+    /// never share a vault.
+    #[account(init,payer=owner,space=8+Project::INIT_SPACE,seeds=[b"project",owner.key().as_ref(),&project_id,&[purpose as u8]],bump)]
     pub project: Box<Account<'info, Project>>,
     /// Any classic SPL Token mint, with any decimals. `Account<Mint>` requires the classic
     /// token program as owner, so Token-2022 mints are rejected.
@@ -685,6 +901,48 @@ pub struct Commit<'info> {
     #[account(init,payer=owner,space=8+Origin::INIT_SPACE,seeds=[b"origin",project.key().as_ref(),&source_digest],bump)]
     pub origin: Account<'info, Origin>,
     #[account(init,payer=owner,space=8+Obligation::INIT_SPACE,seeds=[b"award",project.key().as_ref(),&award_id],bump)]
+    pub obligation: Box<Account<'info, Obligation>>,
+    pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)]
+pub struct SetMonthlyCommitment<'info> {
+    pub owner: Signer<'info>,
+    #[account(mut,has_one=owner)]
+    pub project: Box<Account<'info, Project>>,
+}
+#[derive(Accounts)]
+#[instruction(period:u32)]
+pub struct CommitMonthly<'info> {
+    /// Anyone; pays the period account's rent.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut)]
+    pub project: Box<Account<'info, Project>>,
+    #[account(seeds=[b"vault",project.key().as_ref()],bump,constraint=vault.mint==project.mint,token::authority=project)]
+    pub vault: Account<'info, TokenAccount>,
+    /// One per project and period, so a period commits once.
+    #[account(init,payer=payer,space=8+MonthlyAllocation::INIT_SPACE,seeds=[b"month",project.key().as_ref(),&period.to_le_bytes()],bump)]
+    pub month: Box<Account<'info, MonthlyAllocation>>,
+    /// CHECK: the instructions sysvar, read for the Ed25519 signature check.
+    #[account(address=anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions: UncheckedAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+#[derive(Accounts)]
+#[instruction(period:u32, award_id:[u8;32], source_digest:[u8;32])]
+pub struct CommitMonthlyAward<'info> {
+    /// Anyone; pays the award accounts' rent.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(mut)]
+    pub project: Box<Account<'info, Project>>,
+    #[account(seeds=[b"vault",project.key().as_ref()],bump,constraint=vault.mint==project.mint,token::authority=project)]
+    pub vault: Account<'info, TokenAccount>,
+    #[account(mut,has_one=project,seeds=[b"month",project.key().as_ref(),&period.to_le_bytes()],bump)]
+    pub month: Box<Account<'info, MonthlyAllocation>>,
+    #[account(init,payer=payer,space=8+Origin::INIT_SPACE,seeds=[b"origin",project.key().as_ref(),&source_digest],bump)]
+    pub origin: Account<'info, Origin>,
+    #[account(init,payer=payer,space=8+Obligation::INIT_SPACE,seeds=[b"award",project.key().as_ref(),&award_id],bump)]
     pub obligation: Box<Account<'info, Obligation>>,
     pub system_program: Program<'info, System>,
 }
@@ -741,16 +999,6 @@ pub struct Pay<'info> {
     pub veto: UncheckedAccount<'info>,
 }
 #[derive(Accounts)]
-pub struct MigrateProject<'info> {
-    #[account(mut)]
-    pub owner: Signer<'info>,
-    /// CHECK: a legacy-size Project account owned by this program; the handler checks its size,
-    /// discriminator and stored owner before it grows the account.
-    #[account(mut,owner=crate::ID @ EscrowError::NotLegacyProject)]
-    pub project: UncheckedAccount<'info>,
-    pub system_program: Program<'info, System>,
-}
-#[derive(Accounts)]
 pub struct ProposeAuthorityRotation<'info> {
     pub owner: Signer<'info>,
     #[account(mut,has_one=owner)]
@@ -787,23 +1035,6 @@ pub struct Withdraw<'info> {
     pub fee_account: Account<'info, TokenAccount>,
     pub token_program: Program<'info, Token>,
 }
-#[derive(Accounts)]
-#[instruction(amount:u64, invoice_digest:[u8;32])]
-pub struct ChargeService<'info> {
-    #[account(mut)]
-    pub owner: Signer<'info>,
-    #[account(mut,has_one=owner,has_one=mint)]
-    pub project: Box<Account<'info, Project>>,
-    pub mint: Account<'info, Mint>,
-    #[account(mut,seeds=[b"vault",project.key().as_ref()],bump,token::mint=mint,token::authority=project)]
-    pub vault: Account<'info, TokenAccount>,
-    #[account(mut,token::mint=mint,constraint=fee_account.owner==project.fee_recipient,constraint=fee_account.key()!=vault.key())]
-    pub fee_account: Account<'info, TokenAccount>,
-    #[account(init,payer=owner,space=8+ServiceCharge::INIT_SPACE,seeds=[b"service",project.key().as_ref(),&invoice_digest],bump)]
-    pub charge: Account<'info, ServiceCharge>,
-    pub token_program: Program<'info, Token>,
-    pub system_program: Program<'info, System>,
-}
 #[account]
 #[derive(InitSpace)]
 pub struct Project {
@@ -821,13 +1052,31 @@ pub struct Project {
     pub withdrawal_fees: u64,
     pub bump: u8,
     pub binding_delay: i64,
-    pub service_fees: u64,
-    /// Fields after this point were added with the authority rotation; `migrate_project` grows
-    /// accounts created without them.
     pub pending_identity_authority: Pubkey,
     pub rotation_effective_at: i64,
     pub rotation_confirmed: bool,
     pub rotation_delay: i64,
+    pub purpose: Purpose,
+    /// The most a period's monthly awards may commit in gross, and whether anyone may record
+    /// and commit them. Only the owner sets them.
+    pub monthly_cap: u64,
+    pub monthly_enabled: bool,
+}
+/// What a project holds funds for. It is part of the project PDA seeds.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum Purpose {
+    Ordinary,
+    Bounty,
+}
+/// One period's recorded allocation root and the gross committed from it so far.
+#[account]
+#[derive(InitSpace)]
+pub struct MonthlyAllocation {
+    pub project: Pubkey,
+    pub period: u32,
+    pub allocation_root: [u8; 32],
+    pub committed: u64,
+    pub total: u64,
 }
 /// The deployment-wide identity authority and fee recipient, written once by
 /// `initialize_config` and never changed.
@@ -837,13 +1086,6 @@ pub struct Config {
     pub identity_authority: Pubkey,
     pub fee_recipient: Pubkey,
     pub bump: u8,
-}
-#[account]
-#[derive(InitSpace)]
-pub struct ServiceCharge {
-    pub project: Pubkey,
-    pub invoice_digest: [u8; 32],
-    pub amount: u64,
 }
 #[account]
 #[derive(InitSpace)]
@@ -879,9 +1121,17 @@ pub struct WalletBinding {
 #[derive(InitSpace)]
 pub struct BindingVeto {}
 #[event]
-pub struct ProjectMigrated {
+pub struct MonthlyCommitmentSet {
     pub project: Pubkey,
-    pub rotation_delay: i64,
+    pub cap: u64,
+    pub enabled: bool,
+}
+#[event]
+pub struct MonthlyCommitted {
+    pub project: Pubkey,
+    pub period: u32,
+    pub allocation_root: [u8; 32],
+    pub total: u64,
 }
 #[event]
 pub struct AuthorityRotationProposed {
@@ -939,12 +1189,6 @@ pub struct AwardPaid {
     pub fee: u64,
     pub destination: Pubkey,
     pub wallet_version: u64,
-}
-#[event]
-pub struct ServiceCharged {
-    pub project: Pubkey,
-    pub invoice_digest: [u8; 32],
-    pub amount: u64,
 }
 #[event]
 pub struct UnusedWithdrawn {
@@ -1010,12 +1254,24 @@ pub enum EscrowError {
     RotationUnconfirmed,
     #[msg("The rotation delay has not passed")]
     RotationNotReady,
-    #[msg("Account is not a legacy-size project of this program")]
-    NotLegacyProject,
     #[msg("Identity authority or fee recipient differs from the pinned Config")]
     ConfigMismatch,
     #[msg("Only the program upgrade authority can initialize the Config")]
     NotUpgradeAuthority,
+    #[msg("This instruction does not apply to the project's purpose")]
+    WrongPurpose,
+    #[msg("The owner has turned monthly commitments off")]
+    MonthlyDisabled,
+    #[msg("Period must be YYYYMM with year 2000 to 9999")]
+    InvalidPeriod,
+    #[msg("The period's monthly window is not open")]
+    MonthlyWindowClosed,
+    #[msg("The identity authority did not sign this allocation")]
+    InvalidAttestation,
+    #[msg("Award is not in the recorded allocation")]
+    InvalidAllocationProof,
+    #[msg("Monthly awards would exceed the owner's monthly cap")]
+    MonthlyCapExceeded,
 }
 
 #[account]
@@ -1040,6 +1296,51 @@ mod tests {
         assert!(valid_rotation_delay(3600));
         assert!(valid_rotation_delay(90 * 86400));
         assert!(!valid_rotation_delay(90 * 86400 + 1));
+    }
+    #[test]
+    fn monthly_window_is_the_utc_month_plus_72_hours() {
+        // November 2026 opens at 00:00 UTC on 4 December 2026 and closes on 4 January 2027.
+        assert_eq!(
+            monthly_window(202611).unwrap(),
+            (1_796_342_400, 1_799_020_800)
+        );
+        assert_eq!(monthly_window(202612).unwrap().0, 1_799_020_800);
+        // February 2028 has 29 days.
+        assert_eq!(monthly_window(202802).unwrap().0, 1_835_740_800);
+        for invalid in [202600, 202613, 199912, 1_000_001] {
+            assert!(monthly_window(invalid).is_err());
+        }
+    }
+    #[test]
+    fn merkle_proofs_match_the_documented_tree() {
+        let leaves: Vec<AllocationNode> = (1..=3u64)
+            .map(|i| AllocationNode {
+                hash: monthly_leaf(i, i * 10, &[i as u8; 32]),
+                total: i * 10,
+            })
+            .collect();
+        let node = |l: &AllocationNode, r: &AllocationNode| sum_node(*l, *r).unwrap();
+        let left = node(&leaves[0], &leaves[1]);
+        let root = node(&left, &leaves[2]);
+        assert_eq!(
+            merkle_sum_root(leaves[0], 0, 3, &[leaves[1], leaves[2]]).unwrap(),
+            root
+        );
+        assert_eq!(
+            merkle_sum_root(leaves[1], 1, 3, &[leaves[0], leaves[2]]).unwrap(),
+            root
+        );
+        // The odd last leaf moves up and needs only the left subtree.
+        assert_eq!(merkle_sum_root(leaves[2], 2, 3, &[left]).unwrap(), root);
+        // A wrong index and extra or missing proof elements fail.
+        assert_ne!(
+            merkle_sum_root(leaves[0], 1, 3, &[leaves[1], leaves[2]]).unwrap(),
+            root
+        );
+        assert!(merkle_sum_root(leaves[2], 2, 3, &[left, left]).is_err());
+        assert!(merkle_sum_root(leaves[0], 0, 3, &[leaves[1]]).is_err());
+        assert!(merkle_sum_root(leaves[0], 3, 3, &[]).is_err());
+        assert_eq!(merkle_sum_root(leaves[0], 0, 1, &[]).unwrap(), leaves[0]);
     }
     #[test]
     fn fee_is_two_percent_per_award_or_withdrawal() {
