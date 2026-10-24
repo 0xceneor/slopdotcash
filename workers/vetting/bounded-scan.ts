@@ -636,6 +636,10 @@ export function composeScanResult(input: {
   };
   if (inspection.dependencyLocks.length > 200)
     result.visibilityGaps.push("More than 200 dependency locks");
+  if (inspection.findings.length > 200)
+    result.visibilityGaps.push("More than 200 scan findings");
+  if (inspection.artifacts.length > 500)
+    result.visibilityGaps.push("More than 500 scan artifacts");
   if (input.confirmation) {
     result.disposition = "malicious";
     result.confirmation = input.confirmation;
