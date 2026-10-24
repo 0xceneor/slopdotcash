@@ -660,7 +660,7 @@ async function currentAuthority(
 
 function requireAuthority(authority: SetupAuthority): void {
   if (authority.state === "retry")
-    fail(503, "github_unavailable", authority.message);
+    throw new GithubLookupError(503, "github_unavailable", authority.message);
   if (authority.state === "denied")
     fail(403, "authority_required", authority.message);
 }
