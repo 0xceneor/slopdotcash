@@ -11,8 +11,8 @@ import { CloudflareProjectPersistence } from "../backend/projects/cloudflare-per
 import type { RepositoryControl } from "../backend/projects/contracts";
 import {
   handleProjectApi,
-  refreshProjectSetup,
   type ProjectApiDependencies,
+  refreshProjectSetup,
 } from "../backend/projects/handler";
 import type { ScanRequest } from "../backend/projects/setup";
 import { TokenMetadataError } from "../backend/projects/token-metadata";

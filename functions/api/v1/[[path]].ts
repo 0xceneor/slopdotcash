@@ -35,8 +35,8 @@ import { publicRestrictionOf } from "../../../backend/projects/enforcement";
 import { githubApiOrigin } from "../../../backend/projects/github-lookup";
 import {
   handleProjectApi,
-  refreshProjectSetup,
   type ProjectApiDependencies,
+  refreshProjectSetup,
 } from "../../../backend/projects/handler";
 import {
   parseRepositoryAccess,
