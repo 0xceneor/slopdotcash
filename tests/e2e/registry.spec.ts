@@ -1145,7 +1145,9 @@ test("an owner installs Slopbot before creation and resumes setup; a failed scan
   await expect(
     page.getByRole("status").filter({ hasText: "Published revision 2" }),
   ).toBeVisible();
-  expect(errors).toEqual([]);
+  // The only console error so far is the refused creation before install.
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain("409");
 
   // Permission loss: Slopbot now reads only read access. The setup status
   // names the next action, and the owner cannot publish another change.
