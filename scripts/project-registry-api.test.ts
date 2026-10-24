@@ -26,6 +26,7 @@ import { vettingScanRequester } from "../backend/projects/setup";
 import type { SkillTemplateIndex } from "../backend/projects/skill-publication";
 import { handleProjectArtifactRequest } from "../backend/projects/skill-publication";
 import { TokenMetadataError } from "../backend/projects/token-metadata";
+import { seedParticipationBan } from "../backend/security/participation-ban.fixture";
 import { readSecurityProgramFunds } from "../backend/security/program-funds";
 import {
   CloudflareVettingPersistence,
@@ -646,6 +647,24 @@ describe("project registry API", () => {
       (await change({ ...program, settlement, status: "closed" })).status,
     ).toBe(200);
     expect((await change(undefined)).status).toBe(422);
+    // A later account restriction stops new registration, but does not hide
+    // the owner's existing funded state or prevent its read-only recovery.
+    deps.now = () => new Date(observedAt);
+    seedParticipationBan(sqlite, APPLICANT, ADMIN, observedAt);
+    const restrictedRead = await call("GET", privatePath, "applicant");
+    expect(restrictedRead.status).toBe(200);
+    expect(await restrictedRead.json()).toMatchObject({
+      canSetup: false,
+      funds: { availableMinor: "2000000" },
+    });
+    const restrictedWrite = await call(
+      "POST",
+      "project-vaults/open-registry",
+      "applicant",
+      registration,
+    );
+    expect(restrictedWrite.status).toBe(403);
+    expect((await restrictedWrite.json()).error).toBe("maintainer_banned");
   });
 
   test("reads token decimals from chain once, stores the amount in base units and keeps them on later revisions", async () => {
