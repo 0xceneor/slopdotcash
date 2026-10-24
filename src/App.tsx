@@ -3019,7 +3019,20 @@ function AppContent({ route }: { route: Route }) {
     content = project ? (
       <ProjectPage project={project} retry={retry} state={state} />
     ) : (
-      <NotFound title="Project not found" />
+      <main className="shell route-main">
+        <h1>Project not found</h1>
+        <p>
+          This project is not available in the public registry. If you flagged
+          it, sign in to view or withdraw your own flag.
+        </p>
+        <ProjectRiskFlag
+          key={`flag:${route.projectId}`}
+          projectId={route.projectId ?? ""}
+        />
+        <p>
+          <Link href="/">See open projects</Link>
+        </p>
+      </main>
     );
   } else if (route.kind === "funding-project") {
     const project = findProject(route.projectId ?? "");
