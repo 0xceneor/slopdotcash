@@ -480,6 +480,9 @@ export function inspectRepository(input: {
     JSON.stringify({
       schemaVersion: INVENTORY_SCHEMA,
       items,
+      // Binary and archive bytes are not text items. Bind their digests so
+      // adding or changing quarantined content invalidates clean scan reuse.
+      artifacts,
       visibilityGaps: gaps,
     }),
   );
