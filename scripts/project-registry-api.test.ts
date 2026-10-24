@@ -111,10 +111,7 @@ beforeEach(async () => {
   cache = new MemoryCache();
   tokenReads = [];
   githubReads = [];
-  control = () => ({
-    state: "unproven",
-    reason: "@e2e-applicant is not a public member of example",
-  });
+  control = () => ({ state: "matched" });
   access = { installation: "missing" };
   scanService = false;
   let id = 0;
@@ -260,17 +257,21 @@ async function seedHistoricalResult(
   return id;
 }
 
-/** Creates a project through self-service setup as an owner GitHub proves. */
+const ADMIN_ACCESS: RepositoryAccess = {
+  installation: "installed",
+  installationId: 7,
+  permission: "admin",
+  roleName: "admin",
+};
+
+/** Creates a project as an owner whose admin access Slopbot reads. */
 async function create(manifest: unknown, extra: Record<string, unknown> = {}) {
-  const previous = control;
-  control = () => ({
-    state: "proven",
-    reason: "@e2e-applicant is a public member of example",
-  });
+  const previous = access;
+  access = ADMIN_ACCESS;
   try {
     return await call("POST", "projects", "applicant", { manifest, ...extra });
   } finally {
-    control = previous;
+    access = previous;
   }
 }
 
@@ -318,10 +319,7 @@ describe("project registry API", () => {
   });
 
   test("an owner revision publishes at once and appends only its expected revision", async () => {
-    control = () => ({
-      state: "proven",
-      reason: "@e2e-applicant is a public member of example",
-    });
+    access = ADMIN_ACCESS;
     await listProject();
     const current = await persistence.getProject("open-registry");
     if (!current) throw new Error("Missing listed project");
@@ -375,10 +373,7 @@ describe("project registry API", () => {
     });
     expect((await unchanged.json()).error).toBe("no_change");
     // Without current authority nothing is published.
-    control = () => ({
-      state: "unproven",
-      reason: "@e2e-applicant is not a public member of example",
-    });
+    access = { ...ADMIN_ACCESS, permission: "read", roleName: "read" };
     const denied = await call("PUT", "projects/open-registry", "applicant", {
       manifest: { ...manifest, headline: "A change without authority" },
       expectedRevision: 2,
@@ -399,8 +394,8 @@ describe("project registry API", () => {
     expect((await persistence.getProject("open-registry"))?.revision).toBe(2);
   });
 
-  test("reads token decimals from chain once and keeps them on later revisions", async () => {
-    await listProject(
+  test("reads token decimals from chain once, stores the amount in base units and keeps them on later revisions", async () => {
+    const created = await create(
       applicationManifest("open-registry", "example/open-registry", {
         rewardAsset: {
           network: "base",
@@ -415,8 +410,18 @@ describe("project registry API", () => {
           currency: "OPN",
         },
       }),
+      // Whole token units; the server converts with the decimals it reads.
+      { monthlyAmount: "1000.5" },
     );
+    expect(created.status).toBe(201);
     expect(tokenReads).toEqual([`base:${TOKEN}`]);
+    // Owner decision D11: 1,000.5 tokens of 18 decimals, never dollars.
+    expect(
+      (await persistence.getProject("open-registry"))?.manifest.reward,
+    ).toMatchObject({
+      monthlyCapMinor: "1000500000000000000000",
+      monthlyCapDisplay: "1,000.5 OPEN",
+    });
     const project = await persistence.getProject("open-registry");
     expect(project?.manifest.rewardAsset).toEqual({
       network: "base",
@@ -536,14 +541,17 @@ describe("project registry API", () => {
       error: "invalid_manifest",
       message: "Repository or steward facts do not match GitHub",
     });
-    // Unproven public facts and no installation: install Slopbot first.
-    control = () => ({
-      state: "unproven",
-      reason: "@e2e-applicant is not a public member of example",
+    // Matching public facts without the installation create nothing:
+    // install Slopbot first (owner decision D11).
+    control = () => ({ state: "matched" });
+    const uninstalled = await call("POST", "projects", "applicant", {
+      manifest,
     });
-    const unproven = await call("POST", "projects", "applicant", { manifest });
-    expect(unproven.status).toBe(403);
-    expect((await unproven.json()).message).toContain("Install Slopbot");
+    expect(uninstalled.status).toBe(409);
+    expect(await uninstalled.json()).toMatchObject({
+      error: "slopbot_required",
+      message: expect.stringContaining("Install Slopbot"),
+    });
     // The installation is authoritative: read access is not enough.
     access = {
       installation: "installed",
@@ -563,7 +571,9 @@ describe("project registry API", () => {
     expect(retry.status).toBe(503);
     expect((await retry.json()).error).toBe("github_unavailable");
     expect(await persistence.listProjects()).toEqual([]);
-    // Maintain access read through the installation creates the project.
+    // Once GitHub answers again, maintain access read through the
+    // installation creates the project.
+    deps.repositoryControl = async () => ({ state: "matched" });
     access = {
       installation: "installed",
       installationId: 7,
@@ -576,7 +586,6 @@ describe("project registry API", () => {
     expect(body.project).toMatchObject({ id: "open-registry", revision: 1 });
     expect(body.setup.checks.authority).toEqual({
       state: "verified",
-      basis: "installation",
       message: "@e2e-applicant has maintain access to example/open-registry.",
     });
     const revisions = sqlite

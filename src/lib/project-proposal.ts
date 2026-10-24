@@ -6,6 +6,7 @@ import {
   validRepositoryPath,
 } from "./project-contracts";
 import {
+  formatAssetAmount,
   formatMonthlyCapDisplay,
   MAX_MONTHLY_CAP_MINOR,
   MAX_PROJECT_ID_LENGTH,
@@ -105,17 +106,16 @@ export function monthlyPoolValue(value: string): {
 }
 
 /**
- * A monthly amount in the reward asset, from the manifest's cent-precise
- * integer units, without floating point and without a dollar sign: the
- * asset is the unit (PRD section 6, "never present tokens as dollars").
+ * A monthly amount in the reward asset, from its integer base units, without
+ * floating point and without a dollar sign: the asset is the unit (PRD
+ * section 6, "never present tokens as dollars").
  */
-export function formatMonthlyAmount(minor: string, symbol: string): string {
-  const amount = BigInt(minor);
-  const whole = (amount / 1_000_000n)
-    .toString()
-    .replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
-  const cents = (amount % 1_000_000n) / 10_000n;
-  return `${whole}${cents === 0n ? "" : `.${cents.toString().padStart(2, "0")}`} ${symbol}`;
+export function formatMonthlyAmount(
+  minor: string,
+  decimals: number,
+  symbol: string,
+): string {
+  return `${formatAssetAmount(minor, decimals)} ${symbol}`;
 }
 
 /** The one optional funding choice of project setup. */
@@ -134,7 +134,8 @@ export type FundingChoice = {
  * so the network and asset are chosen only when the owner adds funding; a
  * vault's network cannot change once set. A monthly amount names one network
  * and one asset, with the vault policy of that network when it has one. The
- * server verifies the asset and reads its decimals.
+ * server verifies the asset, reads its decimals and stores the amount, sent
+ * separately as `monthlyAmount`, in the asset's base units.
  */
 export function rewardFields(
   choice: FundingChoice,
@@ -174,7 +175,12 @@ export function rewardFields(
           symbol: network.stablecoin.symbol,
         };
   const escrow = isEscrowChain(choice.network);
-  const amount = monthlyPoolValue(choice.monthlyAmount);
+  // A stablecoin has 6 decimals, so its base units are known here. A token's
+  // decimals are read from chain on save; until then its amount is zero.
+  const amount =
+    choice.assetKind === "token"
+      ? { minor: "0", display: `0 ${asset.symbol}` }
+      : monthlyPoolValue(choice.monthlyAmount);
   return {
     ...(escrow
       ? {

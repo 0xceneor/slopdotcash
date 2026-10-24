@@ -11,7 +11,9 @@ import { classifyRevisionChanges } from "../../src/lib/project-revision-changes"
 import {
   assertProjectDefinition,
   assertProjectRegistry,
+  monthlyAmountDisplay,
   PROJECT_SKILL_TEMPLATES,
+  parseAssetAmount,
 } from "../../src/lib/project-schema.mjs";
 import { publishesGeneratedSkills } from "../../src/lib/project-skill.mjs";
 import type { ProjectDefinition } from "../../src/lib/projects.mjs";
@@ -101,10 +103,9 @@ export type ProjectApiDependencies = {
     throughRevision: number,
     forReinstatement?: boolean,
   ) => Promise<VettingClearance>;
-  /** Public GitHub facts: repository identity and the account's control. */
+  /** Public GitHub facts: the manifest matches its repositories and steward. */
   repositoryControl: (
     manifest: ProjectDefinition,
-    actor: GithubActor,
   ) => Promise<RepositoryControl>;
   /**
    * The Slopbot installation and the account's exact repository permission.
@@ -206,7 +207,9 @@ function assertNewProjectManifest(
       "New projects are listed in the community tier",
     ],
     [
-      storedApplication || manifest.repositories.length === 1,
+      // Slopbot reads authority for the one repository the manifest binds
+      // by id, so a project created without an admin names only that one.
+      manifest.repositories.length === 1,
       "A new project lists exactly one repository",
     ],
     [
@@ -348,17 +351,28 @@ function prospectiveFinancialChange(
       "financial_change_restricted",
       "Only the monthly amount, network and asset change through owner self-service",
     );
-  if (before.monthlyCapMinor === after.monthlyCapMinor) return next;
+  // Amounts are in the asset's base units, so an amount in the previous
+  // asset cannot carry over to a new one: the open cycle then has no pool.
+  const assetChanged =
+    !sameValue(previous.rewardAsset, next.rewardAsset) ||
+    before.chain !== after.chain ||
+    before.currency !== after.currency;
+  if (!assetChanged && before.monthlyCapMinor === after.monthlyCapMinor)
+    return next;
   const cycleId = now.toISOString().slice(0, 7);
   const caps = before.cycleCaps ?? [];
-  if (caps.some((cap) => cap.cycleId === cycleId)) return next;
+  const open = caps.find((cap) => cap.cycleId === cycleId);
+  if (!assetChanged && open !== undefined) return next;
   return {
     ...next,
     reward: {
       ...after,
       cycleCaps: [
-        ...caps,
-        { cycleId, monthlyCapMinor: before.monthlyCapMinor },
+        ...caps.filter((cap) => cap.cycleId !== cycleId),
+        {
+          cycleId,
+          monthlyCapMinor: assetChanged ? "0" : before.monthlyCapMinor,
+        },
       ].sort((left, right) => left.cycleId.localeCompare(right.cycleId)),
     },
   };
@@ -431,6 +445,41 @@ async function verifiedRewardAsset(
     ...(reward?.kind === "monthly-pool"
       ? { reward: { ...reward, chain: asset.network, currency: asset.symbol } }
       : {}),
+  };
+}
+
+/**
+ * Sets the monthly amount from `monthlyAmount`, a decimal number of whole
+ * units of the verified reward asset. The amount is stored in that asset's
+ * base units (owner decision D11), so a token amount is converted only after
+ * its decimals are read from chain. Without a reward asset, the pool is the
+ * network's reviewed 6-decimal stablecoin.
+ */
+function withMonthlyAmount(value: unknown, amount: unknown): unknown {
+  if (amount === undefined) return value;
+  const manifest =
+    typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const reward = manifest?.reward as Record<string, unknown> | undefined;
+  if (manifest === null || reward?.kind !== "monthly-pool")
+    fail(422, "invalid_manifest", "A monthly amount needs a monthly pool");
+  const asset = manifest.rewardAsset as RewardAsset | undefined;
+  let monthlyCapMinor: string;
+  let monthlyCapDisplay: string;
+  try {
+    monthlyCapMinor = parseAssetAmount(amount as string, asset?.decimals ?? 6);
+    monthlyCapDisplay = monthlyAmountDisplay(monthlyCapMinor, asset);
+  } catch (error) {
+    fail(
+      422,
+      "invalid_manifest",
+      `The monthly amount is invalid: ${error instanceof Error ? error.message : "check the amount"}`,
+    );
+  }
+  return {
+    ...manifest,
+    reward: { ...reward, monthlyCapMinor, monthlyCapDisplay },
   };
 }
 
@@ -625,22 +674,27 @@ async function resolveReferrer(
 }
 
 /**
- * The account's current authority over the manifest's repository. A
- * manifest that contradicts GitHub's repository identity is refused; an
- * unavailable GitHub or Slopbot answer means retry, never an admin task.
+ * The account's current authority over the manifest's repository, read
+ * through the Slopbot installation (owner decision D11). A manifest that
+ * contradicts GitHub's repository facts is refused; an unavailable GitHub or
+ * Slopbot answer means retry, never an admin task.
  */
 async function currentAuthority(
   deps: ProjectApiDependencies,
   manifest: ProjectDefinition,
   actor: GithubActor,
 ): Promise<{ authority: SetupAuthority; access: AccessCheck }> {
-  let control: RepositoryControl | null;
+  let control: RepositoryControl;
   try {
-    control = await deps.repositoryControl(manifest, actor);
+    control = await deps.repositoryControl(manifest);
   } catch {
-    control = null;
+    const message = "GitHub could not be checked. Try again.";
+    return {
+      authority: { state: "retry", message },
+      access: { state: "retry", message },
+    };
   }
-  if (control?.state === "mismatch")
+  if (control.state === "mismatch")
     fail(422, "invalid_manifest", control.reason);
   const access = await readRepositoryAccess(
     deps.repositoryAccess,
@@ -648,19 +702,25 @@ async function currentAuthority(
     actor,
   );
   return {
-    authority: setupAuthority(
-      control,
-      access,
-      actor,
-      manifest.repositories[0].id,
-    ),
+    authority: setupAuthority(access, actor, manifest.repositories[0].id),
     access,
   };
 }
 
-function requireAuthority(authority: SetupAuthority): void {
+/**
+ * Refuses a create, publish or revision without current authority. A
+ * missing or suspended Slopbot installation is its own refusal, so the page
+ * can link the installation.
+ */
+function requireAuthority(checked: {
+  authority: SetupAuthority;
+  access: AccessCheck;
+}): void {
+  const { authority, access } = checked;
   if (authority.state === "retry")
-    fail(503, "github_unavailable", authority.message);
+    throw new GithubLookupError(503, "github_unavailable", authority.message);
+  if (access.state === "read" && access.access.installation !== "installed")
+    fail(409, "slopbot_required", authority.message);
   if (authority.state === "denied")
     fail(403, "authority_required", authority.message);
 }
@@ -761,7 +821,6 @@ async function runSetupCheck(
     open &&
     project.status === "paused" &&
     authority.state === "verified" &&
-    authority.basis === "installation" &&
     access.state === "read" &&
     access.access.installation === "installed" &&
     clearance.state === "cleared" &&
@@ -814,9 +873,12 @@ async function createProject(
 ): Promise<Response> {
   const session = await requireSession(request, deps);
   const body = await readJsonObject(request);
-  exactKeys(body, ["manifest"], ["referrer"]);
+  exactKeys(body, ["manifest"], ["referrer", "monthlyAmount"]);
   const { manifest, text } = canonicalManifest(
-    await verifiedRewardAsset(body.manifest, undefined, deps),
+    withMonthlyAmount(
+      await verifiedRewardAsset(body.manifest, undefined, deps),
+      body.monthlyAmount,
+    ),
   );
   assertNewProjectManifest(manifest);
   assertRepositoryUnrestricted(
@@ -829,7 +891,7 @@ async function createProject(
     replaces: false,
   });
   const checked = await currentAuthority(deps, manifest, actor);
-  requireAuthority(checked.authority);
+  requireAuthority(checked);
   const created = await deps.persistence.createProject({
     manifest,
     manifestText: text,
@@ -890,7 +952,11 @@ async function publishOwnerRevision(
   const actor = stored?.actor ?? actorOf(await requireSession(request, deps));
   if (!PROJECT_ID.test(projectId)) fail(404, "not_found", "Project not found");
   const body = stored?.body ?? (await readJsonObject(request));
-  exactKeys(body, ["manifest", "expectedRevision"], ["reason"]);
+  exactKeys(
+    body,
+    ["manifest", "expectedRevision"],
+    ["reason", "monthlyAmount"],
+  );
   const expectedRevision = positiveInteger(
     body.expectedRevision,
     "expectedRevision",
@@ -921,14 +987,17 @@ async function publishOwnerRevision(
     );
   // The server decides status and listing; the owner sends content.
   const { manifest: submitted } = canonicalManifest(
-    await verifiedRewardAsset(
-      {
-        ...(body.manifest as Record<string, unknown>),
-        status: current.manifest.status,
-        listingTier: current.manifest.listingTier,
-      },
-      current.manifest.rewardAsset,
-      deps,
+    withMonthlyAmount(
+      await verifiedRewardAsset(
+        {
+          ...(body.manifest as Record<string, unknown>),
+          status: current.manifest.status,
+          listingTier: current.manifest.listingTier,
+        },
+        current.manifest.rewardAsset,
+        deps,
+      ),
+      body.monthlyAmount,
     ),
   );
   if (submitted.id !== projectId)
@@ -954,7 +1023,7 @@ async function publishOwnerRevision(
   if (changes.executable.length > 0 && manifest.status === "active")
     manifest = { ...manifest, status: "paused" };
   const checked = await currentAuthority(deps, manifest, actor);
-  requireAuthority(checked.authority);
+  requireAuthority(checked);
   const summary = [
     changes.presentation.length > 0
       ? `presentation (${changes.presentation.join(", ")}) published`
@@ -1100,7 +1169,7 @@ async function publishPendingApplication(
     { replaces: false },
   );
   const checked = await currentAuthority(deps, application.manifest, actor);
-  requireAuthority(checked.authority);
+  requireAuthority(checked);
   const result = await deps.persistence.publishApplication({
     applicationId,
     actor,

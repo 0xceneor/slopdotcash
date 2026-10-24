@@ -119,9 +119,12 @@ export async function retainedAssemblyFixture(input: {
       randomId: () =>
         `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
       sessionActor: async (request) => actorOf(request),
-      repositoryControl: async () => ({
-        state: "proven",
-        reason: "Synthetic local replay authority",
+      repositoryControl: async () => ({ state: "matched" }),
+      repositoryAccess: async () => ({
+        installation: "installed",
+        installationId: 1,
+        permission: "admin",
+        roleName: "admin",
       }),
       readTokenMetadata: async () => {
         throw new Error("Unexpected token lookup");

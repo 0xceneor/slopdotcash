@@ -47,7 +47,7 @@ function fundingText(funding: ProjectSetupStatus["funding"]): string {
   const network =
     REWARD_ASSET_NETWORKS[funding.network as keyof typeof REWARD_ASSET_NETWORKS]
       ?.name ?? funding.network;
-  return `${formatMonthlyAmount(funding.monthlyAmountMinor, funding.symbol)} per month on ${network} · ${funding.state === "committed" ? "committed in the vault" : "pledged, not yet deposited"} · payments ${funding.payments}`;
+  return `${formatMonthlyAmount(funding.monthlyAmountMinor, funding.decimals, funding.symbol)} per month on ${network} · ${funding.state === "committed" ? "committed in the vault" : "pledged, not yet deposited"} · payments ${funding.payments}`;
 }
 
 /**

@@ -97,7 +97,13 @@ function projectApi(request: Request) {
     randomId: () =>
       `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
     sessionActor: async (value) => actorOf(value),
-    repositoryControl: async () => ({ state: "proven", reason: "fixture" }),
+    repositoryControl: async () => ({ state: "matched" }),
+    repositoryAccess: async () => ({
+      installation: "installed",
+      installationId: 1,
+      permission: "admin",
+      roleName: "admin",
+    }),
     readTokenMetadata: async () => {
       throw new Error("no token reads in this suite");
     },

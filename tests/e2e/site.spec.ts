@@ -767,7 +767,6 @@ test("publishes criteria changes directly and stops a stale maintainer draft", a
     checks: {
       authority: {
         state: "verified",
-        basis: "installation",
         message: "@example has maintain access to elizaOS/eliza.",
       },
       installation: {

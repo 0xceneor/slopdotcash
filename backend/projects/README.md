@@ -83,19 +83,21 @@ serves these public artifacts from the current D1 revision:
 ## Self-service setup
 
 A project starts without routine admin approval after complete setup,
-current GitHub authority, Slopbot installation and a clean security scan
+Slopbot installation, current GitHub authority and a clean security scan
 (PRD section 4). `backend/projects/setup.ts` derives one status per project:
-the result, one next action, and the authority, installation and scan
+the result, one next action, and the installation, authority and scan
 checks. Funding is reported separately; a project works without it.
 
-- **Authority.** The manifest's repository and steward must match GitHub,
-  or the request is refused. When Slopbot is installed on the repository,
-  its installation reads the account's exact base permission
-  (`GET /repos/:owner/:repo/collaborators/:login/permission`); write
-  (which includes maintain) or admin is required. Before installation,
-  public GitHub facts (owner of a user repository, or public member of its
-  organization) let an owner create and edit the paused project.
-  Activation always needs the installation read. A failed GitHub or
+- **Authority.** The manifest's repository and steward must match public
+  GitHub facts, or the request is refused with `422 invalid_manifest`.
+  These facts never grant authority. The Slopbot installation read is the
+  one authority path (owner decision D11 of 24 October 2026): the
+  installation reads the account's exact base permission
+  (`GET /repos/:owner/:repo/collaborators/:login/permission`), and write
+  (which includes maintain) or admin is required. Create, publish and
+  revise all need it. Without an installation the request is
+  `409 slopbot_required`, and the page links the installation; with less
+  than write access it is `403 authority_required`. A failed GitHub or
   Slopbot answer is HTTP 503 `github_unavailable` or a `retry` status:
   try again, never an admin task.
 - **Installation.** The Pages Function asks the Slopbot Worker over the
@@ -111,7 +113,10 @@ checks. Funding is reported separately; a project works without it.
   revision, by status alone, when every check passes for the account that
   runs it. The revision reason records the permission, installation and
   clean scan. An unrestricted paused project that was not delisted is
-  eligible; a restriction is lifted only by its moderator path.
+  eligible; a restriction is lifted only by its moderator path. To hold a
+  project, an admin uses quarantine: a plain paused admin revision is
+  activated again by the owner's next passing setup check (owner decision
+  D11).
 
 Owner revisions (`PUT /api/v1/projects/:id`) publish at once against
 `expectedRevision`; a changed base returns `409`. The server keeps status
@@ -123,10 +128,21 @@ and listing tier, then classifies the change (`src/lib/project-revision-changes.
   `reviewSkill` never change by owner revision) pauses an active project
   and queues a new scan; a clean result reactivates it on the next setup
   check;
-- financial policy applies prospectively: a new monthly amount pins the
-  open UTC cycle to the previous amount through `reward.cycleCaps`, an
-  unfunded project may change its network and asset, a funded project
-  keeps them, and no separate review budget can be added.
+- financial policy applies from the next UTC calendar month: a new monthly
+  amount pins the open UTC cycle to the previous amount through
+  `reward.cycleCaps`, an unfunded project may change its network and asset
+  (the open cycle then has no pool, because amounts do not carry over
+  between assets), a funded project keeps them, and no separate review
+  budget can be added.
+
+Monthly amounts are stored in the reward asset's integer base units (owner
+decision D11). Every reviewed stablecoin has 6 decimals, so its base units
+are the cent-precise micro-units and its display stays in dollars. A token
+amount displays with its own symbol, for example `1,000.5 OPEN`. The setup
+form sends `monthlyAmount`, a decimal number of whole asset units, with
+`POST /api/v1/projects` and `PUT /api/v1/projects/:id`. The server converts
+it with the decimals that it reads from chain for a new token, so the
+browser never guesses a token's decimals.
 
 Steward, authority, terms, status, listing tier and other fields return
 `422 owner_field_restricted`; they stay with the admin exception path.
@@ -210,8 +226,8 @@ rate limit, and caches each answer for five minutes. The browser never calls
   cross-site form cannot submit one.
 - Admins are the GitHub actor IDs in the `ADMIN_GITHUB_IDS` Pages variable.
   Admin status is checked on every request, never stored.
-- A new project must be a paused, unverified, unfunded community project
-  with one repository, payments disabled, no funding routes or vault
+- A new project, and a stored application published by its applicant, must
+  be a paused, unverified, unfunded community project with one repository, payments disabled, no funding routes or vault
   deployments, no root skill publication, generated skills from the
   canonical templates and complete maintainer-authored `contribution`
   fields. Repository receipt authority, terms activation, listing tier and

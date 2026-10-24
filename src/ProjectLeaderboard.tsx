@@ -155,7 +155,11 @@ export function RewardValue({
   leader: ProjectContributor;
   view: ProjectView;
 }) {
-  if (leader.simulatedMinor === null) {
+  // Token amounts are in the token's base units, never dollars.
+  if (
+    leader.simulatedMinor === null ||
+    view.project.rewardAsset?.kind === "token"
+  ) {
     return (
       <>{formatPercent(leader.projectedSharePartsPerMillion ?? 0)} share</>
     );

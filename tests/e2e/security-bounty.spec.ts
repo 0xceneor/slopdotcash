@@ -146,6 +146,12 @@ async function listProject(
     },
     ...overrides,
   });
+  // Creation reads the account's access through the Slopbot installation.
+  const installed = await fetch(
+    `${GITHUB_FIXTURE}/__fixture/slopbot/${repository}/installed`,
+    { method: "PUT" },
+  );
+  expect(installed.status).toBe(204);
   const applied = await api(request, "POST", "projects", applicantToken, {
     manifest,
   });

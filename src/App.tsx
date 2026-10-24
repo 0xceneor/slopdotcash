@@ -502,9 +502,12 @@ function TypewriterHeroHeading() {
   );
 }
 
-function monthlyPoolCapLabel(reward: ProjectDefinition["reward"]): string {
+/** A token pool names its asset; only a stablecoin pool reads as dollars. */
+function monthlyPoolCapLabel(project: ProjectDefinition): string {
+  const reward = project.reward;
   const minor = BigInt(reward.monthlyCapMinor);
-  if (minor % 1_000_000n !== 0n) return reward.monthlyCapDisplay;
+  if (project.rewardAsset?.kind === "token" || minor % 1_000_000n !== 0n)
+    return reward.monthlyCapDisplay;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -547,7 +550,7 @@ function ProjectOwnerAvatar({ project }: { project: ProjectDefinition }) {
 function ProjectCard({ project }: { project: ProjectDefinition }) {
   const amount =
     project.reward.kind === "monthly-pool"
-      ? monthlyPoolCapLabel(project.reward)
+      ? monthlyPoolCapLabel(project)
       : (project.reward.externalOpportunity?.advertisedAmountDisplay ??
         "External");
   return (
@@ -591,7 +594,7 @@ function ProjectRow({ project }: { project: ProjectDefinition }) {
   const amount = monthlyPoolPointsOnly(project.reward)
     ? "$0 + points (Points only)"
     : project.reward.kind === "monthly-pool"
-      ? `${monthlyPoolCapLabel(project.reward)}/mo target`
+      ? `${monthlyPoolCapLabel(project)}/mo target`
       : `${project.reward.externalOpportunity?.advertisedAmountDisplay ?? "External prize"} + points`;
   return (
     <li>
@@ -1411,7 +1414,7 @@ function ProjectPage({
                     monthlyPoolUnfunded(project.reward) ? (
                       UNFUNDED_POOL_HEADLINE
                     ) : (
-                      `${monthlyPoolCapLabel(project.reward)} / mo`
+                      `${monthlyPoolCapLabel(project)} / mo`
                     )
                   ) : (
                     <>

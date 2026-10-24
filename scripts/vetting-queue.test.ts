@@ -198,10 +198,7 @@ beforeAll(async () => {
             now: () => now,
             randomId: () => "unused",
             sessionActor: async () => null,
-            repositoryControl: async () => ({
-              state: "unproven",
-              reason: "fixture",
-            }),
+            repositoryControl: async () => ({ state: "matched" }),
             readTokenMetadata: async () => {
               throw new Error("unused");
             },

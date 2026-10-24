@@ -1,7 +1,7 @@
 // The GitHub check of project setup through the production Pages Function:
 // every repository and alias in the manifest is read from GitHub, not only
-// the first repository. New projects list one repository; projects and
-// stored applications from before self-service setup may list more.
+// the first repository. These facts never grant authority; the Slopbot
+// installation read does (owner decision D11).
 import { afterEach, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { resolve } from "node:path";
@@ -77,8 +77,6 @@ let stubGithub = () => {
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     lookups.push(url);
-    if (url === `${API}/orgs/partner-lab/public_members/example`)
-      return new Response(null, { status: 204 });
     const path = url.startsWith(`${API}/repos/`)
       ? url.slice(`${API}/repos/`.length)
       : "";
@@ -88,20 +86,26 @@ let stubGithub = () => {
   }) as typeof fetch;
 };
 
-/** The public-facts check for the signed-in owner `example`. */
+/** The public-facts check of a manifest. */
 async function control(manifest: unknown) {
   stubGithub();
-  return await repositoryControl(
-    manifest as ProjectDefinition,
-    { githubId: "987654321", githubLogin: "example" },
-    {} as never,
-  );
+  return await repositoryControl(manifest as ProjectDefinition, {} as never);
 }
+
+/** What the Slopbot binding reads; `null` leaves Slopbot unbound. */
+type SlopbotAnswer = Record<string, unknown> | null;
+const ADMIN_ACCESS: SlopbotAnswer = {
+  installation: "installed",
+  installationId: 5151,
+  permission: "admin",
+  roleName: "admin",
+};
 
 async function submit(
   manifest: unknown,
   path = "projects",
   seed?: (sqlite: ReturnType<typeof sqliteD1>["sqlite"]) => void,
+  slopbot: SlopbotAnswer = ADMIN_ACCESS,
 ) {
   const { db, sqlite } = sqliteD1(
     readdirSync(resolve(import.meta.dir, "..", "migrations"))
@@ -129,12 +133,18 @@ async function submit(
       },
       body: JSON.stringify(path === "projects" ? { manifest } : {}),
     }),
-    env: { SLOP_DB: db, ADMIN_GITHUB_IDS: "900000001" } as never,
+    env: {
+      SLOP_DB: db,
+      ADMIN_GITHUB_IDS: "900000001",
+      ...(slopbot === null
+        ? {}
+        : { SLOPBOT: { fetch: async () => Response.json(slopbot) } }),
+    } as never,
   });
   const body = (await response.json()) as {
     setup?: {
       checks: {
-        authority: { state: string; basis?: string; message: string };
+        authority: { state: string; message: string };
         installation: { state: string };
       };
     };
@@ -174,22 +184,54 @@ function repository(id: string) {
   };
 }
 
-test("an owner who controls the repository creates the project at once", async () => {
+test("an owner whose write access Slopbot reads creates the project at once", async () => {
   const { status, body, sqlite } = await submit(manifestWith({}));
   expect(status).toBe(201);
   expect(body.setup?.checks.authority).toEqual({
     state: "verified",
-    basis: "public-github-facts",
-    message: "@example owns example/open-registry.",
+    message: "@example has admin access to example/open-registry.",
   });
-  // Slopbot is not connected to this site, so the installation is a retry.
-  expect(body.setup?.checks.installation.state).toBe("retry");
+  expect(body.setup?.checks.installation.state).toBe("installed");
   expect(
     sqlite
       .prepare("SELECT status FROM projects WHERE id = ?")
       .get("open-registry"),
   ).toEqual({ status: "paused" });
 });
+
+// Owner decision D11: creation requires the Slopbot installation read.
+// Public GitHub ownership alone creates nothing.
+test.each([
+  ["missing", { installation: "missing" }, 409, "slopbot_required"],
+  [
+    "suspended",
+    { installation: "suspended", installationId: 5151 },
+    409,
+    "slopbot_required",
+  ],
+  [
+    "read access",
+    { ...ADMIN_ACCESS, permission: "read", roleName: "read" },
+    403,
+    "authority_required",
+  ],
+  ["unbound Slopbot", null, 503, "github_unavailable"],
+] as const)(
+  "no project is created when Slopbot reads %s",
+  async (_name, slopbot, status, error) => {
+    const result = await submit(
+      manifestWith({}),
+      "projects",
+      undefined,
+      slopbot,
+    );
+    expect(result.status).toBe(status);
+    expect(result.body.error).toBe(error);
+    expect(
+      result.sqlite.prepare("SELECT COUNT(*) AS count FROM projects").get(),
+    ).toEqual({ count: 0 });
+  },
+);
 
 test("a new project lists exactly one repository", async () => {
   const { status, body } = await submit(
@@ -202,7 +244,7 @@ test("a new project lists exactly one repository", async () => {
   });
 });
 
-test("control is proven only when the owner controls every repository", async () => {
+test("every listed repository must be a public GitHub repository", async () => {
   expect(
     await control(
       manifestWith(
@@ -211,17 +253,8 @@ test("control is proven only when the owner controls every repository", async ()
         repository("partner-lab/shared-models"),
       ),
     ),
-  ).toEqual({
-    state: "proven",
-    reason: "@example owns example/open-registry",
-  });
+  ).toEqual({ state: "matched" });
   expect(lookups).toContain(`${API}/repos/partner-lab/shared-models`);
-  expect(
-    await control(manifestWith({}, repository("someone-else/their-repo"))),
-  ).toEqual({
-    state: "unproven",
-    reason: "@example does not own someone-else/their-repo",
-  });
   expect(
     await control(manifestWith({}, repository("someone-else/missing-repo"))),
   ).toEqual({
@@ -236,7 +269,7 @@ test("an alias must lead to the repository it names", async () => {
   );
   expect(former.status).toBe(201);
   expect(former.body.setup?.checks.authority.message).toBe(
-    "@example owns example/open-registry.",
+    "@example has admin access to example/open-registry.",
   );
 
   const other = await submit(
@@ -276,7 +309,7 @@ test("a check names at most 5 repositories and aliases", async () => {
       aliases: ["example/docs-old-1", "example/docs-old-2"],
     },
   );
-  expect((await control(five)).state).toBe("proven");
+  expect((await control(five)).state).toBe("matched");
   expect(lookups.filter((url) => url.startsWith(`${API}/repos/`))).toHaveLength(
     5,
   );

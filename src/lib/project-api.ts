@@ -112,9 +112,14 @@ export type ProjectSummary = {
 };
 
 /** Creates the project at once; the response carries its setup status. */
+/**
+ * `monthlyAmount` is a decimal number of whole reward-asset units. The
+ * server stores it in the asset's base units after it reads the decimals.
+ */
 export function createProject(
   manifest: ProjectDefinition,
   referrer: string | null,
+  monthlyAmount: string | null,
 ): Promise<{
   project: { id: string; revision: number; referrer: unknown };
   setup: ProjectSetupStatus;
@@ -122,6 +127,7 @@ export function createProject(
   return projectApiRequest("POST", "projects", {
     manifest,
     ...(referrer === null ? {} : { referrer }),
+    ...(monthlyAmount === null ? {} : { monthlyAmount }),
   });
 }
 
@@ -172,11 +178,13 @@ export function publishProjectRevision(
   manifest: ProjectDefinition,
   expectedRevision: number,
   note: string,
+  monthlyAmount: string | null,
 ): Promise<RevisionResult> {
   return projectApiRequest("PUT", `projects/${encodeURIComponent(projectId)}`, {
     manifest,
     expectedRevision,
     ...(note.trim() ? { reason: note.trim() } : {}),
+    ...(monthlyAmount === null ? {} : { monthlyAmount }),
   });
 }
 

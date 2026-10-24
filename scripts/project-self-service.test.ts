@@ -58,11 +58,13 @@ function registry() {
   const persistence = new CloudflareProjectPersistence(db);
   let sequence = 0;
   const state = {
-    control: {
-      state: "proven",
-      reason: "@owner is a public member of example",
-    } as RepositoryControl,
-    access: { installation: "missing" } as RepositoryAccess,
+    control: { state: "matched" } as RepositoryControl,
+    access: {
+      installation: "installed",
+      installationId: 42,
+      permission: "admin",
+      roleName: "admin",
+    } as RepositoryAccess,
     clearance: { state: "unscanned" } as VettingClearance,
     scans: [] as string[],
     scanAnswer: { state: "queued" } as ScanRequest,
@@ -178,8 +180,25 @@ test("an admin revision still replaces the listed project with that id", async (
   expect((await persistence.getProject("open-registry"))?.revision).toBe(2);
 });
 
-test("creation queues the first scan and returns one status whose next action is the Slopbot installation", async () => {
-  const { create, state } = registry();
+test("creation requires the Slopbot installation, then queues the first scan and returns one status", async () => {
+  const { create, persistence, state } = registry();
+  // Owner decision D11: no installation read, no project.
+  state.access = { installation: "missing" };
+  const refused = await create("open-registry", "example/open-registry");
+  expect(refused.status).toBe(409);
+  expect(refused.body).toMatchObject({
+    error: "slopbot_required",
+    message:
+      "Slop reads your access to example/open-registry through Slopbot. Install Slopbot on example/open-registry, then try again.",
+  });
+  expect(await persistence.listProjects()).toEqual([]);
+  expect(state.scans).toEqual([]);
+  state.access = {
+    installation: "installed",
+    installationId: 42,
+    permission: "admin",
+    roleName: "admin",
+  };
   const created = await create("open-registry", "example/open-registry");
   expect(created.status).toBe(201);
   const setup = created.body.setup as Setup;
@@ -187,12 +206,9 @@ test("creation queues the first scan and returns one status whose next action is
     "open-registry@1: First scan after self-service setup",
   ]);
   expect(setup).toMatchObject({
-    state: "action_required",
+    state: "waiting",
     status: "paused",
-    nextAction: {
-      kind: "install_slopbot",
-      href: "https://github.com/apps/slopdotcash/installations/new",
-    },
+    nextAction: { kind: "wait_for_scan", href: null },
     checks: { scan: { state: "queued" } },
     // Funding is separate from readiness.
     funding: {
@@ -213,11 +229,16 @@ test("setup activates a project only with installation write access and a clean 
   const check = async (actor = OWNER) =>
     (await call("POST", "project-setup/open-registry/check", actor, {}))
       .body as { setup: Setup };
-  // Public facts let the owner create, but activation needs the installation.
+  // An installation removed after creation stops activation, and the next
+  // action links the installation.
+  state.access = { installation: "missing" };
   state.clearance = CLEARED;
   expect((await check()).setup).toMatchObject({
     state: "action_required",
-    nextAction: { kind: "install_slopbot" },
+    nextAction: {
+      kind: "install_slopbot",
+      href: "https://github.com/apps/slopdotcash/installations/new",
+    },
     activatedRevision: null,
   });
   // An installation that reads only triage access denies the account.

@@ -390,15 +390,14 @@ async function githubRepository(
 const MAX_APPLICATION_GITHUB_NAMES = 5;
 
 /**
- * Proves control from public GitHub facts only: the applicant owns a user
- * repository, or is a public member of the owning organization. The manifest's
- * repository and steward identities must match GitHub exactly. Every other
- * repository and every alias must be a public GitHub repository, an alias the
- * repository it names, and control is proven only for every owner.
+ * Checks the manifest against public GitHub facts: the repository and steward
+ * identities must match GitHub exactly, and every other repository and alias
+ * must be a public GitHub repository, each alias a name of the repository it
+ * follows. These facts never grant authority; the Slopbot installation read
+ * does (owner decision D11).
  */
 export async function repositoryControl(
   manifest: ProjectDefinition,
-  actor: { githubId: string; githubLogin: string },
   env: Env,
 ): Promise<RepositoryControl> {
   const api = githubApiOrigin(env.SLOP_GITHUB_API_ORIGIN);
@@ -444,12 +443,11 @@ export async function repositoryControl(
     ),
   );
   read.set(repository.id, facts);
-  let control = await ownerControl(api, token, facts, repository.id, actor);
   const missing = (path: string): RepositoryControl => ({
     state: "mismatch",
     reason: `GitHub has no public repository named ${path}`,
   });
-  for (const [index, entry] of manifest.repositories.entries()) {
+  for (const entry of manifest.repositories) {
     const named = read.get(entry.id);
     if (named?.private !== false) return missing(entry.id);
     if (String(named.full_name).toLowerCase() !== entry.id.toLowerCase())
@@ -466,46 +464,8 @@ export async function repositoryControl(
           reason: `Alias ${alias} is not a name of ${entry.id} on GitHub`,
         };
     }
-    if (index > 0 && control.state === "proven") {
-      const owned = await ownerControl(api, token, named, entry.id, actor);
-      if (owned.state !== "proven") control = owned;
-    }
   }
-  return control;
-}
-
-async function ownerControl(
-  api: string,
-  token: string | undefined,
-  facts: GithubRepositoryFacts,
-  repository: string,
-  actor: { githubId: string; githubLogin: string },
-): Promise<RepositoryControl> {
-  if (facts.owner?.type === "User")
-    return String(facts.owner.id) === actor.githubId
-      ? {
-          state: "proven",
-          reason: `@${actor.githubLogin} owns ${repository}`,
-        }
-      : {
-          state: "unproven",
-          reason: `@${actor.githubLogin} does not own ${repository}`,
-        };
-  const membership = await fetch(
-    `${api}/orgs/${encodeURIComponent(String(facts.owner?.login))}/public_members/${encodeURIComponent(actor.githubLogin)}`,
-    { headers: githubHeaders(token), signal: AbortSignal.timeout(10_000) },
-  );
-  if (membership.status === 204)
-    return {
-      state: "proven",
-      reason: `@${actor.githubLogin} is a public member of ${String(facts.owner?.login)}`,
-    };
-  if (membership.status === 404)
-    return {
-      state: "unproven",
-      reason: `@${actor.githubLogin} is not a public member of ${String(facts.owner?.login)}`,
-    };
-  throw new Error(`GitHub returned ${membership.status}`);
+  return { state: "matched" };
 }
 
 /**
@@ -602,8 +562,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
         context.env.SLOP_DB,
         new Date().toISOString(),
       ),
-    repositoryControl: (manifest, actor) =>
-      repositoryControl(manifest, actor, context.env),
+    repositoryControl: (manifest) => repositoryControl(manifest, context.env),
     repositoryAccess: (repository, actor) =>
       slopbotRepositoryAccess(context.env.SLOPBOT, repository, actor),
     requestScan: vettingScanRequester({
