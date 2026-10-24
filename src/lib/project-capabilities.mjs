@@ -4,9 +4,10 @@
  * only the facts that govern it, so no single "active" switch decides all of
  * them.
  *
- * - Security review needs only a verified registration. Paused, flagged,
- *   quarantined, banned or retired projects may still receive authorized
- *   security review ("authorized security review may continue").
+ * - Security review needs a verified registration. Paused, flagged,
+ *   quarantined or banned projects may still receive authorized security
+ *   review ("authorized security review may continue"). A retired project
+ *   gets no review (owner decision D12).
  * - Contributor work needs an active, listed, unrestricted, unflagged
  *   registration. Funding is optional and never a prerequisite.
  * - Executing an already approved payment needs a verified registration and a
@@ -52,14 +53,18 @@ export function evaluateProjectCapabilities(state) {
         ? "project funding state is unknown"
         : "project vault is not funded"
       : null;
+  // Owner decision D12: a retired project gets no review; retired means off.
+  const securityRefusal = !registered
+    ? "repository is not registered on slop.cash"
+    : state.listingTier === "retired"
+      ? "project is retired"
+      : null;
   return {
-    mayReviewForSecurity: registered,
+    mayReviewForSecurity: securityRefusal === null,
     mayOfferContributorWork: contributorRefusal === null,
     mayExecuteApprovedPayment: paymentRefusal === null,
     reasons: {
-      security: registered
-        ? "registered repository"
-        : "repository is not registered on slop.cash",
+      security: securityRefusal ?? "registered repository",
       contributor: contributorRefusal ?? "project is open to contributor work",
       payment: paymentRefusal ?? "funded project",
     },

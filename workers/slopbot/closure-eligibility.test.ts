@@ -25,10 +25,10 @@ const eligible = {
 } as const;
 
 describe("closure eligibility", () => {
-  test("keeps closure inactive until the owner approves attribution evidence", () => {
+  test("permits closure only for a verified member with a recorded run (D6)", () => {
     expect(closureEligibility(eligible)).toEqual({
-      eligible: false,
-      why: "automatic closure awaits the owner-approved attribution rule",
+      eligible: true,
+      why: "verified member with a recorded Slop run for this pull request",
     });
     for (const [change, why] of [
       [{ exemption: "exempt" }, "maintainers are never closed by Slopbot"],
@@ -91,10 +91,10 @@ describe("closure eligibility", () => {
     ).toMatchObject({ review: true, mayClose: false, penaltyEligible: false });
   });
 
-  test("a matched member and recorded run keep advisory review without closure", () => {
+  test("a matched member with a recorded run may be closed and penalized", () => {
     expect(
       route({ ...base, closure: closureEligibility(eligible) }),
-    ).toMatchObject({ review: true, mayClose: false, penaltyEligible: false });
+    ).toMatchObject({ review: true, mayClose: true, penaltyEligible: true });
   });
 
   test("a security-only review of a paused project never closes", () => {
@@ -141,29 +141,30 @@ describe("recorded run evidence", () => {
       projectId: "asi",
       owner: "example-org",
       repo: "repo",
-      number: 7,
       nodeId: "PR_seven",
     };
     expect(await isMember(store, 42)).toBe(true);
     expect(await isMember(store, 43)).toBe(false);
+    // Owner decision D6: the event must name the exact pull request node ID.
+    // A matching URL alone is not evidence.
+    expect(await hasRecordedSkillRun(store, item)).toBe(false);
+    sqlite.run("UPDATE run_progress_events SET github_object_id = 'PR_seven'");
     expect(await hasRecordedSkillRun(store, item)).toBe(true);
-    // Authenticated telemetry can be self-reported without running the skill.
-    // PRD section 11 leaves the evidence rule for closure undecided.
     expect(
       closureEligibility({
         ...eligible,
         member: await isMember(store, 42),
         recordedSkillRun: await hasRecordedSkillRun(store, item),
       }),
-    ).toMatchObject({ eligible: false });
+    ).toMatchObject({ eligible: true });
     // Another person's run, another pull request, project or repository is
     // not evidence for this author.
     expect(await hasRecordedSkillRun(store, { ...item, authorId: 43 })).toBe(
       false,
     );
-    expect(await hasRecordedSkillRun(store, { ...item, number: 8 })).toBe(
-      false,
-    );
+    expect(
+      await hasRecordedSkillRun(store, { ...item, nodeId: "PR_eight" }),
+    ).toBe(false);
     expect(
       await hasRecordedSkillRun(store, { ...item, projectId: "other" }),
     ).toBe(false);

@@ -14,9 +14,10 @@ disabled by `SLOPBOT_CLOSURE_ENABLED = "false"`.
    records. It derives capabilities with the shared evaluator in
    `src/lib/project-capabilities.mjs`. An active, listed, unrestricted project
    gets the full contributor review. A registered project that is paused,
-   flagged, quarantined, banned or retired gets a security-only review: only a
+   flagged, quarantined or banned gets a security-only review: only a
    `scam` finding is labeled and commented, nothing is closed, and no value
-   assessment runs (PRD section 5). Unregistered repositories and replaced
+   assessment runs (PRD section 5, owner decision D12). A retired project gets
+   no review. Unregistered repositories and replaced
    repository IDs skip; database errors retry. Registry checks repeat for the
    same scope before inference and GitHub writes. The queue consumer
    then gets an installation token and re-reads the
@@ -32,16 +33,17 @@ disabled by `SLOPBOT_CLOSURE_ENABLED = "false"`.
    `gpt-6.1-sol` as fallback (owner decision, 9 October 2026). Every call is written to
    `slopbot_costs` with its internal provider cost and a zero billed amount.
 6. A close needs all of the following:
-   - closure eligibility (`closure-eligibility.ts`): a pull request whose
-     author is not a maintainer, is a slop.cash member matched by immutable
-     GitHub ID, and has skill-use evidence under an owner-approved attribution
-     rule. PRD section 11 leaves that rule undecided, so automatic closure
-     remains inactive even if the global and repository switches are enabled.
-     Authenticated progress events and copied markers do not prove skill use.
-     Advisory review stays available. Issues are never closed.
+   - closure eligibility (`closure-eligibility.ts`, owner decision D6): a pull
+     request whose author is not a maintainer, is a slop.cash member matched by
+     immutable GitHub ID, and has a `trace_runs` row created by their own
+     authenticated Slop session for this project and repository, with a
+     `pull_request_opened` event that names this exact pull request node ID.
+     A URL alone, a copied marker or a receipt does not match. Advisory review
+     stays available for everyone else. Issues are never closed.
      The check runs at routing and again, from fresh state, immediately before
      the close;
-   - the category set to `close`;
+   - the category set to `close`, and a category that the penalty table does
+     not make label-only (`out_of_scope` never closes);
    - verified evidence;
    - for guidance categories, a rule quoted verbatim from the named file;
    - confidence ≥ 0.9;
@@ -59,11 +61,30 @@ disabled by `SLOPBOT_CLOSURE_ENABLED = "false"`.
    `slopbot_maintainer_holds` (`maintainer-holds.ts`). The 5-minute schedule
    queues each hold after 7 days. If no maintainer commented, reviewed,
    labeled, assigned or changed the item in that time, the bot adds the
-   finding's label only. An uncertain finding never closes an item. A closed,
+   `slopbot:uncertain` label only (owner decision D8); the verdict stays in the
+   review comment. An uncertain finding never closes an item. A closed,
    merged or changed item, or a paused project for a non-security finding,
    ends the hold without a label. Unknown maintainer status retries the hold.
-8. `/slopbot appeal` from the author, or any reopen, blocks re-closing that
-   revision.
+8. A confirmed close of a closure-eligible author records one debit from the
+   published penalty table (`penalties.ts`, owner decision D7) in
+   `slopbot_penalties`. The row is written once per pull request and reverses
+   once, on an upheld appeal or a maintainer reopen. A `scam` close also adds
+   the `slopbot: moderator` label for a moderator review of the account.
+   Maintainers and authors without the closure evidence are never penalized.
+9. `/slopbot appeal` from the author, or any reopen, blocks re-closing that
+   revision. An author's appeal opens Slopbot triage (`appeals.ts`, owner
+   decision D8): an independent higher-effort review of the same revision,
+   with the appeal text as untrusted data, drafts `uphold` or `deny` with a
+   confidence. The draft is posted on the item. The appellant or a maintainer
+   answers with `/slopbot accept` or `/slopbot reject`. An accepted `uphold`
+   reopens an item that Slopbot closed, removes the finding label and
+   reverses the penalty. The appeal escalates to a moderator, with the
+   `slopbot: moderator` label, when the draft is rejected, the finding is
+   `scam`, the debit at stake is 24 thirds or more, the draft confidence is
+   below 0.9, or the appeal is unresolved 7 days after it opened. A moderator
+   in `PROJECT_MODERATOR_GITHUB_IDS` decides an escalated appeal with
+   `/slopbot uphold` or `/slopbot deny`, never their own. Unset, no moderator
+   decision is possible. A maintainer reopen always wins.
 
 ## Repository policy file
 
@@ -179,6 +200,9 @@ Do these in order. Each step names who does it and how to verify it.
       `bunx wrangler queues consumer add slopbot-jobs slop-slopbot --batch-size 5 --message-retries 5 --dead-letter-queue slopbot-jobs-dlq`.
    5. In GitHub → repository Settings → Variables, set `SLOPBOT_RELEASE` to
       `enabled`.
+   6. Set the Worker variable `PROJECT_MODERATOR_GITHUB_IDS` to the approved
+      moderators' immutable GitHub IDs (owner decision D15). Without it,
+      escalated appeals wait and no moderator command is accepted.
 
    The next protected release runs these steps:
    - checks the secret inventory;
@@ -214,12 +238,13 @@ and publication separately. An unregistered repository must create no record.
 
 ## Not yet implemented
 
-- Penalty journal events. Closures record `penaltyEligible` for them. PRD
-  section 7 requires one owner-approved, published penalty table, and the PRD
-  lists its values as an open owner decision. No debit is recorded until then.
-- Slopbot appeal triage and draft resolutions. The PRD lists the escalation
-  criteria as an open owner decision. Until then an appeal is labeled
-  `slopbot: appeal` for a maintainer and blocks re-closing that revision.
+- Score publication of recorded debits. `slopbot_penalties` is the record;
+  the score producer must read it, subtract each unreversed debit from its UTC
+  month without going below zero, and never change an approved, scheduled or
+  paid award.
+- Inbox notices for escalated appeals. Escalation is visible through the
+  `slopbot: moderator` label and the appeal comment until the Inbox adds an
+  appeal notice kind.
 - Maintainer dashboard and Automation row (LDR-04).
 
 ## Value assessment work in progress

@@ -340,6 +340,9 @@ export const AUTHOR_DAILY_CAP = 3;
 export const CLOSE_CONFIDENCE = 0.9;
 export const REOPEN_BREAKER_RATIO = 0.1;
 
+export const APPEAL_COMMANDS = ["accept", "reject", "uphold", "deny"] as const;
+export type AppealCommand = (typeof APPEAL_COMMANDS)[number];
+
 // The queue carries identifiers only; the consumer re-reads GitHub state.
 export type Job =
   | {
@@ -363,6 +366,31 @@ export type Job =
       itemKind: "issue" | "pull_request";
       number: number;
       senderId: number;
+    }
+  | {
+      kind: "appeal_command";
+      /** accept or reject: the appellant or a maintainer; uphold or deny: a
+       * Slop moderator, on an escalated appeal only. */
+      command: AppealCommand;
+      deliveryId: string;
+      installationId: number;
+      repositoryId: number;
+      owner: string;
+      repo: string;
+      itemKind: "issue" | "pull_request";
+      number: number;
+      senderId: number;
+    }
+  | {
+      kind: "appeal_due";
+      appealKey: string;
+      deliveryId: string;
+      installationId: number;
+      repositoryId: number;
+      owner: string;
+      repo: string;
+      itemKind: "issue" | "pull_request";
+      number: number;
     }
   | {
       kind: "maintainer_hold";

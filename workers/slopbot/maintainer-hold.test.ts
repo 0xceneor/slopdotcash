@@ -26,6 +26,7 @@ async function uncertainReview(
     tick: () => Promise<Job[]>;
     deliver: (jobs: Job[]) => Promise<void>;
     writes: string[];
+    labels: { name: string }[];
     sql: (q: string) => unknown;
   }) => Promise<void>,
   confidence = 0.6,
@@ -213,6 +214,7 @@ async function uncertainReview(
   try {
     await cb({
       writes,
+      labels,
       review: () => reviewItem(env as unknown as ReviewEnv, job),
       tick: async () => {
         sent.length = 0;
@@ -269,6 +271,8 @@ test("an uncertain finding waits 7 days for the maintainer, then is labeled once
     expect(run.writes.filter((w) => w.endsWith("/labels"))).toEqual([
       "POST /repos/SlopDotCash/asi/issues/5/labels",
     ]);
+    // Owner decision D8: one uncertain label; the verdict stays in the comment.
+    expect(run.labels).toEqual([{ name: "slopbot:uncertain" }]);
     expect(run.sql("SELECT outcome FROM slopbot_maintainer_holds")).toEqual([
       { outcome: "labeled" },
     ]);

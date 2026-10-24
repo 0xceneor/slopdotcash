@@ -176,7 +176,7 @@ Recheck roles and destinations before sending. Verify actual inbox receipt separ
 | Wallet recovery | Fresh account and wallet proof; one operator for redirected recovery; the binding delay and owner cancellation protect against a stolen key | Wallet-change delay and funded-award expiry policy |
 | Mainnet | Four approved networks; independent audit before deployment | Exact assets, finality, authority, counsel review, testnet results, and explicit activation |
 | Fee conversion | Automatic conversion of received project-token fees to USDC; separate owner-controlled fee signer; human withdrawals | Routes, limits, custody, and Solana role separation |
-| Slopbot | Required and always free; registered repositories only; size-based PR scoring and useful review credit | Verified closure scope, Slopbot appeal triage with moderator escalation, free-service capacity limits, and production qualification |
+| Slopbot | Required and always free; registered repositories only; size-based PR scoring and useful review credit | Score publication of recorded penalty debits, free-service capacity limits, and production qualification |
 | Private programs | Automatic private reporting; discretionary owner awards; Slopbot-triaged disputes with moderator escalation; 75/25 payment | Published program terms, safe testing, verified reserves after approval, and activation per program |
 | Moderation and evidence | Staging pilot: lalalune (18633264), drew-dot-com (202660855) | Qualify staging, the bounded malicious-code scan in section 8 with an isolated runner for risky artifacts (a universal Linux/KVM runtime is not required), external retention/recovery controls, and production release |
 
@@ -222,6 +222,14 @@ These choices are not settled. Agents and implementations must not choose them. 
 | Review-credit pool | The share of a pull request's credit that goes to useful reviews, and the integer remainder rule among up to five distinct reviewers | Splitting review credit for new work; earlier periods keep their recorded terms |
 | Flag lifetime and resolution | How long a contributor flag counts, and whether flags stop counting after a clean-scan reinstatement, a moderator decision, or withdrawal, so that the same flags do not pause a reinstated project again | Counting flags toward a pause after a reinstatement |
 | Fee conversion timing and dust | The minimum balance worth converting; conversion on each receipt or on a schedule with recovery; the signer connection and network-specific USDC routes. Section 6 says raw private keys are not stored in application environment variables, and AGENTS.md records the per-network fee-wallet key of 18 October 2026; the owner must reconcile these two records | Signing of fee conversions |
-| Attribution for automatic closure | The minimum evidence that proves slop.cash membership and skill use (for example signed attribution or a verified skill marker); a copied marker alone is not proof | Automatic closure; advisory review does not wait |
-| Penalty table | The values in the one published penalty table | Penalties |
-| Escalation criteria | When an appeal or dispute goes from Slopbot triage to a moderator | Moderator escalation |
+
+### Recorded owner decisions
+
+The owner approved these decisions on 24 October 2026. They replace the corresponding open decisions above.
+
+| Decision | Recorded rule |
+| --- | --- |
+| D6 Attribution and automatic closure | An ordinary submission needs the visible Made via @slopdotcash line and the exact provider/model/client; a signed run receipt is optional and never blocks submission. Closure and penalties need a verified member using the skill: a slop.cash member matched by immutable GitHub ID, with a `trace_runs` row created by their own authenticated Slop session for this project and a `pull_request_opened` event that names this exact pull request node ID. A copied marker alone is never proof. Usage totals and traces are diagnostic only |
+| D7 Penalty table | Units are Slop Score thirds, applied once per pull request and reversed once on an upheld appeal or a maintainer reopen: spam −3; scam or malicious −24 plus a moderator review of the account; low_quality 0; duplicate 0; out_of_scope 0 and label only; a clear violation of a project rule quoted verbatim −1. A debit reduces only that UTC month's score, never below zero, and never touches an approved, scheduled or paid award. Maintainers and non-skill authors are never penalized. Changes are prospective |
+| D8 Escalation criteria | Slopbot triages first and drafts a resolution within 24 hours. A moderator decides when the appellant or the maintainer rejects the draft; the case involves a ban, a confirmed-malicious result or a private security case; the debit at stake is 24 thirds or more; Slopbot's confidence is below 0.9; or the case is unresolved 7 days after the appeal. An uncertain finding without maintainer action for 7 days gets the `slopbot:uncertain` label with the verdict in the comment, and never closes |
+| D12 Restricted-project review scope | Paused, flagged or quarantined projects get security-only review: a comment and the scam label, with no closure, score or penalty. Retired projects get no review. Already-approved funded payouts continue while a project is quarantined or banned, with no new commitments. Issues are label-only |

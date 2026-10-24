@@ -416,7 +416,7 @@ export async function recordCalls(
 export async function hasRecordedAction(
   db: D1Database,
   reviewKey: string,
-  action: "label",
+  action: "label" | "comment",
 ): Promise<boolean> {
   return (
     (await db

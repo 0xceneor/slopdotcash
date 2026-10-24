@@ -19,9 +19,22 @@ describe("project capabilities", () => {
     });
   });
 
+  test("a retired project gets no review and keeps funded obligations", () => {
+    expect(
+      evaluateProjectCapabilities({
+        ...open,
+        listingTier: "retired",
+        funding: "funded",
+      }),
+    ).toMatchObject({
+      mayReviewForSecurity: false,
+      mayOfferContributorWork: false,
+      mayExecuteApprovedPayment: true,
+    });
+  });
+
   test.each([
     { status: "paused" as const },
-    { listingTier: "retired" },
     { restriction: "quarantined" as const },
     { restriction: "banned" as const },
     { restriction: "unknown" as const },

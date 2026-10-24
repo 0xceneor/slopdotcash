@@ -9,7 +9,9 @@ export type ClosureEvidence = {
   exemption: Exemption;
   /** A slop.cash member record matched by the author's immutable GitHub ID. */
   member: boolean;
-  /** Authenticated progress telemetry linked to this PR; not proof of skill use. */
+  /** The author's own authenticated Slop run whose pull_request_opened event
+   * names this exact pull request node ID (owner decision D6, PRD section 11).
+   */
   recordedSkillRun: boolean;
 };
 
@@ -43,12 +45,9 @@ export function closureEligibility(
       eligible: false,
       why: "no recorded Slop run for this pull request",
     };
-  // PRD section 11 leaves the closure-attribution rule to the owner.
-  // An authenticated event proves who reported it, not which skill ran.
-  // Do not let the global or repository switch bypass that missing decision.
   return {
-    eligible: false,
-    why: "automatic closure awaits the owner-approved attribution rule",
+    eligible: true,
+    why: "verified member with a recorded Slop run for this pull request",
   };
 }
 
@@ -63,11 +62,12 @@ export async function isMember(
   return row !== null;
 }
 
-/** A run the author created through an authenticated Slop session for this
- * project's repository, whose recorded pull_request_opened event names this
- * exact pull request. The session comes from the author's own GitHub login, so
- * a copied marker, receipt or footer cannot produce this record for another
- * person. Neither an agent event nor a webhook link establishes skill execution.
+/** The owner-approved closure evidence (D6, PRD section 11): a trace_runs row
+ * that the author created through their own authenticated Slop session for
+ * this project's repository, with a pull_request_opened event that names this
+ * exact pull request node ID. The session comes from the author's own GitHub
+ * login, so a copied marker, receipt or footer cannot produce this record for
+ * another person. A URL alone does not match.
  */
 export async function hasRecordedSkillRun(
   db: D1Database,
@@ -76,7 +76,6 @@ export async function hasRecordedSkillRun(
     projectId: string;
     owner: string;
     repo: string;
-    number: number;
     nodeId: string;
   },
 ): Promise<boolean> {
@@ -86,15 +85,9 @@ export async function hasRecordedSkillRun(
       JOIN trace_runs r ON r.id = e.run_id AND r.github_user_id = e.github_user_id
       WHERE e.github_user_id = ? AND e.kind = 'pull_request_opened'
         AND r.project_id = ? AND lower(r.repository) = ?
-        AND (e.github_object_id = ? OR lower(e.github_url) = ?)
+        AND e.github_object_id = ?
       LIMIT 1`)
-    .bind(
-      String(item.authorId),
-      item.projectId,
-      repository,
-      item.nodeId,
-      `https://github.com/${repository}/pull/${item.number}`,
-    )
+    .bind(String(item.authorId), item.projectId, repository, item.nodeId)
     .first();
   return row !== null;
 }

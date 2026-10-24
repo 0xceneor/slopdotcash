@@ -17,12 +17,17 @@ v2 keeps every v1 rule except the ones listed under "Changes from v1".
    pays. The separate owner-approved SCR-06 value-scoring extension permits
    automatic provisional assessments; it does not enable closure powers.
 3. **Permissions.** Read: Contents, Metadata, Organization members.
-   Write: Issues and Pull requests, used only to comment, label and close.
+   Write: Issues and Pull requests, used only to comment, label, close, and
+   reopen an item that Slopbot closed when its appeal is upheld.
    No other write permission.
 4. **Audience.** "Participants only" or "Protection" (PRD BOT-02) selects
    advisory review. Exempt actors are never closed. Closure is limited to
-   verified slop.cash members using the Slop skill (PRD section 5); a
-   copied attribution marker is not evidence.
+   verified slop.cash members using the Slop skill (PRD section 5, owner
+   decision D6 of 24 October 2026): the author is a member matched by
+   immutable GitHub ID and has a `trace_runs` row created by their own
+   authenticated Slop session for this project, with a `pull_request_opened`
+   event that names the exact pull request node ID. A copied attribution
+   marker is not evidence. Issues are label-only.
 
 ## Decision boundary
 
@@ -38,17 +43,56 @@ v2 keeps every v1 rule except the ones listed under "Changes from v1".
 - Policy is read from the base branch at a recorded SHA. A pull request's own
   policy edits are content under review.
 - An uncertain finding goes to the maintainer first. If no maintainer acts
-  within 7 days, Slopbot adds its label only. An uncertain finding never
-  closes an item (PRD section 5).
+  within 7 days, Slopbot adds the `slopbot:uncertain` label only and keeps
+  its verdict in the comment. An uncertain finding never closes an item (PRD
+  section 5, owner decision D8).
 
-## Penalty boundary
+## Penalty table
 
-A close by Slopbot creates a penalty only for an author who is a consenting
-Slop participant (PRD SCR-01). A close of an external author's item creates
-only the public outcome record. A human reopen suspends the penalty, and a
-successful appeal reverses it. Closure alone never authorizes a debit. No
-penalty is recorded until the owner approves and publishes the one penalty
-table that PRD section 7 requires.
+Owner decision D7 of 24 October 2026. Units are Slop Score thirds. A debit
+applies once per pull request, only after a confirmed close of an author who
+meets the closure scope above. It reverses once, on an upheld appeal or a
+maintainer reopen. Closure alone never authorizes a debit; maintainers and
+authors outside the closure scope are never penalized.
+
+| Slopbot category | Action | Debit |
+| --- | --- | --- |
+| `spam` | close | −3 |
+| `scam` (malicious) | close | −24, and a moderator reviews the account |
+| `low_quality` | close (closure-eligible authors only) | 0 |
+| `duplicate` | close | 0 |
+| `out_of_scope` | label only | 0 |
+| `busywork` or `gaming`: a project rule quoted verbatim | close | −1 |
+| `empty` | close | 0 |
+
+A debit reduces only the score of the UTC month of the close and never takes
+that month below zero. It never changes an approved, scheduled or paid award.
+Changes to this table apply prospectively.
+
+## Appeals
+
+Owner decision D8 of 24 October 2026. Slopbot triages each appeal first: an
+independent review of the same revision drafts a resolution (`uphold` or
+`deny`) with a confidence and posts it on the item. The appellant or a
+maintainer accepts or rejects the draft. The appeal escalates to a Slop
+moderator when any of these is true:
+
+1. The appellant or a maintainer rejects the draft.
+2. The finding is a confirmed-malicious (`scam`) result. Slopbot never bans,
+   and private security cases use their private case process.
+3. The debit at stake is 24 thirds or more.
+4. The draft confidence is below 0.9.
+5. The appeal is unresolved 7 days after it opened.
+
+A moderator decides an escalated appeal and never their own. An upheld
+appeal reopens an item that Slopbot closed and reverses its penalty once. A
+maintainer reopen always wins.
+
+## Restricted projects
+
+Owner decision D12 of 24 October 2026. A paused, flagged or quarantined
+project gets a security-only review: a comment and the `scam` label only, with
+no closure, score or penalty. A retired project gets no review.
 
 ## Cost
 
@@ -84,7 +128,7 @@ effective date. App installation alone grants no review authority.
 Unregistered repositories are outside the rollout. The canonical PRD section 5
 (23 October 2026) lets authorized security review continue on paused, flagged
 or removed projects: those registered repositories get a security-only review
-that never closes, scores or penalizes.
+that never closes, scores or penalizes. A retired project gets no review.
 Read the live registry before queue intake, job execution, inference and each
 GitHub write. A read failure stops that action. A stale installation or queued
 job cannot override the registry. Protection-only operation is superseded for
