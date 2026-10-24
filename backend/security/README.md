@@ -34,7 +34,7 @@ removed, because its approvers govern restricted case access after closure.
 |---|---|---|
 | `GET /api/v1/security-programs/:id/intake` | public, edge cached 30 s | GitHub private vulnerability reporting readiness: `ready`, `disabled`, `forbidden` or `unavailable`. Only `ready` returns the GitHub handoff URL. `automatic` is `ready`, `app-not-installed`, `unavailable` or `off` |
 | `GET /api/v1/security-cases` | session | Cases the caller can see now, shaped per role |
-| `POST /api/v1/security-cases` | session | `claim`: a reporter links a GitHub advisory ID. `record`: a technical approver records a verified advisory with GitHub's receipt time |
+| `POST /api/v1/security-cases` | session | `claim`: a reporter links a GitHub advisory ID. `record`: a technical approver records a verified advisory with GitHub's receipt time. `import`: a maintainer imports direct GitHub reports |
 | `GET /api/v1/security-cases/:id` | session and role | One case; logs the read |
 | `POST /api/v1/security-cases/:id/actions` | session and role | One human decision with `expectedRevision` and `idempotencyKey` |
 | `GET /api/v1/security-submissions` | session | The caller's own automatic submissions: state, attempt, GHSA, GitHub time, failure code, case id |
@@ -105,8 +105,16 @@ repository. Until then intake stays off and the manual flow below applies.
   severity and CVSS fields. Its result is in the restricted event detail
   only; the case's owner, neutral next action and due time (the published
   acknowledgement target) do not depend on it, because the reporter sees
-  them. It never sets severity, receipt, award or disclosure. No model sees
-  report content; none is approved.
+  them. It never sets severity, receipt, award or disclosure.
+- After verified receipt, `analysis.ts` schedules a private proposal using the
+  configured advisory reader and analysis provider. It records unavailable
+  when either is absent. Only maintainers and assigned triagers see the proposal.
+  Provider selection requires an explicit configuration; this change does not
+  activate a provider or authorize sending live private evidence.
+- Maintainers can import reports filed directly on GitHub through `mode: import`.
+  This uses the same case and analysis records, not a second submission system.
+  `SECURITY_ADVISORY_READ_TOKEN` needs advisory-read access to the program
+  repository. It cannot submit a report as the researcher.
 
 ## Roles
 
@@ -117,7 +125,7 @@ revision, so a revision or a revoked session removes access at once.
 - Any registered user may report; project membership is not required.
 - Technical approver (security maintainer, the project owner or maintainer
   authority of PRD section 10): every case of the project; decides findings,
-  awards, remediation and disclosure.
+  awards, remediation and disclosure; prepares the unsigned payment.
 - Triager: only assigned cases; request information and remediation.
 - Financial approver: only cases with an approved (or older reserved) award,
   and only award and payment fields; prepares the unsigned payment.
@@ -136,8 +144,8 @@ for a new decision.
 ## States
 
 Migration `0026_private_security_cases.sql` keeps independent receipt,
-remediation, award, payment and disclosure states; `0061` adds the receipt
-source, the chosen award amount, submissions and analyses. Triggers keep the
+remediation, award, payment and disclosure states. `0059` adds automatic
+submissions and receipt evidence; `0061` adds chosen award amounts and analyses. Triggers keep the
 frozen receipt, events, reservations, membership history, submissions and
 finished analyses append-only.
 
@@ -210,7 +218,7 @@ record a reviewed `securityBounty.settlement` policy with a
 separate vault and `feeBasisPoints: 2500`. The vault must not appear in
 any other payment program. USDC awards require a matching reviewed USDC rail;
 USD awards cannot be converted implicitly. The reporter accepts the selected
-rail's public chain visibility before a financial approver prepares an
+rail's public chain visibility before the maintainer or delegated payer prepares an
 immutable unsigned commitment. Report state stays independent of payment
 state, and no payment authorizes disclosure. Onchain records expose actor numbers, addresses,
 times and amounts. They contain a random source commitment, never report data.

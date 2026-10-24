@@ -573,79 +573,25 @@ test("private security bounty programs keep cases restricted from intake to awar
 
   let caseA = "";
   let caseB = "";
-  await test.step("a signed-in reporter reports privately; Slop confirms GitHub's receipt", async () => {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    const errors = observe(page);
-    await signIn(page, TOKENS["reporter-a"]);
-    await page.goto(`/projects/${a.id}/security`, { waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "Start a private report" }).click();
-    await expect(
-      page.getByRole("link", { name: "Open GitHub's private report form" }),
-    ).toHaveAttribute(
-      "href",
-      `https://github.com/${a.repository}/security/advisories/new`,
-    );
-    const confirm = page.getByRole("button", {
-      name: "I submitted it — confirm receipt",
-    });
-    // Nothing on GitHub yet: a complete answer, so the reporter may submit.
-    await confirm.click();
-    await expect(
-      page.getByText(/GitHub has no private report from your account/u),
-    ).toBeVisible();
-    await expectAccessible(page);
-    await page.screenshot({ path: test.info().outputPath("intake-start.png") });
-    await githubReport(
+  // The reporter-authorized submission flow is covered by @private-intake below.
+  // Here, reports filed directly on GitHub enter the same award workflow.
+  await test.step("GitHub receipts create private cases for the original reporters", async () => {
+    caseA = await importCase(
       request,
+      a.id,
       a.repository,
       "GHSA-2c3f-4g5h-6j7m",
       "reporter-a",
       afterOpen,
     );
-    // Repeated checks within ten seconds reuse the last answer.
-    await page.waitForTimeout(10_500);
-    await confirm.click();
-    await expect(page.getByRole("status")).toContainText(
-      "GitHub received your",
-    );
-    expect(errors).toEqual([]);
-    await context.close();
-    const mine = await api(
+    caseB = await importCase(
       request,
-      "GET",
-      "security-cases",
-      TOKENS["reporter-a"],
-    );
-    caseA = (mine.body.cases as { id: string; projectId: string }[]).find(
-      (entry) => entry.projectId === a.id,
-    )?.id as string;
-    expect(caseA).toMatch(/^sc_/u);
-    // Reporter B starts through the API and is confirmed the same way.
-    const started = await api(
-      request,
-      "POST",
-      "security-submissions",
-      TOKENS["reporter-b"],
-      { projectId: a.id },
-    );
-    expect(started.status, JSON.stringify(started.body)).toBe(201);
-    await githubReport(
-      request,
+      a.id,
       a.repository,
       "GHSA-3c4f-5g6h-7j8m",
       "reporter-b",
       afterOpen,
     );
-    const checked = await api(
-      request,
-      "POST",
-      `security-submissions/${(started.body.submission as { id: string }).id}/check`,
-      TOKENS["reporter-b"],
-      {},
-    );
-    expect(checked.body.submission).toMatchObject({ state: "received" });
-    caseB = (checked.body.submission as { caseId: string }).caseId;
     for (const [role, id] of [
       ["reporter-a", caseA],
       ["reporter-b", caseB],
@@ -659,7 +605,7 @@ test("private security bounty programs keep cases restricted from intake to awar
       expect(read.body.case).toMatchObject({
         submissionState: "verified",
         receivedAt: afterOpen,
-        receivedAtSource: "github-advisory",
+        receivedAtSource: "github-verified",
         policyRevision: opened.revision,
         terms: {
           grossMinor: "1000000",
@@ -697,7 +643,7 @@ test("private security bounty programs keep cases restricted from intake to awar
     );
     expect(read.body.case).toMatchObject({
       submissionState: "verified",
-      receivedAtSource: "github-advisory",
+      receivedAtSource: "github-verified",
       reporter: { githubLogin: "e2e-reporter-b" },
     });
     // Importing again records nothing twice.
@@ -923,7 +869,7 @@ test("private security bounty programs keep cases restricted from intake to awar
     expect(funded.status, JSON.stringify(funded.body)).toBe(200);
     expect(funded.body.case).toMatchObject({
       awardState: "approved",
-      receivedAtSource: "github-advisory",
+      receivedAtSource: "github-verified",
       reservation: { grossMinor: "400000" },
     });
     const history = await api(
