@@ -110,10 +110,11 @@ function programManifest(securityBounty: Record<string, unknown>): string {
 }
 
 let ghsaCount = 0;
+const GHSA_CHARS = "23456789cfghjmpqrvwx";
 function report(
   author: Account,
   createdAt: string,
-  ghsa = `GHSA-2c3f-4g5h-${"23456789cfghjmpqrvwx"[ghsaCount++ % 20]}j9m`,
+  ghsa = `GHSA-2c3f-4g5h-${GHSA_CHARS[Math.floor(ghsaCount / GHSA_CHARS.length) % GHSA_CHARS.length]}${GHSA_CHARS[ghsaCount++ % GHSA_CHARS.length]}9m`,
 ): GithubPrivateReport {
   return {
     ghsa,
@@ -587,6 +588,23 @@ describe("automatic private intake", () => {
 });
 
 describe("discretionary awards", () => {
+  test("large program balances keep every minor unit after approved awards", async () => {
+    const env = open({
+      ...OPEN_PROGRAM,
+      amount: { ...OPEN_PROGRAM.amount, grossMinor: "1000000000000000" },
+      capacity: { awards: 40, closesAt: null },
+    });
+    let last = "";
+    for (let i = 0; i < 37; i += 1) {
+      last = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+      expect((await env.decide(last, `large-finding-${i}`)).status).toBe(200);
+      expect((await env.award(last, "999999999999996")).status).toBe(200);
+    }
+    const view = await env.call(MAINTAINER, "GET", `security-cases/${last}`);
+    expect(view.body.case.awardFunds?.availableMinor).toBe("3000000000000148");
+    env.sqlite.close();
+  });
+
   test("the owner chooses the amount, and approval reserves exactly that amount", async () => {
     const env = open();
     const first = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
