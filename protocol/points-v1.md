@@ -105,7 +105,8 @@ Telegram links and pending flows, and turns off optional activity email. The
 membership row, welcome and connection awards, X and Telegram claims, points
 history, wallets, unpaid obligations, payment and settlement records, private
 cases, inbox rows and public GitHub work stay. The database refuses a session
-or public visibility for a closed account. An ordinary sign-in to a closed
+or public visibility for a closed account. A repeated request that raced
+the first closure reports that same closure. An ordinary sign-in to a closed
 account returns `account_closed`; only a sign-in that sends `reopen: true`
 opens it again, private and without connections. Support handles only lost
 GitHub access and contested recovery.
@@ -128,7 +129,6 @@ projection through a reviewed main release; never delete history or reissue
 welcome awards. Re-enable only after exact replay and reward-isolation tests.
 Measure first accepted outcomes, returning contributors, reviewer workload,
 source duplication, corrections, and publication delay, not points minted.
-
 
 ## X connections and payout recognition
 
