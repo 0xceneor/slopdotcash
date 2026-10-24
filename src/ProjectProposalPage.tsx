@@ -2567,7 +2567,11 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
             }}
           />
           {current.securityBounty ? (
-            <OwnerBountyVault project={current} onRegistered={setBase} />
+            <OwnerBountyVault
+              key={current.id}
+              project={current}
+              onRegistered={setBase}
+            />
           ) : null}
         </>
       )}
