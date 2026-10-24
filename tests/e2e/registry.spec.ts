@@ -32,9 +32,12 @@ const VETTING_PUBLIC_KEY = process.env.SLOP_E2E_VETTING_PUBLIC_KEY ?? "";
 const VETTING_PRIVATE_KEY = process.env.SLOP_E2E_VETTING_PRIVATE_KEY ?? "";
 
 function walkthroughOptions() {
-  return process.env.SLOP_E2E_VIDEO === "1"
-    ? { recordVideo: { dir: test.info().outputPath("walkthrough-videos") } }
-    : {};
+  return {
+    viewport: test.info().project.use.viewport,
+    ...(process.env.SLOP_E2E_VIDEO === "1"
+      ? { recordVideo: { dir: test.info().outputPath("walkthrough-videos") } }
+      : {}),
+  };
 }
 
 /** Posts a harmless signed scan result for the project's queued scan. */
@@ -947,6 +950,7 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   await adminContext.close();
 
   const moderatorContext = await browser.newContext({
+    viewport: test.info().project.use.viewport,
     recordVideo: { dir: test.info().outputPath("enforcement-video") },
   });
   const moderator = await moderatorContext.newPage();
