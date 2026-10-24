@@ -476,7 +476,9 @@ test("an owner creates and revises a project before an admin delists it @registr
     .fill("Clarify the project scope for contributors");
   await returningOwner.getByRole("button", { name: "Publish changes" }).click();
   await expect(
-    returningOwner.getByRole("status").filter({ hasText: "Published revision 2" }),
+    returningOwner
+      .getByRole("status")
+      .filter({ hasText: "Published revision 2" }),
   ).toBeVisible();
   await admin.reload({ waitUntil: "networkidle" });
   await expect(card).toContainText("2 · updated");
