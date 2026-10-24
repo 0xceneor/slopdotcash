@@ -80,8 +80,9 @@ export function OwnerVaultSetup({
   project: ProjectDefinition;
   payoutPolicy?: PayoutPolicy;
   onRegistered: (
-    deployment: EscrowDeployment,
+    project: ProjectDefinition,
     wallet: Connection | null,
+    notice?: string,
   ) => void | Promise<void>;
 }) {
   const bounty = payoutPolicy === "security-bounty";
@@ -287,14 +288,23 @@ export function OwnerVaultSetup({
         ...current.input,
         step: "register",
         transactionId: hash,
-      })) as unknown as { status: string; deployment?: EscrowDeployment };
+      })) as unknown as {
+        status: string;
+        deployment?: EscrowDeployment;
+        project?: ProjectDefinition;
+        notice?: string;
+      };
       if (result.status === "pending") {
         setNotice("The creation is not finalized yet. Wait, then check again.");
         return;
       }
-      if (result.status !== "registered" || !result.deployment)
+      if (
+        result.status !== "registered" ||
+        !result.deployment ||
+        result.project?.id !== project.id
+      )
         throw new Error("Registration could not be verified. Check again.");
-      await onRegistered(result.deployment, wallet);
+      await onRegistered(result.project, wallet, result.notice);
       remember(null);
       setReview(null);
     });
