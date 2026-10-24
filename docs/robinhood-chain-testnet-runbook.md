@@ -148,7 +148,7 @@ Then run the acceptance scenario with finalized receipts:
 2. The owner commits one award with `awardId(sourceDigest)`.
 3. The attester binds the contributor wallet with the wallet's EIP-712
    signature (domain `SlopProjectEscrow`, version `5`).
-4. After the binding delay and the award's commit delay, anyone calls `pay`.
+4. After the award's commit delay, anyone calls `pay`.
 5. The owner withdraws part of the free balance. Check the fee is
    `floor(gross / 50)` (2%) and only `gross - fee` reaches the owner.
 6. Anyone calls `claimFees`.

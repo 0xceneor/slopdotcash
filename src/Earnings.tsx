@@ -298,7 +298,7 @@ export function EarningsPage({
     });
     if (mounted.current) {
       setMessage(
-        `${networkName[chain]} wallet confirmed. Eligible unpaid awards will be sent automatically. Wallet changes wait at least 24 hours and any earlier payment must be reconciled first.`,
+        `${networkName[chain]} wallet confirmed. Eligible unpaid awards will be sent automatically. A changed wallet is used immediately after any earlier payment is reconciled.`,
       );
       refresh();
     }
