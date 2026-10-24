@@ -7,8 +7,8 @@
 -- moderator approves a flag before it counts.
 --
 -- A flag stops counting when it closes. The reporter may withdraw it. A clean
--- scan requested after the flag was filed resolves it, and so does any
--- reinstatement of the project. A clean fresh scan requested after a pause
+-- scan resolves only flags in its immutable request snapshot. A moderator
+-- reinstatement resolves the flags it reviews. A clean fresh scan after a pause
 -- that flags alone placed appends a signed vetting-service reinstatement.
 -- History is never deleted or rewritten.
 PRAGMA foreign_keys = OFF;
@@ -209,6 +209,16 @@ CREATE UNIQUE INDEX project_flags_one_active
   ON project_flags(project_id, reporter_github_id) WHERE state = 'active';
 CREATE INDEX project_flags_project ON project_flags(project_id, state, created_at);
 
+-- Bind each new scan to its exact active flag set. Timestamps can tie.
+ALTER TABLE vetting_assessments ADD COLUMN flag_ids TEXT NOT NULL DEFAULT '[]'
+  CHECK (json_valid(flag_ids) AND json_type(flag_ids) = 'array');
+CREATE TRIGGER vetting_flag_snapshot_fixed
+BEFORE UPDATE OF flag_ids ON vetting_assessments
+WHEN NEW.flag_ids IS NOT OLD.flag_ids
+BEGIN
+  SELECT RAISE(ABORT, 'the scan flag snapshot is immutable');
+END;
+
 -- The only update closes an active flag once; nothing else changes.
 CREATE TRIGGER project_flags_close_once
 BEFORE UPDATE ON project_flags
@@ -250,6 +260,10 @@ WHEN NEW.actor_role = 'vetting-service' AND NEW.action = 'reinstate' AND NOT EXI
   SELECT 1 FROM vetting_assessments a
    WHERE a.id = json_extract(NEW.system_issuer, '$.assessmentId')
      AND a.project_id = NEW.project_id AND a.state = 'clean'
+     AND NOT EXISTS (
+       SELECT 1 FROM project_flags f WHERE f.project_id = NEW.project_id
+         AND f.state = 'active' AND f.id NOT IN (SELECT value FROM json_each(a.flag_ids))
+     )
      AND a.requested_at >= (
        SELECT created_at FROM project_enforcements latest
         WHERE latest.project_id = NEW.project_id
@@ -267,7 +281,7 @@ BEGIN
   SELECT RAISE(ABORT, 'a scan reinstatement needs a clean fresh scan after a flag-only pause');
 END;
 
--- A clean scan requested after a flag resolves it.
+-- A clean scan resolves only the flags bound to its request.
 CREATE TRIGGER project_flags_resolve_on_clean_scan
 AFTER UPDATE OF state ON vetting_assessments
 WHEN OLD.state = 'pending' AND NEW.state = 'clean'
@@ -276,11 +290,11 @@ BEGIN
      SET state = 'resolved', closed_at = NEW.completed_at,
          closed_by = 'clean-scan', closed_reference = NEW.id
    WHERE project_id = NEW.project_id AND state = 'active'
-     AND created_at < NEW.requested_at;
+     AND id IN (SELECT value FROM json_each(NEW.flag_ids));
 END;
 
--- Any reinstatement resolves the flags it found, so a reinstated project
--- does not pause again on the same flags.
+-- A scan reinstatement cannot resolve evidence that arrived during the scan.
+-- A moderator reinstatement resolves the flags present at that decision.
 CREATE TRIGGER project_flags_resolve_on_reinstatement
 AFTER INSERT ON project_enforcements
 WHEN NEW.action = 'reinstate'
@@ -289,5 +303,9 @@ BEGIN
      SET state = 'resolved', closed_at = NEW.created_at,
          closed_by = 'reinstatement', closed_reference = NEW.id
    WHERE project_id = NEW.project_id AND state = 'active'
-     AND created_at <= NEW.created_at;
+     AND created_at <= NEW.created_at
+     AND (NEW.actor_role <> 'vetting-service' OR id IN (
+       SELECT listed.value FROM vetting_assessments a, json_each(a.flag_ids) listed
+        WHERE a.id = json_extract(NEW.system_issuer, '$.assessmentId')
+     ));
 END;
