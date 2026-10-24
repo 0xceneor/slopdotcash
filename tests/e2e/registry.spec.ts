@@ -1246,11 +1246,18 @@ test("an applicant publishes an application stored before self-service setup wit
     "submitted 2026-10-01 before self-service setup",
   );
   await entry.getByRole("button", { name: "Create this project" }).click();
+  await expect(entry.getByRole("alert")).toContainText("Install Slopbot");
+  expect(await listedProject(page, project.id)).toBeUndefined();
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain("403");
+  errors.length = 0;
+  await setSlopbot(`${project.repository}/installed`);
+  await entry.getByRole("button", { name: "Create this project" }).click();
   await expect(entry.locator(".project-setup-status h2")).toHaveText(
-    "Setup status: Action needed",
+    "Setup status: Waiting for the security scan",
   );
   await expect(entry.locator(".project-setup-status")).toContainText(
-    `Slopbot is not installed on ${project.repository}.`,
+    `Slopbot is installed on ${project.repository}.`,
   );
   expect(await listedProject(page, project.id)).toMatchObject({
     name: project.name,
