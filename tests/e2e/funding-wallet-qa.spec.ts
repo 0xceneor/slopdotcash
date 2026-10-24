@@ -112,6 +112,9 @@ async function keyboardTo(
 test("funding and wallet keyboard flows remain accessible at 200 percent text size", async ({
   page,
 }, info) => {
+  await page.route("**/api/v1/project-session", (route) =>
+    route.fulfill({ json: { session: null } }),
+  );
   await page.route("**/api/v1/payments/me", (route) =>
     route.fulfill({
       json: {

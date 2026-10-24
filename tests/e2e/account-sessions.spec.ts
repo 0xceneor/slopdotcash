@@ -33,6 +33,9 @@ test("Account waits for identity, revokes another session and signs out the curr
       ),
     }),
   );
+  await page.route(`${site}/api/v1/project-session`, (route) =>
+    route.fulfill({ json: { session: null } }),
+  );
   await page.route(`${site}/api/v1/points/**`, async (route) => {
     const path = new URL(route.request().url()).pathname;
     let json: unknown;
@@ -127,6 +130,9 @@ for (const lostResponse of [false, true]) {
             : new URL(route.request().url()).pathname,
         ),
       }),
+    );
+    await page.route(`${site}/api/v1/project-session`, (route) =>
+      route.fulfill({ json: { session: null } }),
     );
     await page.route(`${site}/api/v1/points/**`, async (route) => {
       const path = new URL(route.request().url()).pathname;
