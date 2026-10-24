@@ -1008,3 +1008,30 @@ describe("related-party awards", () => {
     expect(approved.body.case.awardState).toBe("approved");
   });
 });
+
+test("a revised program budget is checked before reserving an award", async () => {
+  const env = open();
+  const id = await env.receive(REPORTER, "2026-10-19T09:10:00.000Z");
+  await env.decide(id, "vault-drain");
+  env.setBeforeBatch(() => {
+    const manifest = programManifest({
+      ...OPEN_PROGRAM,
+      amount: { ...OPEN_PROGRAM.amount, grossMinor: "4" },
+      capacity: { ...OPEN_PROGRAM.capacity, awards: 1 },
+    });
+    const digest = createHash("sha256").update(manifest).digest("hex");
+    env.sqlite
+      .query(
+        "INSERT INTO project_revisions (project_id, revision, manifest, manifest_sha256, reason, created_at) VALUES (?, 2, ?, ?, 'synthetic budget revision', ?)",
+      )
+      .run(PROJECT, manifest, digest, "2026-10-19T10:00:00.000Z");
+    env.sqlite
+      .query(
+        "UPDATE projects SET revision = 2, manifest = ?, manifest_sha256 = ? WHERE id = ?",
+      )
+      .run(manifest, digest, PROJECT);
+  });
+  const result = await env.award(id, "1000000");
+  expect(result.status).toBe(409);
+  expect(env.reservations()).toEqual([]);
+});

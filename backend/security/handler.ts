@@ -600,10 +600,15 @@ async function programFunds(
   network: SecurityBountyTerms["amount"]["network"];
   budgetMinor: string;
   availableMinor: string;
+  programRevision: number;
 } | null> {
-  const program = (await currentProgram(deps, projectId))?.manifest
-    .securityBounty;
-  if (program === undefined || program.funding.state !== "verified-available")
+  const current = await currentProgram(deps, projectId);
+  const program = current?.manifest.securityBounty;
+  if (
+    current === null ||
+    program === undefined ||
+    program.funding.state !== "verified-available"
+  )
     return null;
   const budget =
     BigInt(program.amount.grossMinor) * BigInt(program.capacity.awards);
@@ -618,6 +623,7 @@ async function programFunds(
     currency: program.amount.currency,
     decimals: program.amount.decimals,
     network: program.amount.network,
+    programRevision: current.revision,
     budgetMinor: budget.toString(),
     availableMinor: (available > 0n ? available : 0n).toString(),
   };
@@ -2312,7 +2318,7 @@ async function awardReservation(
     before: [
       deps.db
         .prepare(
-          `INSERT INTO security_award_reservations (case_id, project_id, root_cause_key, policy_revision, gross_minor, currency, reserved_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT revision FROM security_cases WHERE id = ?) = ? AND (SELECT COALESCE(SUM(CAST(gross_minor AS INTEGER)), 0) FROM security_award_reservations WHERE project_id = ? AND currency = ?) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND NOT EXISTS (${ROOT_CAUSE_PENDING_REVIEW})`,
+          `INSERT INTO security_award_reservations (case_id, project_id, root_cause_key, policy_revision, gross_minor, currency, reserved_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT revision FROM security_cases WHERE id = ?) = ? AND (SELECT COALESCE(SUM(CAST(gross_minor AS INTEGER)), 0) FROM security_award_reservations WHERE project_id = ? AND currency = ?) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND NOT EXISTS (${ROOT_CAUSE_PENDING_REVIEW}) AND (SELECT revision FROM projects WHERE id = ?) = ?`,
         )
         .bind(
           row.id,
@@ -2331,6 +2337,8 @@ async function awardReservation(
           row.project_id,
           row.id,
           rootCauseKey,
+          row.project_id,
+          funds.programRevision,
         ),
     ],
     set: {
