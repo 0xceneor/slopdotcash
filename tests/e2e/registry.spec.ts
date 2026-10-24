@@ -30,6 +30,7 @@ const OWNER_TOKEN = process.env.SLOP_E2E_OWNER_TOKEN ?? "";
 const MODERATOR_TOKEN = process.env.SLOP_E2E_MODERATOR_TOKEN ?? "";
 const VETTING_PUBLIC_KEY = process.env.SLOP_E2E_VETTING_PUBLIC_KEY ?? "";
 const VETTING_PRIVATE_KEY = process.env.SLOP_E2E_VETTING_PRIVATE_KEY ?? "";
+const GITHUB_FIXTURE = process.env.SLOP_E2E_GITHUB_API_ORIGIN ?? "";
 
 function walkthroughOptions() {
   return process.env.SLOP_E2E_VIDEO === "1"
@@ -179,7 +180,26 @@ function fixtureProjects() {
       id: `owned-registry-${suffix}`,
       name: `Owned Registry ${words}`,
     },
+    setup: {
+      repository: `e2e-owner/setup-registry-${suffix}`,
+      id: `setup-registry-${suffix}`,
+      name: `Setup Registry ${words}`,
+    },
+    stored: {
+      repository: `e2e-owner/stored-registry-${suffix}`,
+      id: `stored-registry-${suffix}`,
+      name: `Stored Registry ${words}`,
+    },
   };
+}
+
+/** Sets what the Slopbot GitHub App reads in the loopback GitHub fixture. */
+async function setSlopbot(path: string) {
+  if (!GITHUB_FIXTURE) throw new Error("Missing E2E GitHub fixture");
+  const response = await fetch(`${GITHUB_FIXTURE}/__fixture/slopbot/${path}`, {
+    method: "PUT",
+  });
+  expect(response.status).toBe(204);
 }
 
 /** Sets the /login session cookie; local http origins are secure contexts. */
@@ -341,7 +361,7 @@ test("an owner creates a paused project without admin approval @registry", async
       (entry: { projectId: string }) => entry.projectId === project.id,
     ),
   ).toMatchObject([{ revision: 1 }]);
-  // Unavailable installation checks must not become automatic clearance.
+  // Without the Slopbot installation, the project stays paused.
   await expect(page.locator("main")).toContainText("Slopbot");
   await expectAccessible(page);
   expect(errors).toEqual([]);
@@ -1022,6 +1042,247 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   await expectAccessible(applicant);
   expect(applicantErrors).toEqual([]);
   await applicantContext.close();
+});
+
+test("an owner resumes setup after installing Slopbot; a failed scan and lost access each show the next action @registry", async ({
+  browser,
+  request,
+}) => {
+  const project = fixtureProjects().setup;
+  const context = await browser.newContext(walkthroughOptions());
+  const page = await context.newPage();
+  const errors = observe(page);
+  await signIn(page, OWNER_TOKEN);
+  await draftApplication(page, project);
+  await page
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+
+  // New setup: the paused project is listed, its first scan is queued, and
+  // the one next action is to install Slopbot.
+  const created = page.locator(".project-setup-status");
+  await expect(created.locator("h2")).toHaveText("Setup status: Action needed");
+  await expect(created.getByRole("status")).toContainText(
+    `Slopbot is not installed on ${project.repository}.`,
+  );
+  await expect(
+    created.getByRole("link", { name: "Install Slopbot" }),
+  ).toHaveAttribute(
+    "href",
+    "https://github.com/apps/slopdotcash/installations/new",
+  );
+  await expect(created).toContainText("Queued. The security scan is queued.");
+  await expectAccessible(page);
+
+  // Resumed setup: after the installation, the owner checks again from
+  // "Your projects" on a new page load. Slopbot reads admin access.
+  await setSlopbot(`${project.repository}/installed`);
+  await page.goto("/projects/new", { waitUntil: "networkidle" });
+  await page.getByText("Your projects", { exact: true }).click();
+  const entry = page.locator("#your-projects li", { hasText: project.name });
+  await entry.getByRole("button", { name: "Check setup" }).click();
+  const resumed = entry.locator(".project-setup-status");
+  await expect(resumed.locator("h2")).toHaveText(
+    "Setup status: Waiting for the security scan",
+  );
+  await expect(resumed).toContainText(
+    `Confirmed. @e2e-owner has admin access to ${project.repository}.`,
+  );
+  await expect(resumed).toContainText(
+    `Installed. Slopbot is installed on ${project.repository}.`,
+  );
+
+  // Scan failure: an incomplete scan does not clear the project. The owner
+  // requests a new scan without an admin.
+  await postVettingResult(
+    request,
+    project.id,
+    project.repository,
+    "incomplete",
+  );
+  await resumed.getByRole("button", { name: "Check again" }).click();
+  await expect(resumed.locator("h2")).toHaveText("Setup status: Action needed");
+  await expect(resumed.getByRole("status")).toContainText(
+    "The last scan could not finish, so it did not clear the project.",
+  );
+  await resumed.getByRole("button", { name: "Request a new scan" }).click();
+  await expect(resumed.locator("h2")).toHaveText(
+    "Setup status: Waiting for the security scan",
+  );
+  await expectAccessible(page);
+
+  // Owner edit: a text-only change publishes at once as revision 2.
+  await page.goto(`/projects/${project.id}/manage`, {
+    waitUntil: "networkidle",
+  });
+  await page
+    .getByRole("textbox", { name: "Short description", exact: true })
+    .fill("Accepted setup outcomes with a clear project scope");
+  await page
+    .getByLabel("Revision note", { exact: true })
+    .fill("Clarify the project scope for contributors");
+  await page.getByRole("button", { name: "Publish changes" }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Published revision 2" }),
+  ).toBeVisible();
+  expect(errors).toEqual([]);
+
+  // Permission loss: Slopbot now reads only read access. The setup status
+  // names the next action, and the owner cannot publish another change.
+  await setSlopbot(`${project.repository}/permission/e2e-owner/read`);
+  await page.reload({ waitUntil: "networkidle" });
+  const managed = page.locator(".project-setup-status");
+  await expect(managed.locator("h2")).toHaveText("Setup status: Action needed");
+  await expect(managed).toContainText(
+    `Not confirmed. @e2e-owner has read access to ${project.repository}. Write, maintain or admin access is required.`,
+  );
+  await page
+    .getByRole("textbox", { name: "Short description", exact: true })
+    .fill("A change from an account without write access");
+  await page.getByRole("button", { name: "Publish changes" }).click();
+  await expect(page.locator("form").getByRole("alert")).toContainText(
+    "Write, maintain or admin access is required",
+  );
+  const history = await (
+    await page.request.get("/api/v1/project-revisions")
+  ).json();
+  expect(
+    history.revisions.filter(
+      (revision: { projectId: string }) => revision.projectId === project.id,
+    ),
+  ).toHaveLength(2);
+  expect(await listedProject(page, project.id)).toMatchObject({
+    status: "paused",
+    headline: "Accepted setup outcomes with a clear project scope",
+  });
+  await expectAccessible(page);
+  // The only console error is the browser's report of the refused publish.
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain("403");
+  await context.close();
+});
+
+test("an applicant publishes an application stored before self-service setup without entering it again @registry", async ({
+  browser,
+}) => {
+  const project = fixtureProjects().stored;
+  const persist = process.env.SLOP_E2E_PERSIST_TO;
+  if (!persist) throw new Error("Missing E2E registry database");
+
+  // The stored row holds the manifest this form submits, as the earlier
+  // review queue stored it. The request never reaches the server.
+  const draftContext = await browser.newContext();
+  const draft = await draftContext.newPage();
+  await signIn(draft, OWNER_TOKEN);
+  let manifest: Record<string, unknown> | undefined;
+  await draft.route("**/api/v1/projects", async (route) => {
+    if (route.request().method() !== "POST") return route.fallback();
+    manifest = route.request().postDataJSON().manifest;
+    await route.abort();
+  });
+  await draft.goto("/projects/new", { waitUntil: "networkidle" });
+  await draft.getByLabel("Public GitHub repository").fill(project.repository);
+  await draft.getByRole("button", { name: "Look up on GitHub" }).click();
+  await expect(draft.locator(".lookup-status")).toContainText(
+    `Found ${project.repository}`,
+  );
+  await draft.getByRole("button", { name: "Next: Contribution rules" }).click();
+  await draft.getByLabel("Project name").fill(project.name);
+  await draft.getByRole("button", { name: "Next: Rewards" }).click();
+  await draft.getByRole("button", { name: "Next: Review" }).click();
+  await draft
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect.poll(() => manifest).toBeDefined();
+  await draftContext.close();
+  const text = JSON.stringify(manifest);
+  const sql = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  const applicationId = `app_stored-${project.id}`;
+  const { execFileSync } = await import("node:child_process");
+  execFileSync(
+    "node",
+    [
+      "node_modules/wrangler/bin/wrangler.js",
+      "d1",
+      "execute",
+      "slop-private",
+      "--local",
+      "--persist-to",
+      persist,
+      "--command",
+      `INSERT INTO project_applications(id,project_id,repository_key,manifest,manifest_sha256,acceptance_criteria,applicant_github_id,applicant_github_login,submitted_at,status,admin_notification) VALUES(${[
+        applicationId,
+        project.id,
+        project.repository.toLowerCase(),
+        text,
+        createHash("sha256").update(text).digest("hex"),
+        "Merged pull requests that the maintainers accept",
+        "900000003",
+        "e2e-owner",
+        "2026-10-01T00:00:00.000Z",
+        "pending",
+        "pending",
+      ]
+        .map(sql)
+        .join(",")})`,
+    ],
+    { stdio: "pipe" },
+  );
+
+  const context = await browser.newContext(walkthroughOptions());
+  const page = await context.newPage();
+  const errors = observe(page);
+  await signIn(page, OWNER_TOKEN);
+  await page.goto("/projects/new", { waitUntil: "networkidle" });
+  await page.getByText("Your projects", { exact: true }).click();
+  const entry = page.locator("#your-projects li", { hasText: project.name });
+  await expect(entry).toContainText(
+    "submitted 2026-10-01 before self-service setup",
+  );
+  await entry.getByRole("button", { name: "Create this project" }).click();
+  await expect(entry.locator(".project-setup-status h2")).toHaveText(
+    "Setup status: Action needed",
+  );
+  await expect(entry.locator(".project-setup-status")).toContainText(
+    `Slopbot is not installed on ${project.repository}.`,
+  );
+  expect(await listedProject(page, project.id)).toMatchObject({
+    name: project.name,
+    status: "paused",
+  });
+  const history = await (
+    await page.request.get("/api/v1/project-revisions")
+  ).json();
+  expect(
+    history.revisions.filter(
+      (revision: { projectId: string }) => revision.projectId === project.id,
+    ),
+  ).toMatchObject([{ revision: 1 }]);
+
+  // The application is published once. It leaves the list, and a second
+  // publish is refused, so no duplicate row can appear.
+  await page.reload({ waitUntil: "networkidle" });
+  await page.getByText("Your projects", { exact: true }).click();
+  await expect(
+    page.locator("#your-projects li", { hasText: project.name }),
+  ).toHaveCount(1);
+  await expect(
+    page.locator("#your-projects li", { hasText: project.name }),
+  ).toContainText(`${project.name} · paused`);
+  const again = await page.request.post(
+    `/api/v1/project-applications/${applicationId}/publish`,
+    {
+      headers: {
+        origin: new URL(page.url()).origin,
+        cookie: `__Host-slop_points=${OWNER_TOKEN}`,
+      },
+      data: {},
+    },
+  );
+  expect(again.status()).toBe(409);
+  await expectAccessible(page);
+  expect(errors).toEqual([]);
+  await context.close();
 });
 
 test("an unavailable registry shows an error, never an empty list @registry", async ({
