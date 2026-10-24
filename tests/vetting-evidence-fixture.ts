@@ -19,7 +19,7 @@ export function localEvidencePolicy(now: Date): EvidencePolicy {
     version: "isolated-fixture-only",
     policyAuthorityGithubId: "900000003",
     operatorGithubIds: ["900000003"],
-    evidenceAccessDurationSeconds: 3600,
+    postClosureRetentionSeconds: 90 * 86400,
     readGrantDurationSeconds: 900,
     maxObjectBytes: 8 * 1024 * 1024,
     maxRunBytes: 64 * 1024 * 1024,

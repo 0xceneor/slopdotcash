@@ -21,6 +21,9 @@ const name =
     : "slop-staging-vetting-backup";
 const config = `workers/vetting-backup/wrangler${target === "staging" ? ".staging" : ""}.toml`;
 const wrangler = "./node_modules/.bin/wrangler";
+const retention = process.env.SLOP_VETTING_RETENTION_RELEASE || "off";
+if (retention !== "off" && retention !== "enabled")
+  throw new Error("Invalid scanner retention release setting");
 execFileSync(
   wrangler,
   [
@@ -33,6 +36,8 @@ execFileSync(
     `Release ${sha}`,
     "--var",
     "EVIDENCE_BACKUP_MODE:enabled",
+    "--var",
+    `EVIDENCE_RETENTION_MODE:${retention}`,
   ],
   { stdio: "inherit" },
 );

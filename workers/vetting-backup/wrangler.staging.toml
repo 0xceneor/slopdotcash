@@ -6,9 +6,15 @@ preview_urls = false
 
 [vars]
 EVIDENCE_BACKUP_MODE = "off"
+EVIDENCE_RETENTION_MODE = "off"
 
 [triggers]
 crons = ["17 2 * * *"]
+
+[[d1_databases]]
+binding = "EVIDENCE_DATABASE"
+database_name = "slop-staging"
+database_id = "6fcddcc1-f3d7-4175-bdde-09afddd53a8a"
 
 [[r2_buckets]]
 binding = "EVIDENCE_SOURCE"
