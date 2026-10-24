@@ -239,6 +239,7 @@ async function draftApplication(
   page: Page,
   project: { repository: string; name: string },
 ) {
+  await setSlopbot(`${project.repository}/installed`);
   await page.goto("/projects/new", { waitUntil: "networkidle" });
   await page.getByLabel("Public GitHub repository").fill(project.repository);
   await page.getByRole("button", { name: "Look up on GitHub" }).click();
@@ -361,7 +362,7 @@ test("an owner creates a paused project without admin approval @registry", async
       (entry: { projectId: string }) => entry.projectId === project.id,
     ),
   ).toMatchObject([{ revision: 1 }]);
-  // Without the Slopbot installation, the project stays paused.
+  // Installation authority is verified; the project waits for its scan.
   await expect(page.locator("main")).toContainText("Slopbot");
   await expectAccessible(page);
   expect(errors).toEqual([]);
@@ -1054,29 +1055,34 @@ test("an owner resumes setup after installing Slopbot; a failed scan and lost ac
   const errors = observe(page);
   await signIn(page, OWNER_TOKEN);
   await draftApplication(page, project);
+  await setSlopbot(`${project.repository}/missing`);
   await page
     .getByRole("button", { name: "Create project", exact: true })
     .click();
-
-  // New setup: the paused project is listed, its first scan is queued, and
-  // the one next action is to install Slopbot.
-  const created = page.locator(".project-setup-status");
-  await expect(created.locator("h2")).toHaveText("Setup status: Action needed");
-  await expect(created.getByRole("status")).toContainText(
-    `Slopbot is not installed on ${project.repository}.`,
+  await expect(page.locator("form").getByRole("alert")).toContainText(
+    "Install Slopbot",
   );
-  await expect(
-    created.getByRole("link", { name: "Install Slopbot" }),
-  ).toHaveAttribute(
-    "href",
-    "https://github.com/apps/slopdotcash/installations/new",
+  expect(await listedProject(page, project.id)).toBeUndefined();
+  // The deliberate creation refusal is the only expected console failure.
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain("403");
+  errors.length = 0;
+  await expectAccessible(page);
+
+  // Installing the App lets the owner retry the same draft. Only then does
+  // the project exist, with its first scan queued and no admin approval.
+  await setSlopbot(`${project.repository}/installed`);
+  await page
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  const created = page.locator(".project-setup-status");
+  await expect(created.locator("h2")).toHaveText(
+    "Setup status: Waiting for the security scan",
   );
   await expect(created).toContainText("Queued. The security scan is queued.");
   await expectAccessible(page);
 
-  // Resumed setup: after the installation, the owner checks again from
-  // "Your projects" on a new page load. Slopbot reads admin access.
-  await setSlopbot(`${project.repository}/installed`);
+  // A new page load resumes setup from Your projects.
   await page.goto("/projects/new", { waitUntil: "networkidle" });
   await page.getByText("Your projects", { exact: true }).click();
   const entry = page.locator("#your-projects li", { hasText: project.name });

@@ -103,6 +103,12 @@ async function submit(id: string): Promise<{ status: number; body: unknown }> {
       fetch: async () =>
         Response.json({ message: "Not Found" }, { status: 404 }),
     },
+    repositoryAccess: async () => ({
+      installation: "installed",
+      installationId: 42,
+      permission: "admin",
+      roleName: "admin",
+    }),
     repositoryControl: async () => ({
       state: "proven",
       reason: "@applicant owns the repository",

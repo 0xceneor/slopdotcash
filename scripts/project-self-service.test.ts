@@ -62,7 +62,12 @@ function registry() {
       state: "proven",
       reason: "@owner is a public member of example",
     } as RepositoryControl,
-    access: { installation: "missing" } as RepositoryAccess,
+    access: {
+      installation: "installed",
+      installationId: 42,
+      permission: "admin",
+      roleName: "admin",
+    } as RepositoryAccess,
     clearance: { state: "unscanned" } as VettingClearance,
     scans: [] as string[],
     scanAnswer: { state: "queued" } as ScanRequest,
@@ -178,8 +183,16 @@ test("an admin revision still replaces the listed project with that id", async (
   expect((await persistence.getProject("open-registry"))?.revision).toBe(2);
 });
 
-test("creation queues the first scan and returns one status whose next action is the Slopbot installation", async () => {
-  const { create, state } = registry();
+test("creation requires installation access before publishing and queuing the first scan", async () => {
+  const { create, state, persistence } = registry();
+  const installed = state.access;
+  state.access = { installation: "missing" };
+  expect((await create("open-registry", "example/open-registry")).status).toBe(
+    403,
+  );
+  expect(await persistence.getProject("open-registry")).toBeNull();
+  expect(state.scans).toEqual([]);
+  state.access = installed;
   const created = await create("open-registry", "example/open-registry");
   expect(created.status).toBe(201);
   const setup = created.body.setup as Setup;
@@ -187,12 +200,9 @@ test("creation queues the first scan and returns one status whose next action is
     "open-registry@1: First scan after self-service setup",
   ]);
   expect(setup).toMatchObject({
-    state: "action_required",
+    state: "waiting",
     status: "paused",
-    nextAction: {
-      kind: "install_slopbot",
-      href: "https://github.com/apps/slopdotcash/installations/new",
-    },
+    nextAction: { kind: "wait_for_scan" },
     checks: { scan: { state: "queued" } },
     // Funding is separate from readiness.
     funding: {
@@ -213,7 +223,8 @@ test("setup activates a project only with installation write access and a clean 
   const check = async (actor = OWNER) =>
     (await call("POST", "project-setup/open-registry/check", actor, {}))
       .body as { setup: Setup };
-  // Public facts let the owner create, but activation needs the installation.
+  // Losing the installation after creation prevents activation.
+  state.access = { installation: "missing" };
   state.clearance = CLEARED;
   expect((await check()).setup).toMatchObject({
     state: "action_required",
@@ -422,6 +433,20 @@ test("an application stored before self-service setup publishes once, by its app
       )
     ).status,
   ).toBe(404);
+  const installed = state.access;
+  state.access = { installation: "missing" };
+  expect(
+    (
+      await call(
+        "POST",
+        "project-applications/app_storedapplication1/publish",
+        OWNER,
+        {},
+      )
+    ).status,
+  ).toBe(403);
+  expect(await persistence.getProject("open-registry")).toBeNull();
+  state.access = installed;
   const published = await call(
     "POST",
     "project-applications/app_storedapplication1/publish",

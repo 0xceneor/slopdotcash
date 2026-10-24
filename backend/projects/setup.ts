@@ -136,7 +136,8 @@ function writes(access: RepositoryAccess): boolean {
  * installation is authoritative when present: it reads the exact
  * repository permission. Before installation, public GitHub facts (owner of
  * a user repository, or public member of its organization) let an owner
- * create and edit the paused project; activation needs the installation read.
+ * edit an existing paused project. Creation and activation require the
+ * installation read.
  */
 export function setupAuthority(
   control: RepositoryControl | null,

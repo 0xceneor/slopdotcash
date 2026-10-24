@@ -129,7 +129,19 @@ async function submit(
       },
       body: JSON.stringify(path === "projects" ? { manifest } : {}),
     }),
-    env: { SLOP_DB: db, ADMIN_GITHUB_IDS: "900000001" } as never,
+    env: {
+      SLOP_DB: db,
+      ADMIN_GITHUB_IDS: "900000001",
+      SLOPBOT: {
+        fetch: async () =>
+          Response.json({
+            installation: "installed",
+            installationId: 42,
+            permission: "admin",
+            roleName: "admin",
+          }),
+      },
+    } as never,
   });
   const body = (await response.json()) as {
     setup?: {
@@ -179,11 +191,11 @@ test("an owner who controls the repository creates the project at once", async (
   expect(status).toBe(201);
   expect(body.setup?.checks.authority).toEqual({
     state: "verified",
-    basis: "public-github-facts",
-    message: "@example owns example/open-registry.",
+    basis: "installation",
+    message: "@example has admin access to example/open-registry.",
   });
-  // Slopbot is not connected to this site, so the installation is a retry.
-  expect(body.setup?.checks.installation.state).toBe("retry");
+  // The installation read verifies authority before creation.
+  expect(body.setup?.checks.installation.state).toBe("installed");
   expect(
     sqlite
       .prepare("SELECT status FROM projects WHERE id = ?")
@@ -236,7 +248,7 @@ test("an alias must lead to the repository it names", async () => {
   );
   expect(former.status).toBe(201);
   expect(former.body.setup?.checks.authority.message).toBe(
-    "@example owns example/open-registry.",
+    "@example has admin access to example/open-registry.",
   );
 
   const other = await submit(

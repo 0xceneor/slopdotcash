@@ -640,7 +640,13 @@ async function currentAuthority(
   } catch {
     control = null;
   }
-  if (control?.state === "mismatch")
+  if (control === null)
+    fail(
+      503,
+      "github_unavailable",
+      "GitHub repository facts could not be checked. Try again.",
+    );
+  if (control.state === "mismatch")
     fail(422, "invalid_manifest", control.reason);
   const access = await readRepositoryAccess(
     deps.repositoryAccess,
@@ -663,6 +669,22 @@ function requireAuthority(authority: SetupAuthority): void {
     fail(503, "github_unavailable", authority.message);
   if (authority.state === "denied")
     fail(403, "authority_required", authority.message);
+}
+
+/** Owner decision D11: creation uses the installation's authority read. */
+function requireCreationAccess(checked: {
+  authority: SetupAuthority;
+  access: AccessCheck;
+}): void {
+  if (checked.access.state === "retry")
+    fail(503, "github_unavailable", checked.access.message);
+  if (checked.access.access.installation !== "installed")
+    fail(
+      403,
+      "installation_required",
+      "Install Slopbot on this repository, or restore its suspended installation, then try creating the project again.",
+    );
+  requireAuthority(checked.authority);
 }
 
 function actorOf(session: WebSession): GithubActor {
@@ -829,7 +851,7 @@ async function createProject(
     replaces: false,
   });
   const checked = await currentAuthority(deps, manifest, actor);
-  requireAuthority(checked.authority);
+  requireCreationAccess(checked);
   const created = await deps.persistence.createProject({
     manifest,
     manifestText: text,
@@ -1100,7 +1122,7 @@ async function publishPendingApplication(
     { replaces: false },
   );
   const checked = await currentAuthority(deps, application.manifest, actor);
-  requireAuthority(checked.authority);
+  requireCreationAccess(checked);
   const result = await deps.persistence.publishApplication({
     applicationId,
     actor,

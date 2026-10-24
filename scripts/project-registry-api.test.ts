@@ -263,6 +263,13 @@ async function seedHistoricalResult(
 /** Creates a project through self-service setup as an owner GitHub proves. */
 async function create(manifest: unknown, extra: Record<string, unknown> = {}) {
   const previous = control;
+  const previousAccess = access;
+  access = {
+    installation: "installed",
+    installationId: 42,
+    permission: "admin",
+    roleName: "admin",
+  };
   control = () => ({
     state: "proven",
     reason: "@e2e-applicant is a public member of example",
@@ -271,6 +278,7 @@ async function create(manifest: unknown, extra: Record<string, unknown> = {}) {
     return await call("POST", "projects", "applicant", { manifest, ...extra });
   } finally {
     control = previous;
+    access = previousAccess;
   }
 }
 
@@ -564,6 +572,8 @@ describe("project registry API", () => {
     expect((await retry.json()).error).toBe("github_unavailable");
     expect(await persistence.listProjects()).toEqual([]);
     // Maintain access read through the installation creates the project.
+    deps.repositoryControl = async (manifest) =>
+      control(manifest.repositories[0].id);
     access = {
       installation: "installed",
       installationId: 7,

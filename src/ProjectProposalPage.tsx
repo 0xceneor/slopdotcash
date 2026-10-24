@@ -23,6 +23,7 @@ import {
 import {
   type OwnedRepository,
   type ProjectSetupStatus,
+  SLOPBOT_INSTALL_URL,
   validRepositoryPath,
 } from "./lib/project-contracts";
 import {
@@ -1349,11 +1350,11 @@ export default function ProjectProposalPage() {
       <section className="proposal-intro">
         <h1>Add a project</h1>
         <p>
-          Create your project without waiting for an admin. Slop checks your
-          GitHub access, you install Slopbot, and an automatic security scan
-          runs. The project goes live when those checks pass. Funding is
-          optional. Questions? Email{" "}
-          <a href={CONTACT_MAILTO}>{CONTACT_EMAIL}</a>.
+          <a href={SLOPBOT_INSTALL_URL}>Install Slopbot</a> on your repository
+          first. Then create your project without waiting for an admin. Slop
+          checks your GitHub access and starts an automatic security scan. The
+          project goes live when those checks pass. Funding is optional.
+          Questions? Email <a href={CONTACT_MAILTO}>{CONTACT_EMAIL}</a>.
         </p>
       </section>
       <OwnerProjects
