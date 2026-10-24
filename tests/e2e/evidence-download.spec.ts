@@ -35,7 +35,7 @@ test("large private evidence downloads with a single-use browser grant @registry
       },
       data: body,
     });
-  const repository = `example/large-evidence-${suffix}`;
+  const repository = `e2e-applicant/large-evidence-${suffix}`;
   const facts = fixtureRepository(repository);
   const projectManifest = applicationManifest(project, repository);
   const steward = projectManifest.steward as Record<string, unknown>;
@@ -52,31 +52,23 @@ test("large private evidence downloads with a single-use browser grant @registry
     repositoryId: String(facts.id),
     repositoryNodeId: facts.node_id,
   };
-  const submitted = await api("project-applications", {
+  const submitted = await api("projects", {
     manifest: projectManifest,
   });
   expect(submitted.status()).toBe(201);
-  const application = (await submitted.json()).application;
-  expect(
-    (
-      await api(
-        `admin/project-applications/${application.id}/approve`,
-        {},
-        true,
-      )
-    ).status(),
-  ).toBe(200);
-  const queued = await api(
-    "admin/vetting/assessments",
-    {
-      projectId: project,
-      revision: 1,
-      reason: "Inspect large retained synthetic evidence",
+  // Creation queues its first scan automatically. Read that real assessment
+  // instead of making an admin create a second request.
+  const queue = await request.get("/api/v1/admin/vetting", {
+    headers: {
+      cookie: `__Host-slop_points=${process.env.SLOP_E2E_ADMIN_TOKEN}`,
     },
-    true,
+  });
+  expect(queue.status()).toBe(200);
+  const queued = (await queue.json()).assessments.find(
+    (entry: { projectId: string }) => entry.projectId === project,
   );
-  expect(queued.status()).toBe(201);
-  const assessment = (await queued.json()).assessment.id,
+  expect(queued).toBeDefined();
+  const assessment = queued.id,
     runId = "large-evidence";
   const bytes = process.env.SLOP_VETTING_OVERLAY_PATH
     ? await readFile(process.env.SLOP_VETTING_OVERLAY_PATH)

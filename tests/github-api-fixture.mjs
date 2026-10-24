@@ -33,8 +33,13 @@ export const E2E_SECURITY_ACCOUNTS = Object.freeze({
 /** Deterministic public facts for a fixture repository. */
 export function fixtureRepository(fullName) {
   const [ownerLogin, name] = fullName.split("/");
-  const owner =
-    ownerLogin === E2E_OWNER.login
+  const memberId =
+    ownerLogin === "e2e-applicant"
+      ? "900000002"
+      : E2E_SECURITY_ACCOUNTS[ownerLogin.replace(/^e2e-/, "")];
+  const owner = memberId
+    ? { login: ownerLogin, id: Number(memberId), type: "User" }
+    : ownerLogin === E2E_OWNER.login
       ? { login: E2E_OWNER.login, id: Number(E2E_OWNER.githubId), type: "User" }
       : {
           login: E2E_ORGANIZATION.login,
