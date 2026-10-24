@@ -457,6 +457,11 @@ export async function createMonthlyObligations(
   let needed = 0n;
   for (const award of [...run.snapshot.awards, ...outstanding])
     if (!reserved.has(award.sourceDigest)) needed += BigInt(award.grossBase);
+  let fundingSnapshot: {
+    asset: string;
+    free: string;
+    observedAt: string;
+  } | null = null;
   if (needed > 0n) {
     const vault = await db
       .prepare(
@@ -483,14 +488,38 @@ export async function createMonthlyObligations(
       ).run();
       return "underfunded";
     }
+    fundingSnapshot = {
+      asset: vault.asset_address,
+      free: vault.free_balance,
+      observedAt: vault.observed_at,
+    };
   }
   const createdAt = now.toISOString();
+  // Bind the calculation to the immutable obligation sets and the exact vault
+  // snapshot. A concurrent month or refreshed balance must retry the check.
   await db.batch([
     db
       .prepare(
-        "UPDATE monthly_payment_runs SET obligations_created_at=? WHERE project_id=? AND period=? AND obligations_created_at IS NULL",
+        "UPDATE monthly_payment_runs SET obligations_created_at=? WHERE project_id=? AND period=? AND obligations_created_at IS NULL AND (SELECT COUNT(*) FROM monthly_payment_obligations WHERE network=? AND vault=?)=? AND (SELECT COUNT(*) FROM payment_obligations WHERE network=? AND vault=?)=? AND (? IS NULL OR EXISTS(SELECT 1 FROM vault_snapshots WHERE project_id=? AND network=? AND vault=? AND asset_address=? AND free_balance=? AND observed_at=?))",
       )
-      .bind(createdAt, projectId, period),
+      .bind(
+        createdAt,
+        projectId,
+        period,
+        run.network,
+        run.vault,
+        outstanding.length,
+        run.network,
+        run.vault,
+        reserved.size,
+        fundingSnapshot?.free ?? null,
+        projectId,
+        run.network,
+        run.vault,
+        fundingSnapshot?.asset ?? null,
+        fundingSnapshot?.free ?? null,
+        fundingSnapshot?.observedAt ?? null,
+      ),
     db
       .prepare(
         "INSERT INTO monthly_payment_obligations(project_id,period,github_user_id,github_login,gross_base,fee_base,source_digest,network,vault,created_at) SELECT r.project_id,r.period,json_extract(a.value,'$.githubUserId'),json_extract(a.value,'$.login'),json_extract(a.value,'$.grossBase'),json_extract(a.value,'$.feeBase'),json_extract(a.value,'$.sourceDigest'),r.network,r.vault,r.obligations_created_at FROM monthly_payment_runs r, json_each(r.snapshot,'$.awards') a WHERE r.project_id=? AND r.period=? AND r.obligations_created_at=? ON CONFLICT DO NOTHING",
@@ -498,7 +527,8 @@ export async function createMonthlyObligations(
       .bind(projectId, period, createdAt),
   ]);
   const after = await loadRun(db, projectId, period);
-  return after?.obligationsCreatedAt === createdAt
+  if (!after?.obligationsCreatedAt) return "stale-funding";
+  return after.obligationsCreatedAt === createdAt
     ? "created"
     : "already-created";
 }
