@@ -41,6 +41,7 @@ import type {
 import { assertProjectDefinition } from "../../src/lib/project-schema.mjs";
 import type { ProjectDefinition } from "../../src/lib/projects.mjs";
 import type { D1TransactionalDatabase as D1Database } from "../d1";
+import { notifyMonthlyUnderfunded } from "../notifications/events";
 
 export class MonthlyPaymentError extends Error {
   constructor(
@@ -473,8 +474,15 @@ export async function createMonthlyObligations(
       now.getTime() - Date.parse(vault.observed_at) > VAULT_SNAPSHOT_STALE_MS
     )
       return "stale-funding";
-    if (vault.free_balance === null || BigInt(vault.free_balance) < needed)
+    if (vault.free_balance === null || BigInt(vault.free_balance) < needed) {
+      await notifyMonthlyUnderfunded(
+        db,
+        projectId,
+        period,
+        now.toISOString(),
+      ).run();
       return "underfunded";
+    }
   }
   const createdAt = now.toISOString();
   await db.batch([
@@ -617,7 +625,7 @@ export interface MonthlyOwnerView {
   period: string;
   manifestSha256: string;
   automatic: boolean;
-  /** Null until the owner defines the automatic cutoff (MONTHLY_PAYMENT_SCHEDULE). */
+  /** Null without MONTHLY_PAYMENT_SCHEDULE or before its first period. */
   cutoffAt: string | null;
   deployment: EscrowDeployment | null;
   asset: (PaymentAsset & { symbol: string | null }) | null;
@@ -795,6 +803,20 @@ export function monthlyOwnerService(deps: {
           409,
           "month_frozen",
           "This month is finalized. Its allocations can no longer change.",
+        );
+      // Decision D1: with the automatic default on, allocations stay as they
+      // were at the cutoff until the coordinator freezes them.
+      const schedule = deps.schedule();
+      const cutoff = schedule ? monthlyCutoff(schedule, period) : null;
+      if (
+        cutoff &&
+        deps.now().getTime() >= cutoff.getTime() &&
+        (await automaticMonthlyPayment(deps.db, project.id))
+      )
+        throw new MonthlyPaymentError(
+          409,
+          "cutoff_passed",
+          "The cutoff for this month has passed. The automatic process pays the current allocations.",
         );
       const base = await loadBase(deps.db, project.id, period);
       if (!base)
