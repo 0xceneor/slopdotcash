@@ -113,6 +113,8 @@ Commands:
   authorize Revalidate installed source immediately before a GitHub write
   start    Authorize current skill source and capture an optional usage baseline
   trace    Permanently upload this run's private trace and finalize it
+  opened   After the pull request exists, sign in with GitHub and record its
+           pull_request_opened event; uploads no trace, usage, or source
   finish   Close a measured run and print its device-signed GitHub footer
 
 Common options:
@@ -124,6 +126,10 @@ Common options:
                       "unavailable" states it could not be established.
   --client-version <version>  Exact declared agent/client version
   --json              Emit machine-readable JSON
+
+Opened requires --pull-request <url>, --pull-request-node-id <id> (from
+gh pr view <url> --json id --jq .id), --client-version, and the same
+--provider, --model, and --client as the footer.
 
 Start and finish also require --lane <public-lane>. Finish requires --run
 <run-id>. Optional evidence uses --trajectory <path>, --trace-server-run <id>,
@@ -1616,37 +1622,17 @@ export function disclosePrivateTrace(trace) {
   );
 }
 
-export async function uploadPrivateTrace(
+/**
+ * Authenticates the contributor through their own GitHub login and creates
+ * (or idempotently reads back) one server run for this project. The server
+ * binds the run to the authenticated GitHub ID, never to a value this script
+ * supplies.
+ */
+async function authenticatedServerRun(
   state,
-  trajectoryPath,
   clientVersion,
-  {
-    fetchImpl = globalThis.fetch,
-    assertionProvider = slopIdentityAssertion,
-    disclosure = disclosePrivateTrace,
-  } = {},
+  { fetchImpl, assertionProvider },
 ) {
-  declaredIdentifier(clientVersion, "--client-version", 128);
-  if (typeof fetchImpl !== "function")
-    fail("private trace transport is unavailable");
-  const trace = privateTraceFile(trajectoryPath);
-  if (typeof disclosure !== "function")
-    fail("private trace disclosure is unavailable");
-  disclosure({
-    absolutePath: trace.absolutePath,
-    sha256: trace.sha256,
-    sizeBytes: trace.sizeBytes,
-    contentType: trace.contentType,
-    privacyContract: TRACE_PRIVACY_CONTRACT,
-    automaticRedaction: "none",
-    retention: "permanent",
-  });
-  const intake = await authoritativePrivateIntake(fetchImpl);
-  if (intake.enabled !== true) {
-    fail(
-      "private request intake is unavailable; private trace upload is blocked",
-    );
-  }
   const identityAssertion = await assertionProvider(fetchImpl);
   if (
     typeof identityAssertion !== "string" ||
@@ -1713,6 +1699,45 @@ export async function uploadPrivateTrace(
   ) {
     fail("trace run creation returned mismatched identity");
   }
+  return { authorization, jsonHeaders, created };
+}
+
+export async function uploadPrivateTrace(
+  state,
+  trajectoryPath,
+  clientVersion,
+  {
+    fetchImpl = globalThis.fetch,
+    assertionProvider = slopIdentityAssertion,
+    disclosure = disclosePrivateTrace,
+  } = {},
+) {
+  declaredIdentifier(clientVersion, "--client-version", 128);
+  if (typeof fetchImpl !== "function")
+    fail("private trace transport is unavailable");
+  const trace = privateTraceFile(trajectoryPath);
+  if (typeof disclosure !== "function")
+    fail("private trace disclosure is unavailable");
+  disclosure({
+    absolutePath: trace.absolutePath,
+    sha256: trace.sha256,
+    sizeBytes: trace.sizeBytes,
+    contentType: trace.contentType,
+    privacyContract: TRACE_PRIVACY_CONTRACT,
+    automaticRedaction: "none",
+    retention: "permanent",
+  });
+  const intake = await authoritativePrivateIntake(fetchImpl);
+  if (intake.enabled !== true) {
+    fail(
+      "private request intake is unavailable; private trace upload is blocked",
+    );
+  }
+  const { authorization, jsonHeaders, created } = await authenticatedServerRun(
+    state,
+    clientVersion,
+    { fetchImpl, assertionProvider },
+  );
   const serverPath = encodeURIComponent(created.serverRunId);
   if (created.state === "awaiting_trace") {
     const intentBody = {
@@ -1823,6 +1848,121 @@ export async function uploadPrivateTrace(
     finalized.traceObjectId,
     finalized.traceSha256,
   );
+}
+
+const PULL_REQUEST_NODE_ID_PATTERN = /^PR_[A-Za-z0-9_-]{1,110}$/u;
+
+function projectPullRequestUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    url = null;
+  }
+  const match =
+    url === null
+      ? null
+      : /^\/([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)\/pull\/([1-9][0-9]{0,9})$/u.exec(
+          url.pathname,
+        );
+  if (
+    url === null ||
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    match === null ||
+    match[1].toLowerCase() !== PROJECT.repositoryId.toLowerCase()
+  ) {
+    fail(
+      `--pull-request must be a https://github.com/${PROJECT.repositoryId}/pull/<number> URL`,
+    );
+  }
+  return `https://github.com/${PROJECT.repositoryId}/pull/${match[2]}`;
+}
+
+/**
+ * Records the pull_request_opened event that automatic closure and penalties
+ * require (owner decision D6; PRD sections 4, 5 and 11). Run it after the pull
+ * request exists, so it never blocks submission. It uploads no trace, usage,
+ * prompt or source bytes. The server binds the run and the event to the
+ * GitHub account that authorized this session, so a copied footer or marker
+ * cannot create this record for another person.
+ */
+export async function recordPullRequestOpened(
+  { pullRequest, pullRequestNodeId, provider, model, client, clientVersion },
+  {
+    fetchImpl = globalThis.fetch,
+    assertionProvider = slopIdentityAssertion,
+    provenance = resolveSkillProvenance(),
+    now = canonicalIso,
+  } = {},
+) {
+  if (typeof fetchImpl !== "function")
+    fail("Slop run event transport is unavailable");
+  const githubUrl = projectPullRequestUrl(pullRequest);
+  if (!PULL_REQUEST_NODE_ID_PATTERN.test(pullRequestNodeId ?? "")) {
+    fail(
+      "--pull-request-node-id must be the pull request node ID from gh pr view --json id",
+    );
+  }
+  const state = {
+    // One deterministic server run per pull request keeps a retry idempotent.
+    runId: `pr_opened_${pullRequestNodeId}`,
+    projectId: PROJECT.projectId,
+    repositoryId: PROJECT.repositoryId,
+    revision: provenance.revision,
+    provider,
+    model,
+    client,
+  };
+  const { jsonHeaders, created } = await authenticatedServerRun(
+    state,
+    clientVersion,
+    { fetchImpl, assertionProvider },
+  );
+  if (created.state === "finalized") {
+    fail("the Slop run for this pull request is finalized and takes no events");
+  }
+  const eventBody = {
+    kind: "pull_request_opened",
+    occurredAt: now(),
+    source: "agent",
+    githubObjectId: pullRequestNodeId,
+    githubUrl,
+  };
+  const event = await jsonRequest(
+    fetchImpl,
+    `${TRACE_AUTHORITY}/api/v1/runs/${encodeURIComponent(created.serverRunId)}/events`,
+    {
+      method: "POST",
+      headers: {
+        ...jsonHeaders,
+        "Idempotency-Key": sha256(
+          `event:${created.serverRunId}:${JSON.stringify(eventBody)}`,
+        ),
+      },
+      body: JSON.stringify(eventBody),
+    },
+    ["eventId", "kind", "runId"],
+    "pull request event",
+  );
+  if (
+    event.runId !== created.serverRunId ||
+    event.kind !== "pull_request_opened" ||
+    typeof event.eventId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u.test(event.eventId)
+  ) {
+    fail("pull request event returned mismatched evidence");
+  }
+  return {
+    serverRunId: created.serverRunId,
+    eventId: event.eventId,
+    pullRequest: githubUrl,
+    pullRequestNodeId,
+  };
 }
 
 export function marker(receipt) {
@@ -2194,6 +2334,8 @@ function parseArguments(args) {
     lane: null,
     model: null,
     provider: null,
+    pullRequest: null,
+    pullRequestNodeId: null,
     repoRoot: process.cwd(),
     runId: null,
     traceObjectId: null,
@@ -2221,6 +2363,8 @@ function parseArguments(args) {
         "--lane",
         "--model",
         "--provider",
+        "--pull-request",
+        "--pull-request-node-id",
         "--repo-root",
         "--run",
         "--trace-object-id",
@@ -2236,6 +2380,9 @@ function parseArguments(args) {
       if (argument === "--lane") options.lane = value;
       if (argument === "--model") options.model = value;
       if (argument === "--provider") options.provider = value;
+      if (argument === "--pull-request") options.pullRequest = value;
+      if (argument === "--pull-request-node-id")
+        options.pullRequestNodeId = value;
       if (argument === "--repo-root") options.repoRoot = value;
       if (argument === "--run") options.runId = value;
       if (argument === "--trace-object-id") options.traceObjectId = value;
@@ -2250,6 +2397,7 @@ function parseArguments(args) {
       "doctor",
       "finish",
       "help",
+      "opened",
       "preview",
       "start",
       "status",
@@ -2257,7 +2405,7 @@ function parseArguments(args) {
     ].includes(options.action)
   ) {
     fail(
-      "command must be authorize, disclose, preview, doctor, status, start, trace, or finish",
+      "command must be authorize, disclose, opened, preview, doctor, status, start, trace, or finish",
     );
   }
   const allowedArguments = {
@@ -2293,6 +2441,15 @@ function parseArguments(args) {
       "--usage-unavailable",
     ]),
     help: new Set(),
+    opened: new Set([
+      "--client",
+      "--client-version",
+      "--json",
+      "--model",
+      "--provider",
+      "--pull-request",
+      "--pull-request-node-id",
+    ]),
     preview: new Set(["--client", "--json", "--repo-root"]),
     start: new Set([
       "--verify-policy",
@@ -2325,13 +2482,16 @@ function parseArguments(args) {
     "disclose",
     "doctor",
     "finish",
+    "opened",
     "preview",
     "start",
   ].includes(options.action);
   if (needsClient) {
     declaredIdentity(options.client, "--client", "client", 64);
   }
-  if (["disclose", "doctor", "finish", "start"].includes(options.action)) {
+  if (
+    ["disclose", "doctor", "finish", "opened", "start"].includes(options.action)
+  ) {
     declaredIdentity(options.provider, "--provider", "provider", 64);
     if (options.action === "disclose") {
       options.model = disclosedModel(options.model, "--model");
@@ -2359,8 +2519,14 @@ function parseArguments(args) {
   ) {
     fail("trace requires --run and --trajectory");
   }
-  if (options.action === "trace") {
+  if (options.action === "trace" || options.action === "opened") {
     declaredIdentity(options.clientVersion, "--client-version", "version", 128);
+  }
+  if (
+    options.action === "opened" &&
+    (options.pullRequest === null || options.pullRequestNodeId === null)
+  ) {
+    fail("opened requires --pull-request and --pull-request-node-id");
   }
   if (
     options.action === "finish" &&
@@ -2479,6 +2645,7 @@ function previewRun(options) {
       `Only with start --verify-policy, fetch current project terms from https://slop.cash/projects/${PROJECT.projectId}/terms.json and any digest-bound LICENSE, inbound terms, or prize rules from github.com, raw.githubusercontent.com, or proximityprize.org as named by that policy`,
       `Verify the server-authoritative private-request intake gate at ${PRIVATE_REQUEST_INTAKE_STATUS}; trace upload remains blocked unless it reports enabled`,
       `After a local byte/digest disclosure, authenticate with GitHub and permanently upload the inspected trace through ${TRACE_AUTHORITY} under ${TRACE_PRIVACY_CONTRACT}`,
+      `Only with opened, authenticate with GitHub through ${IDENTITY_AUTHORITY} and record the pull request URL and node ID as a pull_request_opened event at ${TRACE_AUTHORITY}`,
     ],
     automaticUploads: [],
     publicReceiptFields: [
@@ -2870,7 +3037,16 @@ export async function main(args = process.argv.slice(2), testOptions) {
     );
   } else if (options.action === "start") startRun(options, testOptions);
   else if (options.action === "trace") await traceRun(options);
-  else finishRun(options);
+  else if (options.action === "opened") {
+    const result = await recordPullRequestOpened(options);
+    renderResult(
+      {
+        ...result,
+        message: `Recorded pull_request_opened for ${result.pullRequest} in Slop run ${result.serverRunId}.`,
+      },
+      options.json,
+    );
+  } else finishRun(options);
 }
 
 const invokedDirectly =

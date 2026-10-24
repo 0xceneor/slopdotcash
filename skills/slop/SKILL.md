@@ -165,6 +165,11 @@ After installation:
    package execution, local usage reads, or Slop authorization. Its footer
    opens with the visible line `Made via @slopdotcash`; every pull request
    the skill opens carries that line once, outside code fences.
+   After the pull request exists, the project skill runs `run-receipt.mjs
+   opened` to record a `pull_request_opened` event through the contributor's
+   own GitHub sign-in. Slopbot may close or penalize only a member's pull
+   request with that record; a copied footer is never proof. A failure leaves
+   the pull request open.
 5. If the contributor chooses measured evidence, use `preview` to disclose
    access before opting into usage collection. Private trace upload requires
    separate informed consent and inspection; failure never blocks submission.
