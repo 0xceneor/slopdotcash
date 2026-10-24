@@ -18,6 +18,7 @@ import {
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { GENERATED_SKILL_TEMPLATES } from "../src/lib/install-command.ts";
+import * as registrySnapshot from "../src/lib/project-registry.generated.mjs";
 import { PROJECT_SKILL_TEMPLATES } from "../src/lib/project-schema.mjs";
 import {
   ACCEPTED_SKILL_REVISIONS,
@@ -107,6 +108,26 @@ rmSync(join(publicRoot, "projects"), { force: true, recursive: true });
 rmSync(join(publicRoot, "data", "private-intake-attestation.json"), {
   force: true,
 });
+// PRD section 9: when the live registry read fails, pages show the last
+// good registry with a stale label. That is the snapshot projects:sync read
+// from D1 for this build. A snapshot no sync wrote is not published, so a
+// build without one shows the outage instead of an old or empty list.
+const publishedRegistryPath = join(publicRoot, "data", "project-registry.json");
+rmSync(publishedRegistryPath, { force: true });
+if (
+  typeof registrySnapshot.PROJECT_REGISTRY_SYNCED_AT === "string" &&
+  registrySnapshot.RAW_PROJECT_DEFINITIONS.length > 0
+) {
+  mkdirSync(dirname(publishedRegistryPath), { recursive: true });
+  writeFileSync(
+    publishedRegistryPath,
+    `${JSON.stringify({
+      schemaVersion: "1",
+      syncedAt: registrySnapshot.PROJECT_REGISTRY_SYNCED_AT,
+      projects: registrySnapshot.RAW_PROJECT_DEFINITIONS,
+    })}\n`,
+  );
+}
 mkdirSync(publicProtocolRoot, { recursive: true });
 const privateTraceContractPath = join(protocolRoot, "private-trace-v1.md");
 if (!existsSync(privateTraceContractPath)) {

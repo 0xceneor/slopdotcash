@@ -12,6 +12,8 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import {
   installProjectRegistry,
   loadProjectRegistry,
+  loadPublishedProjectRegistry,
+  type StaleProjectRegistry,
 } from "./lib/project-registry-boot";
 import "./brand-tokens.css";
 import "./styles.css";
@@ -40,18 +42,29 @@ function RegistryBoot() {
     void (async () => {
       let projects: unknown[];
       let registryError: string | undefined;
+      let staleRegistry: StaleProjectRegistry | undefined;
       try {
         projects = await loadProjectRegistry();
       } catch (error) {
-        // Account routes remain available; project routes show the outage.
-        projects = [];
-        registryError =
+        const reason =
           error instanceof Error
             ? error.message
             : "The project registry could not be read.";
+        try {
+          // PRD section 9: keep the last good registry with a stale label.
+          const published = await loadPublishedProjectRegistry();
+          projects = published.projects;
+          staleRegistry = { syncedAt: published.syncedAt, reason };
+        } catch {
+          // error-policy:J3 no last good registry; project routes show the
+          // live-read failure and account routes remain available.
+          projects = [];
+          registryError = reason;
+        }
       }
       if (!active) return;
       globalThis.__SLOP_PROJECT_REGISTRY_ERROR__ = registryError;
+      globalThis.__SLOP_PROJECT_REGISTRY_STALE__ = staleRegistry;
       installProjectRegistry(projects);
       try {
         const { App } = await import("./App");

@@ -633,6 +633,12 @@ textarea:focus-visible {
   letter-spacing: 0.02em;
 }
 
+.registry-stale .data-notice {
+  display: flex;
+  flex-wrap: wrap;
+  margin-block: 12px 0;
+}
+
 .data-notice button {
   display: inline-flex;
   flex: none;

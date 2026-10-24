@@ -515,6 +515,81 @@ describe("community security vetting", () => {
     ).toEqual([
       { kind: "project_scan_failed", path: "/projects/open-registry" },
     ]);
+    // Exception evidence stays available until the policy owner closes its case.
+    const close = (actor: string, origin = ORIGIN) =>
+      retained.evidence.handle(
+        new Request(`${ORIGIN}/api/v1/operator/vetting-evidence/${id}/close`, {
+          method: "POST",
+          headers: {
+            origin,
+            "content-type": "application/json",
+            "x-test-operator": actor,
+          },
+          body: JSON.stringify({
+            reason: "Exception investigation is complete",
+          }),
+        }),
+      );
+    expect(
+      sqlite
+        .query(
+          "SELECT * FROM vetting_evidence_case_closures WHERE assessment_id=?",
+        )
+        .get(id),
+    ).toBeNull();
+    expect(
+      (await retained.evidence.run(id, result.environment.runId)).expires_at,
+    ).toBeNull();
+    const casePolicy = JSON.parse(retained.evidence.deps.policy!);
+    casePolicy.operatorGithubIds.push("900000004");
+    casePolicy.externalControls.validUntil = new Date(
+      NOW.getTime() + 100 * 86400_000,
+    ).toISOString();
+    retained.evidence.deps.policy = JSON.stringify(casePolicy);
+    expect((await close("900000001"))?.status).toBe(403);
+    expect((await close("900000004"))?.status).toBe(403);
+    expect((await close("900000003", "https://other.invalid"))?.status).toBe(
+      403,
+    );
+    const closed = await close("900000003");
+    expect(closed?.status).toBe(200);
+    const expiry = new Date(NOW.getTime() + 90 * 86400_000).toISOString();
+    expect(await closed?.json()).toMatchObject({
+      closedAt: NOW.toISOString(),
+      expiresAt: expiry,
+    });
+    expect(
+      (await retained.evidence.run(id, result.environment.runId)).expires_at,
+    ).toBe(expiry);
+    // A replay must never restart the retention clock.
+    retained.evidence.deps.now = () => new Date(NOW.getTime() + 1000);
+    expect((await close("900000003"))?.status).toBe(200);
+    expect(
+      (await retained.evidence.run(id, result.environment.runId)).expires_at,
+    ).toBe(expiry);
+    expect((await vetting.getAssessment(id))?.state).toBe("incomplete");
+    const readGrant = () =>
+      retained.evidence.handle(
+        new Request(
+          `${ORIGIN}/api/v1/operator/vetting-evidence/${id}/${result.environment.runId}/${result.traceSha256}/grant`,
+          {
+            method: "POST",
+            headers: {
+              origin: ORIGIN,
+              "content-type": "application/json",
+              "x-test-operator": "900000003",
+            },
+            body: JSON.stringify({
+              reason: "Verify the closed-case access boundary",
+            }),
+          },
+        ),
+      );
+    retained.evidence.deps.now = () => new Date(Date.parse(expiry) - 1);
+    expect((await readGrant())?.status).toBe(201);
+    retained.evidence.deps.now = () => new Date(expiry);
+    expect((await readGrant())?.status).toBe(410);
+    retained.evidence.deps.now = () => NOW;
     const refused = await activate();
     expect(refused.status).toBe(422);
     expect((await refused.json()).error).toBe("vetting_required");
@@ -737,7 +812,9 @@ test("private retained bytes remain inspectable without granting clean clearance
     reason: "Inspect recorded collector evidence",
   });
   expect(grantResponse.status).toBe(201);
-  const grant = (await grantResponse.json()).grant;
+  const grantedAccess = await grantResponse.json();
+  expect(grantedAccess.expiresInSeconds).toBe(900);
+  const grant = grantedAccess.grant;
   const reads = await Promise.all([
     operator(`${base}/body`, undefined, undefined, grant),
     operator(`${base}/body`, undefined, undefined, grant),
@@ -746,6 +823,33 @@ test("private retained bytes remain inspectable without granting clean clearance
   const read = reads.find((r) => r.ok)!;
   expect(await read.text()).toBe(VETTING_TRACE_BODY);
   expect(read.headers.get("cache-control")).toBe("private, no-store");
+  // Read grants expire independently of the stored run's access window.
+  const timedGrant = async () =>
+    (
+      await (
+        await operator(`${base}/grant`, undefined, {
+          reason: "Inspect the approved read access window",
+        })
+      ).json()
+    ).grant;
+  const beforeExpiry = await timedGrant();
+  const atExpiry = await timedGrant();
+  retained.evidence.deps.now = () => new Date(NOW.getTime() + 899_000);
+  expect(
+    await (
+      await operator(`${base}/body`, undefined, undefined, beforeExpiry)
+    ).text(),
+  ).toBe(VETTING_TRACE_BODY);
+  retained.evidence.deps.now = () => new Date(NOW.getTime() + 900_000);
+  expect(
+    (await operator(`${base}/body`, undefined, undefined, atExpiry)).status,
+  ).toBe(403);
+  const renewedGrant = await timedGrant();
+  expect(
+    await (
+      await operator(`${base}/body`, undefined, undefined, renewedGrant)
+    ).text(),
+  ).toBe(VETTING_TRACE_BODY);
   const policy = retained.evidence.deps.policy!;
   const revokeGrant = (
     await (
@@ -812,10 +916,10 @@ test("private retained bytes remain inspectable without granting clean clearance
   expect(
     (
       await operator(`${base}/grant`, undefined, {
-        reason: "Inspect expired collector evidence",
+        reason: "Inspect evidence while the case is still open",
       })
     ).status,
-  ).toBe(410);
+  ).toBe(201);
   expect((await publicVetting()).state).toBe("queued");
   retained.evidence.deps.now = () => new Date(NOW.getTime() + 7200_001);
   expect(retained.evidence.ready()).toBe(false);
@@ -1053,6 +1157,7 @@ test("large retained evidence uses bounded chunks, immutable completion and acto
   expect(await granted.text()).not.toContain("grant");
   const cookie = granted.headers.get("set-cookie")!;
   expect(cookie).toContain("HttpOnly; SameSite=Strict");
+  expect(cookie).toContain("Max-Age=900;");
   expect(cookie).toContain(`Path=${base}/download;`);
   const token = cookie.split(";")[0];
   expect((await request(token, "900000001")).status).toBe(403);

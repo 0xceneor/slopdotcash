@@ -407,10 +407,12 @@ jobs:
           HAS_CLOUDFLARE: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
           HAS_CLIENT: ${{ secrets.SLOP_GITHUB_CLIENT_ID != '' && secrets.SLOP_GITHUB_CLIENT_SECRET != '' }}
           HAS_KEYS: ${{ secrets.IDENTITY_STATE_KEY != '' && secrets.IDENTITY_ASSERTION_KEY != '' && secrets.TRACE_AUTH_SECRET != '' }}
+          HAS_APP: ${{ secrets.SLOPBOT_APP_ID != '' && secrets.SLOPBOT_APP_PRIVATE_KEY != '' }}
         run: |
           test "$HAS_CLOUDFLARE" = true
           test "$HAS_CLIENT" = true
           test "$HAS_KEYS" = true
+          test "$HAS_APP" = true
       - name: Publish and verify isolated staging
         env:
           SLOP_NOTIFY_RELEASE: ${{ vars.SLOP_NOTIFY_STAGING_RELEASE }}
@@ -423,6 +425,8 @@ jobs:
           IDENTITY_STATE_KEY: ${{ secrets.IDENTITY_STATE_KEY }}
           IDENTITY_ASSERTION_KEY: ${{ secrets.IDENTITY_ASSERTION_KEY }}
           TRACE_AUTH_SECRET: ${{ secrets.TRACE_AUTH_SECRET }}
+          SLOPBOT_APP_ID: ${{ secrets.SLOPBOT_APP_ID }}
+          SLOPBOT_APP_PRIVATE_KEY: ${{ secrets.SLOPBOT_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/development
@@ -439,6 +443,7 @@ jobs:
             echo "No repository payment records to import."
           fi
           ./node_modules/.bin/wrangler deploy --config workers/identity/wrangler.staging.toml
+          ./node_modules/.bin/wrangler deploy --config workers/slopbot/wrangler.repository-access-staging.toml
           node scripts/configure-staging-secrets.mjs
           if [ "$SLOP_NOTIFY_RELEASE" = "enabled" ]; then
             bun scripts/release-notify.mjs deploy staging "$RUNNER_TEMP/slop-notify-staging-release"

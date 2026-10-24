@@ -9,6 +9,7 @@
 
 import { execFileSync } from "node:child_process";
 import {
+  appendFileSync,
   copyFileSync,
   cpSync,
   existsSync,
@@ -27,6 +28,8 @@ import { gunzipSync } from "node:zlib";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const fixtures = join(repositoryRoot, "tests", "fixtures");
+/** The sync time the fixture build publishes with its last good registry. */
+export const FIXTURE_REGISTRY_SYNCED_AT = "2026-10-16T06:00:00.000Z";
 
 function run(command, args, cwd, env = process.env) {
   execFileSync(command, args, { cwd, env, stdio: "inherit" });
@@ -53,9 +56,18 @@ function copyWorkingTree(workspace) {
 
 /** Restores the frozen registry, its skills, and its history in the copy. */
 function overlayFixtures(workspace) {
-  copyFileSync(
-    join(fixtures, "project-registry.mjs"),
-    join(workspace, "src", "lib", "project-registry.generated.mjs"),
+  const registry = join(
+    workspace,
+    "src",
+    "lib",
+    "project-registry.generated.mjs",
+  );
+  copyFileSync(join(fixtures, "project-registry.mjs"), registry);
+  // Stamp the frozen registry the way projects:sync stamps a D1 read, so the
+  // build publishes it as the last good registry (PRD section 9).
+  appendFileSync(
+    registry,
+    `\nexport const PROJECT_REGISTRY_SYNCED_AT = ${JSON.stringify(FIXTURE_REGISTRY_SYNCED_AT)};\n`,
   );
   cpSync(join(fixtures, "skills"), join(workspace, "skills"), {
     recursive: true,

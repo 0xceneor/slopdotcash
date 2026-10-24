@@ -7,7 +7,8 @@ chunk layouts, completion records, grants and access audit records. Raw bytes re
 
 The service is inactive without the bucket and `VETTING_EVIDENCE_POLICY` JSON.
 The deployment authority must supply all policy fields: `version`,
-`policyAuthorityGithubId`, `operatorGithubIds`, `accessDurationSeconds`,
+`policyAuthorityGithubId`, `operatorGithubIds`, `postClosureRetentionSeconds`,
+`readGrantDurationSeconds`,
 `maxObjectBytes`, `maxRunBytes`, `maxObjects`, `accessPolicyReference`,
 `retentionPolicyReference`, `recoveryPolicyReference`, and `externalControls`.
 The external-controls record requires `attestedByGithubId` equal to the configured
@@ -15,6 +16,29 @@ policy authority, `evidenceReference`, `attestedAt`, and `validUntil`. Its time
 window must be current. These values come from trusted deployment configuration,
 not from a service upload or browser request. No production policy values or
 operator identities are selected by this change.
+
+`readGrantDurationSeconds` controls the read token, database expiry and download
+cookie only. Set it to 900 for the approved 15-minute operator grant.
+`postClosureRetentionSeconds` must be 7776000 (90 days). Migration 0066 records
+an immutable case closure when a clean scan is accepted, in the same transaction.
+Existing clean assessments receive their original completion time as closure.
+Incomplete and malicious assessments stay open until the policy owner calls
+`POST /api/v1/operator/vetting-evidence/:assessment/close` with a nonempty
+`reason`. This requires the policy owner's authenticated session and same-origin
+JSON. Another evidence operator cannot close the case. Repeating closure returns
+the original date and cannot restart the clock. Closure does not release a
+quarantined project, change a scan result, or change awards.
+
+Evidence remains readable while the case is open. The operator overview returns
+`expiresAt: null` then, and the closure time plus 90 days afterward. At that
+boundary new grants and reads are refused. The old upload-based `expires_at`
+column stays in immutable run history but no longer determines current access.
+The old `accessDurationSeconds` and `evidenceAccessDurationSeconds` policy fields
+are rejected; deployment must supply both explicit durations.
+
+This implements the case lifecycle and access clock, not R2 deletion. Physical
+deletion must be coordinated with daily snapshots; the one-year audit retention
+and hosted restoration qualification remain required before attestation.
 
 The attestation is an operator assertion. This application does not automatically
 verify or execute physical deletion, legal holds, backup, or recovery. Those
@@ -135,7 +159,7 @@ Only an authenticated WebSession whose immutable GitHub actor ID appears in the
 current operator allowlist may inspect `/vetting-evidence`. Admin, applicant and
 project-owner roles do not grant access. The admin assessment links to this
 separate console. A reason is required for each object read. The server issues a
-60-second, single-use grant bound to that actor, assessment, run and object.
+single-use grant with the configured read duration (at most 900 seconds) bound to that actor, assessment, run and object.
 Operator authorization, policy currency, expiry and complete bytes are checked
 again at read time. Audit rows retain the actor, reason and action. Grants and
 bodies use no-store; bodies use attachment, nosniff and a restrictive CSP. Text
@@ -144,7 +168,7 @@ is escaped. Binary downloads never execute.
 Large downloads use a dedicated JSON POST `/:sha256/download-grant`. It returns
 no token in JSON or a URL. The server sets `__Secure-vetting-read-grant` as a
 Secure, HttpOnly, SameSite=Strict, host-only cookie with the exact native download
-path and a 60-second lifetime. The browser follows `/:sha256/download` as an
+path and the same configured read-grant lifetime. The browser follows `/:sha256/download` as an
 attachment. GET requires `Sec-Fetch-Site: same-origin`, current session/operator
 policy and the actor/object-bound single-use grant. Duplicate grant cookies,
 ranges and HEAD are refused. The cookie is cleared on a native download attempt.

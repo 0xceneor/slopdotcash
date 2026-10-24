@@ -1395,7 +1395,8 @@ test("an unavailable registry shows an error, never an empty list @registry", as
     route.fulfill({ status: 503, json: { error: "unavailable" } }),
   );
   await page.goto("/", { waitUntil: "networkidle" });
-  // The failure is an alert with its status and a retry, never a list.
+  // This build has no synced snapshot to publish as the last good registry,
+  // so the failure is an alert with its status and a retry, never a list.
   const alert = page.getByRole("alert");
   await expect(alert).toContainText("503");
   await expect(alert.getByRole("button")).toBeVisible();

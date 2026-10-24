@@ -1,6 +1,9 @@
 /** Types the project registry generator for focused contract tests. */
 
-export function renderProjectRegistry(values: unknown): Promise<string>;
+export function renderProjectRegistry(
+  values: unknown,
+  syncedAt?: string | null,
+): Promise<string>;
 export function renderProjectRevisions(
   revisions: unknown,
   definitions: readonly unknown[],

@@ -11,9 +11,19 @@ const MAX_REGISTRY_BYTES = 4 * 1024 * 1024;
 export const PROJECT_REGISTRY_URL: string =
   import.meta.env.VITE_SLOP_PROJECT_REGISTRY_URL || "/api/v1/projects";
 
+/** The last good registry that the build published (PRD section 9). */
+export const PUBLISHED_PROJECT_REGISTRY_URL = "/data/project-registry.json";
+
+/** Pages show the published registry with this label when the live read fails. */
+export interface StaleProjectRegistry {
+  syncedAt: string;
+  reason: string;
+}
+
 declare global {
   var __SLOP_PROJECT_REGISTRY__: unknown[] | undefined;
   var __SLOP_PROJECT_REGISTRY_ERROR__: string | undefined;
+  var __SLOP_PROJECT_REGISTRY_STALE__: StaleProjectRegistry | undefined;
 }
 
 export async function loadProjectRegistry(): Promise<unknown[]> {
@@ -59,6 +69,42 @@ export async function loadProjectRegistry(): Promise<unknown[]> {
       ? { ...(project as object), status: "paused", listingTier: "retired" }
       : project,
   );
+}
+
+/**
+ * Reads the registry snapshot that projects:sync took from D1 for this build.
+ * Sync already applied every Quarantine and Ban that D1 reported.
+ */
+export async function loadPublishedProjectRegistry(): Promise<{
+  projects: unknown[];
+  syncedAt: string;
+}> {
+  const response = await fetchWithDeadline(PUBLISHED_PROJECT_REGISTRY_URL, {
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok)
+    throw new Error(
+      `The published project registry returned HTTP ${response.status}.`,
+    );
+  const body = (await readBoundedJson(
+    response,
+    MAX_REGISTRY_BYTES,
+    "The published project registry",
+  )) as {
+    schemaVersion?: unknown;
+    syncedAt?: unknown;
+    projects?: unknown;
+  } | null;
+  if (
+    body?.schemaVersion !== "1" ||
+    typeof body.syncedAt !== "string" ||
+    Number.isNaN(Date.parse(body.syncedAt)) ||
+    !Array.isArray(body.projects) ||
+    body.projects.length === 0
+  )
+    throw new Error("The published project registry is not valid.");
+  return { projects: body.projects, syncedAt: body.syncedAt };
 }
 
 export function installProjectRegistry(projects: unknown[]): void {

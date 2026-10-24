@@ -204,19 +204,24 @@ Work accepted from that instant:
 
 Review credit is one explicit allocation per pull request. Qualifying reviews
 exclude implementation actors, bots, reviews after merge or closure, and
-duplicate findings. They are grouped by immutable reviewer node ID. Reviewers
-are ordered by their first qualifying review's submission time, then review
-node ID. The first five share the pull request's review pool, weighted by each
-reviewer's highest assessed band (triage 1, standard 3, deep 9, specialist 24
-thirds). The pool is the sum of those five highest bands, capped at the pull
-request's own assessed size in thirds, and never less than one third. Each
-useful review thus earns its band until the reviews would outweigh the work,
-and a small review never earns a large fixed pool. Shares are integer thirds
-by largest remainder; equal remainders go to the earlier reviewer, and the
-shares always sum to the pool. Each credited
-reviewer has one ledger record, sourced from that reviewer's highest-band
-review. Their other reviews publish `already-awarded-reviewer`; later reviewers
-publish `review-credit-reviewer-limit`; a zero rounded share publishes
+duplicate findings. A qualifying review whose submission time is outside the
+scoring window publishes `review-credit-outside-window`. It takes no reviewer
+slot and no share. Its band does not replace an in-window review by the same
+person. The award keeps the submission time, so a later merge does not move
+that review into the current window. The remaining reviews are grouped by
+immutable reviewer node ID. Reviewers are ordered by their first in-window
+qualifying review's submission time, then review node ID. The first five share
+the pull request's review pool, weighted by each reviewer's highest in-window
+assessed band (triage 1, standard 3, deep 9, specialist 24 thirds). The pool
+is the sum of those five highest bands, capped at the pull request's own
+assessed size in thirds, and never less than one third. Each useful review
+thus earns its band until the reviews would outweigh the work, and a small
+review never earns a large fixed pool. Shares are integer thirds by largest
+remainder; equal remainders go to the earlier reviewer, and the shares always
+sum to the pool. Each credited reviewer has one ledger record, sourced from
+that reviewer's highest in-window band. Their other in-window reviews publish
+`already-awarded-reviewer`; later reviewers publish
+`review-credit-reviewer-limit`; a zero rounded share publishes
 `review-credit-zero-share`. A joint work unit whose accepted members span the
 effective instant is not applied, so legacy work is never scored twice; its
 new member keeps the one-third minimum.

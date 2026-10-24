@@ -318,6 +318,15 @@ registry API yet keeps the committed snapshot. `bun run projects:check` proves
 the committed snapshot is canonical and that every active project carries its
 contribution fields.
 
+The sync also records its read time. The build publishes that synced snapshot
+at `/data/project-registry.json` as the last good registry (PRD section 9).
+When the live read fails, list, project, profile, and score pages show that
+registry with a stale label, its sync time, and the failure. Funding,
+management, owner-award, and security-program pages and escrow actions need
+the current manifest, so they show the outage instead. A committed snapshot
+that no sync wrote is not published; those builds show the outage on every
+project route.
+
 A clean scan result reruns setup for the recorded project creator. It reloads
 current GitHub permission and checks the permanent actor ID, installation,
 restrictions, and exact scan clearance before activation. No owner session or

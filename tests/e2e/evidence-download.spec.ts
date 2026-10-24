@@ -168,6 +168,12 @@ test("large private evidence downloads with a single-use browser grant @registry
   await page
     .getByRole("button", { name: "Inspect evidence inventory" })
     .click();
+  await expect(
+    page.getByText(
+      "Case open. Evidence remains available until 90 days after closure.",
+      { exact: false },
+    ),
+  ).toBeVisible();
   const item = page.getByRole("article").filter({
     has: page.getByRole("heading", {
       name: "Synthetic VM disk overlay",

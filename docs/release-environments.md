@@ -46,6 +46,13 @@ secrets there, never in a file committed to Git:
 - `IDENTITY_STATE_KEY`, `IDENTITY_ASSERTION_KEY`, and `TRACE_AUTH_SECRET`:
   independent random staging secrets. Do not reuse production values.
 
+Staging project setup also uses `SLOPBOT_APP_ID` and
+`SLOPBOT_APP_PRIVATE_KEY` from this environment for the existing slopdotcash
+GitHub App. The workflow stores them only on `slop-repository-access-staging`.
+This private Worker reuses the bot's installation and permission lookup. It has
+no webhook, queue, database or scheduled handler. Pages reaches it through its
+`SLOPBOT` binding. Do not bind staging Pages to the production bot.
+
 The workflow installs these application secrets on the staging Worker and Pages
 project. It applies the versioned database migrations before publishing the
 verified bundle. Preview branches have no database, bucket, or identity binding.

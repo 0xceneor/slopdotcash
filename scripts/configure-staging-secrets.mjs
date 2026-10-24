@@ -16,6 +16,12 @@ const secrets = Object.fromEntries(
     return [name, value];
   }),
 );
+const appSecrets = Object.fromEntries(
+  ["SLOPBOT_APP_ID", "SLOPBOT_APP_PRIVATE_KEY"].map((name) => {
+    if (!process.env[name]) throw new Error(`Missing staging ${name}`);
+    return [name, process.env[name]];
+  }),
+);
 if (!process.env.TRACE_AUTH_SECRET)
   throw new Error("Missing staging trace key");
 const run = (args, values) =>
@@ -30,3 +36,13 @@ run(
 run(["pages", "secret", "bulk", "--project-name", "slop-staging"], {
   TRACE_AUTH_SECRET: process.env.TRACE_AUTH_SECRET,
 });
+
+run(
+  [
+    "secret",
+    "bulk",
+    "--config",
+    "workers/slopbot/wrangler.repository-access-staging.toml",
+  ],
+  appSecrets,
+);

@@ -29,6 +29,11 @@ bucket_name = "slop-private-traces"
 binding = "VETTING_EVIDENCE"
 bucket_name = "slop-vetting-evidence"
 
+# Project setup verifies installation authority through the deployed bot.
+[[services]]
+binding = "SLOPBOT"
+service = "slop-slopbot"
+
 [[services]]
 binding = "SLOP_IDENTITY"
 service = "slop-identity"

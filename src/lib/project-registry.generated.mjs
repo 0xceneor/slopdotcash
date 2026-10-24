@@ -3,3 +3,6 @@
 export const RAW_PROJECT_DEFINITIONS = JSON.parse(
   '[]',
 );
+
+/** When projects:sync read D1; null when no sync wrote this snapshot. */
+export const PROJECT_REGISTRY_SYNCED_AT = null;

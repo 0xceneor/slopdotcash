@@ -31,6 +31,11 @@ bucket_name = "slop-staging-traces"
 binding = "VETTING_EVIDENCE"
 bucket_name = "slop-staging-vetting-evidence"
 
+# Read-only installation lookup; no production bot queues or database.
+[[services]]
+binding = "SLOPBOT"
+service = "slop-repository-access-staging"
+
 [[services]]
 binding = "SLOP_IDENTITY"
 service = "slop-identity-staging"

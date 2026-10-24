@@ -234,6 +234,7 @@ export const REVIEW_EXCLUSION_REASONS = [
   "pull-request-review-awarded",
   "review-credit-reviewer-limit",
   "review-credit-zero-share",
+  "review-credit-outside-window",
 ] as const;
 
 function exactEvidenceBonusRun(
@@ -1509,7 +1510,7 @@ export function leaderboardMethodology(
           ? `one pool per pull request: the credited reviewers' bands, capped at the pull request's assessed size, minimum 1/3; at most ${valuePolicy.reviewCredit.maxReviewers} distinct reviewers; one credited record per reviewer`
           : "from 2026-10-01, one ordinary review award per merged pull request; no self-review and no duplicate reviewer credit on one artifact",
         qualification: valuePolicy
-          ? `${policyStart}complete source-bound assessments value distinct evidenced review outcomes, including useful validation; a request for changes is not required. Reviews by implementation actors, bots, after merge or closure, and duplicate findings do not qualify. Qualifying reviews are grouped by immutable reviewer ID; reviewers are ordered by their first qualifying review's submission time, then review node ID, and the first ${valuePolicy.reviewCredit.maxReviewers} share the pull request's review pool by their highest assessed band using integer largest remainder, earlier reviewers first on equal remainders. Later reviewers publish review-credit-reviewer-limit. Valid human decisions and reviewed evaluation awards take precedence. Missing, stale or unresolved assessments do not receive legacy review credit. Reviews of pull requests accepted earlier keep the SCR-05 rule.`
+          ? `${policyStart}complete source-bound assessments value distinct evidenced review outcomes, including useful validation; a request for changes is not required. Reviews by implementation actors, bots, after merge or closure, and duplicate findings do not qualify. A qualifying review submitted outside the scoring window publishes review-credit-outside-window and takes no reviewer slot or share. The remaining reviews are grouped by immutable reviewer ID and ordered by their first in-window qualifying review's submission time, then review node ID. The first ${valuePolicy.reviewCredit.maxReviewers} share the pull request's review pool by their highest in-window assessed band using integer largest remainder, earlier reviewers first on equal remainders. Later reviewers publish review-credit-reviewer-limit. Valid human decisions and reviewed evaluation awards take precedence. Missing, stale or unresolved assessments do not receive legacy review credit. Reviews of pull requests accepted earlier keep the SCR-05 rule.`
           : "Every merged pull request with a formal review is selected through a separate bounded review census, independent of the pull-request author's detail cap. A pre-merge APPROVED or CHANGES_REQUESTED review of human-authored work has substantive text or inline discussion. Before 2026-10-01 such a review scores standard credit. From 2026-10-01 only the latest CHANGES_REQUESTED review on a commit other than the merged head scores, at triage credit; approvals and ignored requests do not. Higher review tiers require maintainer ratification. Excluded formal reviews publish a machine-readable reason.",
       },
       {
@@ -3788,13 +3789,32 @@ function createSnapshotWithReviewCutoff(
     }
     if (!eligible.length) return [];
     const repositoryId = repositoryIdFromUrl(pullRequest.url);
+    // Review credit keeps the review's submission time. A review outside this
+    // scoring window cannot be published here, so it must not take one of the
+    // five reviewer slots or a share of the pool from a review that can.
+    const scoringFrom = parseIsoTime(input.windowFrom);
+    const inWindow: ValueReviewCandidate[] = [];
+    for (const candidate of eligible) {
+      const reviewedAt = parseIsoTime(candidate.submittedAt);
+      if (reviewedAt < scoringFrom || reviewedAt >= windowTo) {
+        excludeReview(
+          pullRequest,
+          candidate.review,
+          "review-credit-outside-window",
+        );
+        continue;
+      }
+      inWindow.push(candidate);
+    }
+    if (!inWindow.length) return [];
     const byId = new Map(
-      eligible.map((candidate) => [candidate.reviewId, candidate]),
+      inWindow.map((candidate) => [candidate.reviewId, candidate]),
     );
     // A joint member's reviews can sit in several units; the largest assessed
-    // unit is the pull request's size.
+    // unit is the pull request's size. An old review losing its share must
+    // not shrink that recorded size.
     const allocation = allocatePullRequestReviewCredit(
-      eligible,
+      inWindow,
       Math.max(...eligible.map((candidate) => candidate.assessedSizeThirds)),
     );
     const exclude = (reviewId: string, reason: ReviewExclusionReason) => {
@@ -3812,9 +3832,6 @@ function createSnapshotWithReviewCutoff(
         exclude(candidate.reviewId, "review-credit-zero-share");
         continue;
       }
-      const reviewedAt = parseIsoTime(candidate.submittedAt);
-      if (reviewedAt < parseIsoTime(input.windowFrom) || reviewedAt >= windowTo)
-        continue;
       addScore(entries, ledger, {
         id: `${pullRequest.id}:value-review:${candidate.reviewId}`,
         actor: candidate.actor,

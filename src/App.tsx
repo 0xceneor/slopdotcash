@@ -67,6 +67,7 @@ import {
   ExternalLinkAnchor,
   formatCycleMonth,
   formatDate,
+  formatDateTime,
   formatMicroUsdc,
   monthlyPoolLabel,
   monthlyPoolPointsOnly,
@@ -1195,7 +1196,19 @@ function ProjectPaymentHistory({
 }
 
 export function ProjectFunding({ project }: { project: ProjectDefinition }) {
-  return project.escrow ? <EscrowFunding project={project} /> : null;
+  if (!project.escrow) return null;
+  // A stale registry may name an old vault, so deposits need the live one.
+  if (globalThis.__SLOP_PROJECT_REGISTRY_STALE__)
+    return (
+      <section className="section project-funding" aria-label="Project escrow">
+        <h2>Escrow</h2>
+        <p role="status">
+          Funding actions are unavailable until the current project registry
+          loads.
+        </p>
+      </section>
+    );
+  return <EscrowFunding project={project} />;
 }
 
 function fundingStateLabel(project: ProjectDefinition): string {
@@ -2920,6 +2933,18 @@ const REGISTRY_INDEPENDENT_ROUTES: Route["kind"][] = [
   "how-it-works",
 ];
 
+/**
+ * Routes that act on a project's current manifest. They never use the last
+ * good registry, because sensitive actions recheck current authority (PRD
+ * section 9).
+ */
+const CURRENT_REGISTRY_ROUTES: Route["kind"][] = [
+  "funding-project",
+  "manage-project",
+  "owner-awards",
+  "security-program",
+];
+
 export function App() {
   const route = useRoute();
   return (
@@ -2955,9 +2980,14 @@ function AppContent({ route }: { route: Route }) {
     "unknown",
     "cycle-archive",
   ];
-  const registryError = globalThis.__SLOP_PROJECT_REGISTRY_ERROR__;
-  const blocked =
-    Boolean(registryError) && !REGISTRY_INDEPENDENT_ROUTES.includes(route.kind);
+  const staleRegistry = globalThis.__SLOP_PROJECT_REGISTRY_STALE__;
+  const registryIndependent = REGISTRY_INDEPENDENT_ROUTES.includes(route.kind);
+  const registryError =
+    globalThis.__SLOP_PROJECT_REGISTRY_ERROR__ ??
+    (staleRegistry && CURRENT_REGISTRY_ROUTES.includes(route.kind)
+      ? `${staleRegistry.reason} This page needs the current project registry.`
+      : undefined);
+  const blocked = Boolean(registryError) && !registryIndependent;
   const needsSnapshot = !blocked && !snapshotFree.includes(route.kind);
   const [state, retry] = useSnapshot(needsSnapshot);
   const [archive, retryArchive] = useCycleIndex(route.kind === "cycle-archive");
@@ -3071,6 +3101,20 @@ function AppContent({ route }: { route: Route }) {
       <Header />
       {/* Routes render their own main; the skip link lands on this container. */}
       <div className="skip-target" id="main" tabIndex={-1}>
+        {staleRegistry && !blocked && !registryIndependent ? (
+          <aside
+            aria-label="Project registry status"
+            className="shell registry-stale"
+          >
+            <p className="data-notice data-stale" role="status">
+              Projects may be outdated · updated{" "}
+              {formatDateTime(staleRegistry.syncedAt)}. {staleRegistry.reason}
+              <button onClick={() => window.location.reload()} type="button">
+                Try again
+              </button>
+            </p>
+          </aside>
+        ) : null}
         <Suspense
           fallback={
             <main className="shell route-main" role="status">
