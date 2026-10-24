@@ -216,6 +216,12 @@ try {
   for (const [id, age, chunked] of [
     ["vet_expired_chunks", 91, true],
     ["vet_expired_single", 91, false],
+    ...Array.from({ length: 18 }, (_, i) => [
+      `vet_missing_${String(i).padStart(2, "0")}`,
+      91,
+      false,
+    ]),
+    ["vet_partial_upload", 91, true],
     ["vet_recent_case", 89, false],
     ["vet_open_case", null, false],
   ]) {
@@ -266,13 +272,15 @@ try {
       : [key];
     if (chunks)
       for (const part of chunks) {
+        if (id === "vet_partial_upload" && part.index === 1) continue;
         const bytes = data.subarray(
           part.index * 8 * 1024 * 1024,
           part.index * 8 * 1024 * 1024 + part.sizeBytes,
         );
         await source.put(keys[part.index], bytes, options(bytes));
       }
-    else await source.put(key, data, options(data));
+    else if (!id.startsWith("vet_missing_"))
+      await source.put(key, data, options(data));
     retainedCases.push({ id, age, keys });
   }
   const cleanupJobs = [];
@@ -347,9 +355,11 @@ try {
   for (const item of retainedCases)
     for (const key of item.keys) {
       assert.equal(Boolean(await source.head(key)), item.age !== 91);
-      assert.ok(
-        await backups.head(`daily/${retentionDay}/objects/${key}`),
-        "cleanup preceded the verified backup",
+      assert.equal(
+        Boolean(await backups.head(`daily/${retentionDay}/objects/${key}`)),
+        !item.id.startsWith("vet_missing_") &&
+          !(item.id === "vet_partial_upload" && key === item.keys[1]),
+        "only uploaded bytes have verified backup copies",
       );
     }
   assert.equal(
@@ -369,6 +379,55 @@ try {
         .first()
     ).phase,
     "complete",
+  );
+
+  assert.equal(
+    (
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM vetting_evidence_audit WHERE action='retention-missing'",
+        )
+        .first()
+    ).count,
+    19,
+  );
+  // Missing inventory spans more than one cleanup page. It is audited, never
+  // marked deleted, and does not keep the next day's backup from running.
+  const nextTime = now + 2 * 86400_000;
+  const nextDay = new Date(nextTime).toISOString().slice(0, 10);
+  await startDailyBackup(retentionEnv, nextTime);
+  while (cleanupJobs.length) {
+    const job = cleanupJobs.shift();
+    if (job.kind === "cleanup") await cleanupEvidence(retentionEnv, job.day);
+    else await backupPage(retentionEnv, job);
+  }
+  assert.equal(
+    (
+      await db
+        .prepare("SELECT phase FROM vetting_storage_cycles WHERE day=?")
+        .bind(nextDay)
+        .first()
+    ).phase,
+    "complete",
+  );
+  assert.ok(await backups.head(`daily/${nextDay}/complete.json`));
+  assert.equal(
+    (
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM vetting_evidence_audit WHERE action='retention-missing'",
+        )
+        .first()
+    ).count,
+    38,
+  );
+  assert.equal(
+    (
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM vetting_evidence_deletions")
+        .first()
+    ).count,
+    2,
   );
 
   // Storage corruption prevents completion; it is never a skipped object.

@@ -3,7 +3,8 @@ CREATE TABLE vetting_storage_cycles (
   day TEXT PRIMARY KEY,
   started_at TEXT NOT NULL,
   phase TEXT NOT NULL CHECK(phase IN ('backup','cleanup','complete')),
-  finished_at TEXT
+  finished_at TEXT,
+  cleanup_after TEXT
 ) STRICT;
 CREATE UNIQUE INDEX vetting_storage_one_active_cycle
 ON vetting_storage_cycles((1)) WHERE phase <> 'complete';

@@ -284,10 +284,10 @@ export async function cleanupEvidence(env: BackupEnvironment, day: string) {
   if (env.EVIDENCE_BACKUP_MODE !== "enabled")
     throw new Error("Evidence backup is disabled");
   const cycle = await env.EVIDENCE_DATABASE.prepare(
-    "SELECT phase FROM vetting_storage_cycles WHERE day=?",
+    "SELECT phase,cleanup_after FROM vetting_storage_cycles WHERE day=?",
   )
     .bind(day)
-    .first<{ phase: string }>();
+    .first<{ phase: string; cleanup_after: string | null }>();
   if (cycle?.phase === "complete") return;
   if (cycle?.phase !== "cleanup") throw new Error("Snapshot is not complete");
   if (!(await jsonRecord(env.EVIDENCE_BACKUPS, `${root(day)}/complete.json`)))
@@ -299,16 +299,19 @@ export async function cleanupEvidence(env: BackupEnvironment, day: string) {
           `SELECT o.assessment_id,o.run_id,o.sha256,o.object_key,o.chunks,o.size_bytes
        FROM vetting_evidence_objects o JOIN vetting_evidence_case_closures c ON c.assessment_id=o.assessment_id
        WHERE julianday(c.closed_at,'+90 days') <= julianday('now')
+         AND o.object_key > ?
          AND NOT EXISTS (SELECT 1 FROM vetting_evidence_deletions d WHERE d.assessment_id=o.assessment_id AND d.run_id=o.run_id AND d.sha256=o.sha256)
        ORDER BY o.object_key LIMIT 16`,
-        ).all<{
-          assessment_id: string;
-          run_id: string;
-          sha256: string;
-          object_key: string;
-          chunks: string | null;
-          size_bytes: number;
-        }>()
+        )
+          .bind(cycle.cleanup_after ?? "")
+          .all<{
+            assessment_id: string;
+            run_id: string;
+            sha256: string;
+            object_key: string;
+            chunks: string | null;
+            size_bytes: number;
+          }>()
       ).results ?? [];
     for (const row of rows) {
       if (
@@ -339,23 +342,52 @@ export async function cleanupEvidence(env: BackupEnvironment, day: string) {
         throw new Error("Unexpected object at chunked evidence root");
       // A complete snapshot alone does not prove this exact inventory was copied.
       // Check each saved part before deleting any part of the source object.
-      for (const part of parts)
+      const backedParts = [];
+      let missingParts = 0;
+      for (const part of parts) {
+        const backupKey = `${root(day)}/objects/${part.key}`;
+        if (!(await env.EVIDENCE_BACKUPS.head(backupKey))) {
+          // Inventory can exist before an upload finishes. An absent part
+          // needs no deletion, but it is not proof of a complete backup.
+          if (await env.EVIDENCE_SOURCE.head(part.key))
+            throw new Error("Existing evidence has no verified backup");
+          missingParts++;
+          continue;
+        }
         await verifiedPart(
           env.EVIDENCE_BACKUPS,
-          `${root(day)}/objects/${part.key}`,
+          backupKey,
           part.sha256,
           part.sizeBytes,
         );
-      for (const part of parts) {
+        backedParts.push(part);
+      }
+      for (const part of backedParts) {
         await env.EVIDENCE_SOURCE.delete(part.key);
         if (await env.EVIDENCE_SOURCE.head(part.key))
           throw new Error("Evidence deletion was not confirmed");
       }
-      await env.EVIDENCE_DATABASE.prepare(
-        "INSERT OR IGNORE INTO vetting_evidence_deletions(assessment_id,run_id,sha256,deleted_at) VALUES(?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
-      )
-        .bind(row.assessment_id, row.run_id, row.sha256)
-        .run();
+      const receipt = missingParts
+        ? env.EVIDENCE_DATABASE.prepare(
+            "INSERT OR IGNORE INTO vetting_evidence_audit(id,actor,action,assessment_id,run_id,sha256,reason,created_at) VALUES(?,'storage-retention','retention-missing',?,?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+          ).bind(
+            `retention-missing:${day}:${row.object_key}`,
+            row.assessment_id,
+            row.run_id,
+            row.sha256,
+            `${missingParts} declared parts were absent from both source and backup. No complete deletion receipt was recorded.`,
+          )
+        : env.EVIDENCE_DATABASE.prepare(
+            "INSERT OR IGNORE INTO vetting_evidence_deletions(assessment_id,run_id,sha256,deleted_at) VALUES(?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+          ).bind(row.assessment_id, row.run_id, row.sha256);
+      // Gaps remain visible and are checked again next day. This cursor lets
+      // this cycle finish without treating missing evidence as deleted.
+      await env.EVIDENCE_DATABASE.batch([
+        receipt,
+        env.EVIDENCE_DATABASE.prepare(
+          "UPDATE vetting_storage_cycles SET cleanup_after=? WHERE day=? AND phase='cleanup'",
+        ).bind(row.object_key, day),
+      ]);
     }
     if (rows.length) {
       await enqueueCleanup(env, day);

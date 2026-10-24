@@ -94,3 +94,11 @@ checks pagination, duplicate scheduling, restore integrity, source
 preservation, exclusion of non-scanner objects, and refusal of corrupted
 source or backup bytes. It does not prove hosted scheduling, lifecycle
 deletion, D1 recovery or production access controls.
+
+Incomplete uploads can leave inventory without bytes. Cleanup audits parts absent
+from both source and backup as `retention-missing`; it does not record a complete
+deletion receipt for that object. It deletes an existing part only after verifying
+its exact backup. A durable cleanup cursor advances past gaps and rechecks them
+in the next daily cycle. Missing evidence stays distinct from successful deletion
+and cannot prevent later daily backups. An existing source without a valid backup
+still stops cleanup.
