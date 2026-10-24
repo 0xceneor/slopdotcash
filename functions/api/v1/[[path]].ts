@@ -160,6 +160,8 @@ type Env = {
    */
   SECURITY_ANALYSIS_PROFILE?: string;
   SECURITY_ANALYSIS_API_KEY?: string;
+  /** Local browser tests only: a loopback analysis provider fixture origin. */
+  SLOP_ANALYSIS_API_ORIGIN?: string;
   /** Notification Worker; absent where no notifier is deployed. */
   SLOP_NOTIFY?: { fetch(request: Request): Promise<Response> };
   /**
@@ -673,6 +675,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
       const profile = analysisProfileFromEnv(
         context.env.SECURITY_ANALYSIS_PROFILE,
         context.env.SECURITY_ANALYSIS_API_KEY,
+        context.env.SLOP_ANALYSIS_API_ORIGIN,
       );
       return profile
         ? providerSecurityAnalyzer(profile, (url, init) => fetch(url, init))

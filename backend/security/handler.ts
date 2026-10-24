@@ -30,6 +30,7 @@ import {
   analysisMayStart,
   latestCaseAnalysis,
   runCaseAnalysis,
+  type SecurityAnalysisReport,
   type SecurityAnalyzer,
 } from "./analysis";
 import type { IntakeConfig } from "./intake-grant";
@@ -512,6 +513,7 @@ function nextStep(
   roles: Set<Role>,
   settlementState: string | null,
   acknowledgeHours: number | null,
+  railAvailable: boolean,
 ): { text: string; dueAt: string | null } {
   const owner = roles.has("security-maintainer") || roles.has("triager");
   const reporter = roles.has("reporter");
@@ -568,6 +570,12 @@ function nextStep(
       dueAt: null,
     };
   if (row.award_state === "approved" && settlementState !== "paid") {
+    // Without a reviewed private payment rail nobody can act yet.
+    if (settlementState === null && !railAvailable)
+      return {
+        text: "The award is approved and reserved. Payment waits for the program's reviewed private payment rail.",
+        dueAt: row.payment_deadline,
+      };
     if (settlementState === null)
       return {
         text: reporter
@@ -660,11 +668,14 @@ async function caseView(
     )
     .bind(row.id)
     .first<ReservationRow>();
+  const railAvailable =
+    (current?.manifest.securityBounty?.settlement?.deployments.length ?? 0) > 0;
   const step = nextStep(
     row,
     roles,
     settlement?.state ?? null,
     current?.manifest.securityBounty?.responseTargets?.acknowledgeHours ?? null,
+    railAvailable,
   );
   const base = {
     id: row.id,
@@ -674,9 +685,7 @@ async function caseView(
     allowedActions: allowedActions(row, roles).filter(
       (action) =>
         !["prepare-payment", "consent-payment"].includes(action) ||
-        (!settlement &&
-          (current?.manifest.securityBounty?.settlement?.deployments.length ??
-            0) > 0),
+        (!settlement && railAvailable),
     ),
     nextStep: step.text,
     nextStepDueAt: step.dueAt,
@@ -1140,11 +1149,14 @@ export function caseInsertStatement(
 
 /**
  * Starts the private analysis of a newly verified case. It runs after the
- * response where the platform allows it, and inline otherwise.
+ * response where the platform allows it, and inline otherwise. `report` is
+ * the advisory content that receipt verification already read from GitHub;
+ * it stays in memory. Without it, the analysis reads the advisory again.
  */
 export async function scheduleAnalysis(
   deps: SecurityApiDependencies,
   caseId: string,
+  report: SecurityAnalysisReport | null,
 ): Promise<void> {
   const job = runCaseAnalysis(
     {
@@ -1154,6 +1166,7 @@ export async function scheduleAnalysis(
       analyzer: deps.analyzer ?? null,
     },
     caseId,
+    report,
   );
   if (deps.waitUntil) deps.waitUntil(job);
   else await job;
@@ -1177,7 +1190,7 @@ async function recordPrivateReports(
     actor: Actor;
   },
 ): Promise<string[]> {
-  const received: string[] = [];
+  const received: { caseId: string; report: GithubPrivateReport }[] = [];
   for (const report of input.reports) {
     const at = deps.now().toISOString();
     const recorded = await deps.db
@@ -1284,10 +1297,19 @@ async function recordPrivateReports(
       written?.submission_state === "verified" &&
       written.revision === revision
     )
-      received.push(caseId);
+      received.push({ caseId, report });
   }
-  for (const caseId of received) await scheduleAnalysis(deps, caseId);
-  return received;
+  // Each new case's analysis reads the report this import already holds.
+  for (const entry of received)
+    await scheduleAnalysis(deps, entry.caseId, {
+      summary: entry.report.summary,
+      description: entry.report.description,
+      severity: entry.report.severity,
+      cvss: null,
+      cweIds: entry.report.cweIds,
+      packages: entry.report.packages,
+    });
+  return received.map((entry) => entry.caseId);
 }
 
 /**
@@ -2614,7 +2636,7 @@ async function automaticAction(
       );
     if (!(await analysisMayStart(deps, row.id)))
       fail(409, "analysis_running", "The analysis is already running");
-    await scheduleAnalysis(deps, row.id);
+    await scheduleAnalysis(deps, row.id, null);
   }
   const updated = (await loadCase(deps, row.id)) as CaseRow;
   const nextRoles = await caseRoles(deps, updated, actor, terms);

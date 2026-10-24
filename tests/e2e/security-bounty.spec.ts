@@ -1772,6 +1772,8 @@ test("automatic private intake files as the reporter and verifies receipt @regis
     await context.close();
   });
 
+  let firstCase = "";
+  let secondCase = "";
   await test.step("a private report reaches a verified receipt", async () => {
     const submission = await authorized();
     const before = await advisoryCount();
@@ -1785,6 +1787,7 @@ test("automatic private intake files as the reporter and verifies receipt @regis
     expect(JSON.stringify(sent.body)).not.toContain(sentinel);
     expect(await advisoryCount()).toBe(before + 1);
     const caseId = (sent.body.submission as { caseId: string }).caseId;
+    firstCase = caseId;
     const mine = await api(
       request,
       "GET",
@@ -1851,6 +1854,175 @@ test("automatic private intake files as the reporter and verifies receipt @regis
       state: "receipt-verified",
     });
     expect(await advisoryCount()).toBe(before + 1);
+    secondCase = (reconciled.body.submission as { caseId: string }).caseId;
+  });
+
+  await test.step("the owner triages with the private AI summary and decides a funds-checked 75/25 award", async () => {
+    const ownerCase = async (id: string) =>
+      (await api(request, "GET", `security-cases/${id}`, TOKENS.security)).body
+        .case as {
+        analysis: { state: string; summary: string | null } | null;
+        awardState: string;
+        award: Record<string, string> | null;
+        reservation: { grossMinor: string } | null;
+      };
+    // The analysis runs after the receipt response; wait for its proposal.
+    for (const id of [firstCase, secondCase])
+      await expect
+        .poll(async () => (await ownerCase(id)).analysis?.state, {
+          timeout: 30_000,
+        })
+        .toBe("complete");
+    // Only the configured provider read the report text; D1 and every case
+    // view keep the proposal, never the report.
+    const provider = (await (
+      await request.fetch(
+        `${GITHUB_FIXTURE}/__fixture/analysis/requests?containing=${sentinel}`,
+      )
+    ).json()) as { count: number; containing: number };
+    expect(provider.containing).toBeGreaterThanOrEqual(2);
+    for (const role of ["security", "reporter-a", "finance"] as const) {
+      const view = await api(
+        request,
+        "GET",
+        `security-cases/${firstCase}`,
+        TOKENS[role],
+      );
+      expect(JSON.stringify(view.body)).not.toContain(sentinel);
+    }
+    // Severity and loss are guidance, not eligibility: a high finding with
+    // unverified loss can still be awarded at the owner's discretion.
+    expect(
+      (
+        await act(
+          request,
+          "security",
+          firstCase,
+          "decide",
+          decision({
+            severity: "high",
+            loss: "not-verified",
+            rootCauseKey: "vault-withdraw-owner-check",
+          }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(await ownerCase(firstCase)).toMatchObject({
+      awardState: "pending",
+      reservation: null,
+    });
+    const context = await browser.newContext({
+      viewport: test.info().project.use.viewport,
+      recordVideo: { dir: test.info().outputPath("private-award-video") },
+    });
+    const page = await context.newPage();
+    const errors = observe(page);
+    await signIn(page, TOKENS.security);
+    await page.goto("/security", { waitUntil: "networkidle" });
+    const ghsa = (
+      (
+        await api(
+          request,
+          "GET",
+          `security-cases/${firstCase}`,
+          TOKENS.security,
+        )
+      ).body.case as { advisory: { ghsa: string } }
+    ).advisory.ghsa;
+    await page
+      .getByRole("button", { name: new RegExp(`^${program.id} ${ghsa} `) })
+      .click();
+    const detail = page.locator(".security-case");
+    await expect(detail).toContainText("AI summary");
+    await expect(detail).toContainText(
+      "Fixture proposal: the withdraw path skips the owner check",
+    );
+    await expect(detail).toContainText("Likely path to loss of funds");
+    await expect(detail).toContainText(
+      "Next step: Choose an award amount or no award.",
+    );
+    const form = page.getByRole("form", { name: "Award" });
+    await form.getByLabel("Gross award (USD)").fill("4000");
+    await expect(form.getByRole("status")).toHaveText(
+      "Researcher $3,000 · Slop $1,000",
+    );
+    const deadline = new Date(Date.now() + 14 * 86_400_000)
+      .toISOString()
+      .slice(0, 16);
+    await form.getByLabel("Payment deadline (UTC)").fill(deadline);
+    await form.getByLabel(/^I approve this award for @e2e-reporter-a/u).check();
+    await form
+      .getByLabel("Private reason")
+      .fill("Owner award for the confirmed synthetic vault finding.");
+    await expectAccessible(page);
+    await page.screenshot({
+      path: test.info().outputPath("private-award-form.png"),
+      fullPage: true,
+    });
+    await form.getByRole("button", { name: "Record award decision" }).click();
+    await expect(page.getByRole("status").first()).toContainText(
+      "Award: saved.",
+    );
+    await expect(detail).toContainText(
+      "$3,000 to the researcher · $1,000 to Slop · $4,000 gross",
+    );
+    expect(errors).toEqual([]);
+    await context.close();
+    // Approval reserved exactly the chosen gross amount.
+    expect(await ownerCase(firstCase)).toMatchObject({
+      awardState: "approved",
+      award: {
+        grossMinor: "400000",
+        researcherMinor: "300000",
+        slopMinor: "100000",
+      },
+      reservation: { grossMinor: "400000" },
+    });
+    // The verified funds are one published award (10,000 USD); 6,000 USD is
+    // left, so a larger second award reserves nothing.
+    expect(
+      (
+        await act(
+          request,
+          "security",
+          secondCase,
+          "decide",
+          decision({ rootCauseKey: "vault-withdraw-second-path" }),
+        )
+      ).status,
+    ).toBe(200);
+    const short = await award(request, "security", secondCase, "800000");
+    expect(short.status).toBe(409);
+    expect(short.body.error).toBe("insufficient_funds");
+    expect(await ownerCase(secondCase)).toMatchObject({
+      awardState: "pending",
+      reservation: null,
+    });
+    // The reporter sees the receipt, the response and the 75/25 payout only.
+    const reporter = await api(
+      request,
+      "GET",
+      `security-cases/${firstCase}`,
+      TOKENS["reporter-a"],
+    );
+    expect(reporter.body.case).toMatchObject({
+      view: "reporter",
+      awardState: "approved",
+      award: { researcherMinor: "300000", slopMinor: "100000" },
+      // The intake program has no reviewed private payment rail.
+      nextStep:
+        "The award is approved and reserved. Payment waits for the program's reviewed private payment rail.",
+    });
+    expect(reporter.body.case).not.toHaveProperty("analysis");
+    expect(reporter.body.case).not.toHaveProperty("rootCauseKey");
+    const finance = await api(
+      request,
+      "GET",
+      `security-cases/${firstCase}`,
+      TOKENS.finance,
+    );
+    expect(finance.body.case).toMatchObject({ view: "financial" });
+    expect(finance.body.case).not.toHaveProperty("analysis");
   });
 
   await test.step("without the app the automatic path is refused, never public", async () => {

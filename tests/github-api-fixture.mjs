@@ -83,6 +83,8 @@ function privateIntakeFixture() {
   const tokens = new Map();
   const codes = new Map();
   const faults = { create: "ok", list: "ok", get: "ok" };
+  // Request bodies the loopback analysis provider received, in order.
+  const analysisRequests = [];
   let issued = 0;
   const loginToAccount = (login) => {
     const role = /^e2e-(.+)$/u.exec(login ?? "")?.[1];
@@ -130,6 +132,7 @@ function privateIntakeFixture() {
   return {
     installed,
     advisories,
+    analysisRequests,
     tokens,
     codes,
     faults,
@@ -192,6 +195,43 @@ async function handlePrivateIntake(state, request, response, url) {
   if (request.method === "PUT" && faultControl) {
     state.faults[faultControl[1]] = faultControl[2];
     return send(204);
+  }
+  // A loopback stand-in for the Anthropic Messages API that the private AI
+  // analysis calls in the private-intake lane. It answers one fixed
+  // proposal and keeps each request so a test can see what the model read.
+  if (request.method === "POST" && path === "/v1/messages") {
+    if (request.headers["x-api-key"] !== "e2e-fixture-analysis-key")
+      return send(401, { type: "error" });
+    const body = await readBody(request);
+    state.analysisRequests.push(body);
+    return send(200, {
+      type: "message",
+      role: "assistant",
+      stop_reason: "end_turn",
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            summary:
+              "Fixture proposal: the withdraw path skips the owner check, so a crafted proof can drain the vault.",
+            severity: "critical",
+            potentialLoss: "likely",
+            duplicateCaseIds: [],
+            rootCauseKey: "vault-withdraw-owner-check",
+            remediation: "Require the owner check before every withdraw.",
+          }),
+        },
+      ],
+    });
+  }
+  if (request.method === "GET" && path === "/__fixture/analysis/requests") {
+    const needle = url.searchParams.get("containing") ?? "";
+    return send(200, {
+      count: state.analysisRequests.length,
+      containing: state.analysisRequests.filter(
+        (body) => needle !== "" && body.includes(needle),
+      ).length,
+    });
   }
   const countControl = /^\/__fixture\/advisories\/([^/]+\/[^/]+)\/count$/u.exec(
     path,

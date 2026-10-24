@@ -110,7 +110,9 @@ repository. Until then intake stays off and the manual flow below applies.
   configured advisory reader and analysis provider. It records unavailable
   when either is absent. Only maintainers and assigned triagers see the proposal.
   Provider selection requires an explicit configuration; this change does not
-  activate a provider or authorize sending live private evidence.
+  activate a provider or authorize sending live private evidence. The
+  provider endpoints are fixed; only local browser tests may point them at a
+  loopback fixture with `SLOP_ANALYSIS_API_ORIGIN` (`http://127.0.0.1:<port>`).
 - Maintainers can import reports filed directly on GitHub through `mode: import`.
   This uses the same case and analysis records, not a second submission system.
   `SECURITY_ADVISORY_READ_TOKEN` needs advisory-read access to the program
