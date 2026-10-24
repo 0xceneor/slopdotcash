@@ -1,3 +1,4 @@
+import { isBaseUnits } from "./escrow-policy.mjs";
 /** Frozen monetary basis for new proposals; accepted score is independent. */
 
 import { deriveAllocationFundingBasis } from "./allocation-funding-basis.mjs";
@@ -42,10 +43,8 @@ function assertFundingAmounts(value: unknown): {
     Object.keys(basis).sort().join(",") !==
       "committedMinor,fundingState,monthlyCapMinor" ||
     (basis.fundingState !== "pledged" && basis.fundingState !== "committed") ||
-    typeof basis.committedMinor !== "string" ||
-    !/^(0|[1-9][0-9]{0,19})$/u.test(basis.committedMinor) ||
-    typeof basis.monthlyCapMinor !== "string" ||
-    !/^(0|[1-9][0-9]{0,19})$/u.test(basis.monthlyCapMinor)
+    !isBaseUnits(basis.committedMinor) ||
+    !isBaseUnits(basis.monthlyCapMinor)
   ) {
     throw new TypeError("invalid allocation funding basis");
   }

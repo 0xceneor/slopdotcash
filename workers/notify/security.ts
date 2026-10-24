@@ -45,6 +45,12 @@ const EMAIL =
   /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$/u;
 const ID = /^[1-9]\d{0,19}$/u;
 const MAX_ATTEMPTS = 5;
+/**
+ * A reporter's receipt (migration 0063) is informational. It is delivered and
+ * escalated on delivery failure like any private notice, but it asks for no
+ * acknowledgment, so a missing acknowledgment never escalates it.
+ */
+const RECEIPT_TEMPLATE = "security-receipt-v1";
 
 /** A secret, never a manifest or browser input. Missing/invalid config sends nothing. */
 export function parseSecurityMailConfig(
@@ -147,7 +153,9 @@ function mime(
     "Content-Transfer-Encoding: quoted-printable",
     "",
     encodeQuotedPrintable(
-      `Your private Slop inbox needs attention.\n\nSign in: ${deps.config.inboxUrl}\n\nAcknowledge the notice in Slop. Do not reply with evidence, approvals or payment details.\n`,
+      row.template_version === RECEIPT_TEMPLATE
+        ? `Your private Slop inbox has a new notice.\n\nSign in: ${deps.config.inboxUrl}\n\nDo not reply with evidence, approvals or payment details.\n`
+        : `Your private Slop inbox needs attention.\n\nSign in: ${deps.config.inboxUrl}\n\nAcknowledge the notice in Slop. Do not reply with evidence, approvals or payment details.\n`,
     ),
   ].join("\r\n");
 }
@@ -281,6 +289,7 @@ export async function dispatchSecurityMail(
     );
     if (!access.allowed) continue;
     const overdue =
+      row.template_version !== RECEIPT_TEMPLATE &&
       access.acknowledgeHours > 0 &&
       now.getTime() >=
         Date.parse(row.created_at) + access.acknowledgeHours * 3600_000;

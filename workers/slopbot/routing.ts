@@ -1,7 +1,9 @@
 // Eligibility routing (PRD BOT-02 as amended by Slopbot v2). Pure: every input
 // is resolved by the caller, and the order below is the published precedence.
+import type { ClosureEligibility } from "./closure-eligibility";
 import type { RepositoryConfig } from "./contracts";
 import type { Exemption } from "./github";
+import type { ReviewScope } from "./registry";
 
 export type RoutingInput = {
   config: RepositoryConfig;
@@ -13,9 +15,13 @@ export type RoutingInput = {
   merged: boolean;
   authorType: string;
   authorIsSelf: boolean;
+  scope: ReviewScope;
   exemption: Exemption;
+  /** Audience filter only. A marker never enables closure or a penalty. */
   markerPresent: boolean;
   participant: boolean;
+  /** The closure-eligibility check for this author and item. */
+  closure: ClosureEligibility;
   humanReopenedThisRevision: boolean;
   authorCapReached: boolean;
 };
@@ -55,16 +61,11 @@ export function route(input: RoutingInput): Routing {
     };
   }
 
-  let mayClose = true;
   let reason = "eligible";
   if (input.exemption === "exempt") {
     if (!input.config.reviewExempt)
       return { review: false, reason: "maintainer or member is exempt" };
-    mayClose = false;
     reason = "exempt author, advisory review only";
-  } else if (input.exemption === "unknown") {
-    mayClose = false;
-    reason = "membership unknown, closure blocked";
   }
 
   if (
@@ -77,7 +78,19 @@ export function route(input: RoutingInput): Routing {
   if (input.authorCapReached)
     return { review: false, reason: "daily review cap for new author reached" };
 
-  // A marker added by someone else never enables a penalty (BOT-06): only a
-  // registered participant, matched by immutable actor ID, is penalty eligible.
-  return { review: true, mayClose, penaltyEligible: input.participant, reason };
+  // Advisory review stays broad. Closure, and so a penalty, needs the
+  // explicit eligibility check: a verified member, a verified skill run for
+  // this pull request and no maintainer role. A paused project gets security
+  // review only and is never closed.
+  if (input.scope === "security")
+    return {
+      review: true,
+      mayClose: false,
+      penaltyEligible: false,
+      reason: "contributor work is paused; security review only",
+    };
+  const mayClose = input.closure.eligible;
+  if (!mayClose && reason === "eligible")
+    reason = `advisory review only: ${input.closure.why}`;
+  return { review: true, mayClose, penaltyEligible: mayClose, reason };
 }

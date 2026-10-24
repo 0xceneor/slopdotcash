@@ -16,10 +16,9 @@ import {
   type PaymentsDependencies,
 } from "../../../backend/payments/handler";
 import {
-  OwnerAwardReviewError,
-  prepareOwnerCommitment,
-  reviewOwnerAwards,
-} from "../../../backend/payments/owner-review";
+  monthlyOwnerService,
+  verifyProjectAuthority,
+} from "../../../backend/payments/monthly";
 import {
   handlePointsApi,
   sessionGithubActor,
@@ -40,6 +39,8 @@ import {
 } from "../../../backend/projects/handler";
 import {
   parseRepositoryAccess,
+  readRepositoryAccess,
+  setupAuthority,
   vettingScanRequester,
 } from "../../../backend/projects/setup";
 import { assetTemplateSource } from "../../../backend/projects/skill-publication";
@@ -69,8 +70,14 @@ import {
 } from "../../../backend/trace/cloudflare-persistence";
 import { handleTraceApi } from "../../../backend/trace/handler";
 import { VettingEvidence } from "../../../backend/vetting/evidence";
+import { githubFlaggerStanding } from "../../../backend/vetting/flagger-standing";
+import {
+  handleProjectFlagsApi,
+  ProjectFlagStore,
+} from "../../../backend/vetting/flags";
 import {
   handleVettingApi,
+  queueAutomaticScan,
   signedVettingRequest,
   vettingServiceAvailable,
 } from "../../../backend/vetting/handler";
@@ -82,6 +89,7 @@ import { CloudflareVettingPersistence } from "../../../backend/vetting/persisten
 import type { SolanaEscrowConfig } from "../../../contracts/solana/adapter";
 import { deploymentTier } from "../../../src/lib/deployment";
 import { ESCROW_NETWORKS } from "../../../src/lib/escrow-policy.mjs";
+import { parseMonthlySchedule } from "../../../src/lib/payments/monthly-allocation";
 import type { ProjectDefinition } from "../../../src/lib/projects.mjs";
 import {
   loadRegistryPaymentDeployments,
@@ -101,6 +109,8 @@ type Env = {
    * every binding closed.
    */
   PAYMENT_NETWORKS?: string;
+  /** Owner-decided automatic monthly cutoff; unset keeps the automatic process off. */
+  MONTHLY_PAYMENT_SCHEDULE?: string;
   SOLANA_IDENTITY_ATTESTER?: { fetch(request: Request): Promise<Response> };
   SECURITY_SOLANA_IDENTITY_ATTESTER?: {
     fetch(request: Request): Promise<Response>;
@@ -406,15 +416,14 @@ async function githubRepository(
 const MAX_APPLICATION_GITHUB_NAMES = 5;
 
 /**
- * Proves control from public GitHub facts only: the applicant owns a user
- * repository, or is a public member of the owning organization. The manifest's
- * repository and steward identities must match GitHub exactly. Every other
- * repository and every alias must be a public GitHub repository, an alias the
- * repository it names, and control is proven only for every owner.
+ * Checks the manifest against public GitHub facts: the repository and steward
+ * identities must match GitHub exactly, and every other repository and alias
+ * must be a public GitHub repository, each alias a name of the repository it
+ * follows. These facts never grant authority; the Slopbot installation read
+ * does (owner decision D11).
  */
 export async function repositoryControl(
   manifest: ProjectDefinition,
-  actor: { githubId: string; githubLogin: string },
   env: Env,
 ): Promise<RepositoryControl> {
   const api = githubApiOrigin(env.SLOP_GITHUB_API_ORIGIN);
@@ -460,12 +469,11 @@ export async function repositoryControl(
     ),
   );
   read.set(repository.id, facts);
-  let control = await ownerControl(api, token, facts, repository.id, actor);
   const missing = (path: string): RepositoryControl => ({
     state: "mismatch",
     reason: `GitHub has no public repository named ${path}`,
   });
-  for (const [index, entry] of manifest.repositories.entries()) {
+  for (const entry of manifest.repositories) {
     const named = read.get(entry.id);
     if (named?.private !== false) return missing(entry.id);
     if (String(named.full_name).toLowerCase() !== entry.id.toLowerCase())
@@ -482,46 +490,8 @@ export async function repositoryControl(
           reason: `Alias ${alias} is not a name of ${entry.id} on GitHub`,
         };
     }
-    if (index > 0 && control.state === "proven") {
-      const owned = await ownerControl(api, token, named, entry.id, actor);
-      if (owned.state !== "proven") control = owned;
-    }
   }
-  return control;
-}
-
-async function ownerControl(
-  api: string,
-  token: string | undefined,
-  facts: GithubRepositoryFacts,
-  repository: string,
-  actor: { githubId: string; githubLogin: string },
-): Promise<RepositoryControl> {
-  if (facts.owner?.type === "User")
-    return String(facts.owner.id) === actor.githubId
-      ? {
-          state: "proven",
-          reason: `@${actor.githubLogin} owns ${repository}`,
-        }
-      : {
-          state: "unproven",
-          reason: `@${actor.githubLogin} does not own ${repository}`,
-        };
-  const membership = await fetch(
-    `${api}/orgs/${encodeURIComponent(String(facts.owner?.login))}/public_members/${encodeURIComponent(actor.githubLogin)}`,
-    { headers: githubHeaders(token), signal: AbortSignal.timeout(10_000) },
-  );
-  if (membership.status === 204)
-    return {
-      state: "proven",
-      reason: `@${actor.githubLogin} is a public member of ${String(facts.owner?.login)}`,
-    };
-  if (membership.status === 404)
-    return {
-      state: "unproven",
-      reason: `@${actor.githubLogin} is not a public member of ${String(facts.owner?.login)}`,
-    };
-  throw new Error(`GitHub returned ${membership.status}`);
+  return { state: "matched" };
 }
 
 /**
@@ -574,7 +544,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
   const vetting = new CloudflareVettingPersistence(
     context.env.SLOP_DB,
     async (assessment) =>
-      assessment.result !== null && evidence.complete(assessment.result),
+      assessment.result !== null && evidence.retained(assessment.result),
   );
   const github = {
     fetch: (url: string, init: RequestInit) => fetch(url, init),
@@ -618,8 +588,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
         context.env.SLOP_DB,
         new Date().toISOString(),
       ),
-    repositoryControl: (manifest, actor) =>
-      repositoryControl(manifest, actor, context.env),
+    repositoryControl: (manifest) => repositoryControl(manifest, context.env),
     repositoryAccess: (repository, actor) =>
       slopbotRepositoryAccess(context.env.SLOPBOT, repository, actor),
     requestScan: vettingScanRequester({
@@ -688,19 +657,71 @@ export async function onRequest(context: PagesContext): Promise<Response> {
   if (securityResponse !== null) return securityResponse;
   const evidenceResponse = await evidence.handle(context.request);
   if (evidenceResponse !== null) return evidenceResponse;
+  const flags = new ProjectFlagStore(context.env.SLOP_DB);
+  const operatorGithubIds = [
+    ...new Set([
+      ...githubIdSet(context.env.ADMIN_GITHUB_IDS),
+      ...githubIdSet(context.env.PROJECT_MODERATOR_GITHUB_IDS),
+    ]),
+  ];
+  const flagsResponse = await handleProjectFlagsApi(context.request, {
+    flags,
+    projects: projectPersistence,
+    flaggerStanding: githubFlaggerStanding({
+      fetch: github.fetch,
+      token: github.token,
+      apiOrigin: github.apiOrigin,
+      registryRepositories: async () =>
+        (await projectPersistence.listProjects()).flatMap((project) =>
+          project.manifest.repositories.map((entry) => entry.id),
+        ),
+    }),
+    repositoryAuthority: async (manifest, actor) => {
+      // Only current repository permission determines maintainer exclusion.
+      return setupAuthority(
+        await readRepositoryAccess(
+          (repository, member) =>
+            slopbotRepositoryAccess(context.env.SLOPBOT, repository, member),
+          manifest,
+          actor,
+        ),
+        actor,
+        manifest.repositories[0].id,
+      );
+    },
+    sessionActor: (request) =>
+      sessionGithubActor(
+        request,
+        context.env.SLOP_DB,
+        new Date().toISOString(),
+      ),
+    moderatorGithubIds: operatorGithubIds,
+    queueFreshScan: (project) =>
+      queueAutomaticScan(
+        {
+          vetting,
+          livePin,
+          resultPublicKeys: context.env.VETTING_RESULT_PUBLIC_KEYS,
+          now: () => new Date(),
+          randomId: () => crypto.randomUUID(),
+        },
+        project,
+        "Automatic fresh scan after two contributor flags paused the project",
+      ),
+    now: () => new Date(),
+    randomId: () => crypto.randomUUID(),
+    cache: edgeCache(),
+  });
+  if (flagsResponse !== null) return flagsResponse;
   const vettingResponse = await handleVettingApi(context.request, {
     refreshSetup: (projectId) =>
       refreshProjectSetup(context.request, projectDependencies, projectId),
     evidence,
     vetting,
+    flags,
     projects: projectPersistence,
     resultPublicKeys: context.env.VETTING_RESULT_PUBLIC_KEYS,
-    operatorGithubIds: [
-      ...new Set([
-        ...githubIdSet(context.env.ADMIN_GITHUB_IDS),
-        ...githubIdSet(context.env.PROJECT_MODERATOR_GITHUB_IDS),
-      ]),
-    ],
+    operatorGithubIds,
     livePin,
     session: async (request) => {
       const actor = await sessionGithubActor(
@@ -771,76 +792,41 @@ export async function onRequest(context: PagesContext): Promise<Response> {
         db: securityPaymentDatabase(context.env.SLOP_DB),
         solanaAttester: context.env.SECURITY_SOLANA_IDENTITY_ATTESTER,
       },
-      ownerCommitment: async (projectId, cycleId, actor, expected) => {
-        const generation = await projectPersistence.enforcementGeneration();
-        const project = await projectPersistence.getProject(projectId);
-        if (!project)
-          throw new OwnerAwardReviewError(404, "Project not found.");
-        if (
+      monthly: monthlyOwnerService({
+        db: context.env.SLOP_DB,
+        getProject: (id) => projectPersistence.getProject(id),
+        restricted: async (project) =>
           publicRestrictionOf(
             project,
             await projectPersistence.listEnforcements(),
-          ).state !== "clear"
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "This project is restricted. New award commitments are unavailable.",
-          );
-        if (
-          !parsePaymentNetworks(context.env.PAYMENT_NETWORKS).some(
-            (network) => network === expected.network,
-          )
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "Award processing is not configured for this network.",
-          );
-        const result = await prepareOwnerCommitment(
-          {
-            project,
-            cycleId,
+          ).state !== "clear",
+        // Unset or invalid networks serve no vault, so nothing is finalized
+        // or reserved here.
+        networks: () => {
+          try {
+            return parsePaymentNetworks(context.env.PAYMENT_NETWORKS);
+          } catch {
+            return [];
+          }
+        },
+        verifyAuthority: (project, actor) =>
+          verifyProjectAuthority(
+            project.manifest,
             actor,
-            token: context.env.SLOP_GITHUB_READ_TOKEN,
-            now: new Date(),
-          },
-          expected,
-        );
-        const current = await projectPersistence.getProject(projectId);
-        if (
-          !current ||
-          current.revision !== project.revision ||
-          current.manifestSha256 !== project.manifestSha256 ||
-          (await projectPersistence.enforcementGeneration()) !== generation
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "The project changed during review. Reload its current awards.",
-          );
-        return result;
-      },
-      ownerAwardReview: async (projectId, cycleId, actor) => {
-        const project = await projectPersistence.getProject(projectId);
-        if (!project)
-          throw new OwnerAwardReviewError(404, "Project not found.");
-        const result = await reviewOwnerAwards({
-          project,
-          cycleId,
-          actor,
-          token: context.env.SLOP_GITHUB_READ_TOKEN,
-          now: new Date(),
-        });
-        const current = await projectPersistence.getProject(projectId);
-        if (
-          !current ||
-          current.revision !== project.revision ||
-          current.manifestSha256 !== project.manifestSha256
-        )
-          throw new OwnerAwardReviewError(
-            409,
-            "The project changed during review. Reload its current awards.",
-          );
-        return result;
-      },
+            context.env.SLOP_GITHUB_READ_TOKEN,
+          ),
+        // The cutoff display and the owner's cutoff lock. A malformed value
+        // turns both off; the payments Worker then fails loudly and freezes
+        // nothing automatically, so the allocations stay owner-controlled.
+        schedule: () => {
+          try {
+            return parseMonthlySchedule(context.env.MONTHLY_PAYMENT_SCHEDULE);
+          } catch {
+            return null;
+          }
+        },
+        now: () => new Date(),
+      }),
       solanaFundingConfig: async (projectId, network, vault) => {
         const networks = parsePaymentNetworks(context.env.PAYMENT_NETWORKS);
         const selected = networks.find((name) => name === network);

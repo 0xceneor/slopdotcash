@@ -11,6 +11,10 @@ import {
   parseVettingResult,
   type VettingResult,
 } from "../../backend/vetting/result";
+import {
+  parseRecordedVettingResult,
+  recordedResultProblems,
+} from "../../backend/vetting/scan-result";
 import { REVIEW_AREAS, type ScannerEvidence } from "./scanners";
 import { signedServiceHeaders, type VettingServiceSigner } from "./service";
 
@@ -134,12 +138,13 @@ export async function publishResult(input: {
     origin.password
   )
     throw new Error("An exact reviewed HTTPS service origin is required");
-  const result = parseVettingResult(JSON.parse(input.body));
+  // Publishes either a bounded scan result or a historical v1 result.
+  const result = parseRecordedVettingResult(JSON.parse(input.body));
   if (
     Buffer.byteLength(input.body) > MAX_VETTING_RESULT_BYTES ||
     sha256(input.body) !== input.approvedSha256 ||
     JSON.stringify(result) !== input.body ||
-    dispositionProblems(result).length > 0
+    recordedResultProblems(result).length > 0
   )
     throw new Error("Publication bytes do not match the approved result");
   const path = "/api/v1/vetting/results";

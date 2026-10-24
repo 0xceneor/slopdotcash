@@ -12,6 +12,7 @@ import { handlePaymentsApi } from "../../backend/payments/handler";
 import type { SolanaEscrowConfig } from "../../contracts/solana/adapter";
 import { decodeBase58Bytes } from "../../src/lib/base58";
 import type { EscrowDeployment } from "../../src/lib/escrow-policy.mjs";
+import { formatAssetAmount } from "../../src/lib/project-schema.mjs";
 import { PROJECTS } from "../../src/lib/projects.mjs";
 
 // Dependencies are installed by the existing Solana contract test command.
@@ -225,13 +226,15 @@ test.beforeAll(async () => {
     genesisHash: await connection.getGenesisHash(),
   } as SolanaEscrowConfig;
   const original = PROJECTS.find((p) => p.id === "eliza");
-  if (!original) throw new Error("Missing project fixture");
+  if (original?.reward.kind !== "monthly-pool")
+    throw new Error("Missing monthly project fixture");
   project = {
     ...original,
     reward: {
       ...original.reward,
       chain: "solana",
       currency: "TEST",
+      monthlyCapDisplay: `${formatAssetAmount(original.reward.monthlyCapMinor, 6)} TEST`,
       feeBasisPoints: 200,
       paymentMode: "disabled",
       committedMinor: "0",
@@ -549,15 +552,14 @@ test("Solana wallet deposits, recovers after reload, and owner withdraws with ve
   );
   expect(account.amount).toBe(4_900_000n);
   expect(apiRejections).toEqual([422, 422, 422]);
-  // Approval and session are controlled fixtures; the API planner, wallet and
+  // Finalized awards and session are controlled fixtures; the API planner, wallet and
   // finalized commitment verifier below use the actual local Solana program.
   const commitment = {
-    schemaVersion: "1",
+    schemaVersion: "2",
     projectId: "eliza",
     cycleId: "2026-09",
     manifestSha256: "a".repeat(64),
-    proposalSha256: "b".repeat(64),
-    decisionsSha256: "c".repeat(64),
+    snapshotSha256: "b".repeat(64),
     deployment,
     award: {
       githubUserId: "1234",
@@ -571,7 +573,7 @@ test("Solana wallet deposits, recovers after reload, and owner withdraws with ve
   let reviewAvailable = true;
   let reviewReads = 0;
   await page.route(
-    "**/api/v1/payments/projects/eliza/awards/2026-09",
+    "**/api/v1/payments/projects/eliza/monthly/2026-09",
     (route) => {
       reviewReads++;
       return route.fulfill({
@@ -579,61 +581,67 @@ test("Solana wallet deposits, recovers after reload, and owner withdraws with ve
         json: reviewAvailable
           ? {
               projectId: "eliza",
-              cycleId: "2026-09",
-              projectRevision: 1,
+              period: "2026-09",
               manifestSha256: commitment.manifestSha256,
-              proposalSha256: commitment.proposalSha256,
-              sourceUrl: "https://github.com/SlopDotCash/slopdotcash",
-              deployments: [deployment],
-              asset: project.rewardAsset,
+              automatic: true,
+              cutoffAt: null,
+              deployment,
+              asset: null,
               proposal: {
+                capBase: "2000000",
+                allocationSequence: 0,
+                allocations: [
+                  {
+                    githubUserId: "1234",
+                    login: "local-contributor",
+                    grossBase: "2000000",
+                    proposedGrossBase: "2000000",
+                    sourceDigest: commitment.award.sourceDigest,
+                  },
+                ],
+              },
+              run: {
+                trigger: "automatic",
+                frozenAt: "2026-10-03T00:00:00.000Z",
+                snapshotSha256: commitment.snapshotSha256,
+                totalGrossBase: "2000000",
+                network: deployment.network,
+                vault: deployment.vault,
+                funded: true,
                 awards: [
                   {
                     githubUserId: "1234",
                     login: "local-contributor",
-                    grossMicro: "2000000",
+                    grossBase: "2000000",
+                    feeBase: "40000",
+                    netBase: "1960000",
+                    state: "awaiting-reservation",
                   },
                 ],
               },
-              decisions: {
-                rows: [
-                  {
-                    githubUserId: "1234",
-                    state: "approved",
-                    approvedGrossMicro: "2000000",
-                    adjustmentReason: null,
-                    relatedParty: false,
-                  },
-                ],
-              },
-              review: { decisionsSha256: commitment.decisionsSha256 },
-              reviewVerified: true,
-              reviewEndsAt: "2026-10-15T00:00:00.000Z",
-              blockedReason: null,
             }
           : { message: "Review temporarily unavailable" },
       });
     },
   );
   await page.route(
-    "**/api/v1/payments/projects/eliza/awards/2026-09/commitment",
+    "**/api/v1/payments/projects/eliza/monthly/2026-09/commitment",
     (route) => {
       expect(route.request().postDataJSON()).toEqual({
         network: deployment.network,
         githubUserId: "1234",
         manifestSha256: commitment.manifestSha256,
-        proposalSha256: commitment.proposalSha256,
-        decisionsSha256: commitment.decisionsSha256,
+        snapshotSha256: commitment.snapshotSha256,
       });
       return route.fulfill({ json: commitment });
     },
   );
   await page.route(
-    "**/api/v1/payments/projects/eliza/awards/2026-09/solana-commitment",
+    "**/api/v1/payments/projects/eliza/monthly/2026-09/solana-commitment",
     async (route) => {
       const response = await handlePaymentsApi(
         new Request(
-          "https://slop.cash/api/v1/payments/projects/eliza/awards/2026-09/solana-commitment",
+          "https://slop.cash/api/v1/payments/projects/eliza/monthly/2026-09/solana-commitment",
           {
             method: "POST",
             headers: {
@@ -658,11 +666,13 @@ test("Solana wallet deposits, recovers after reload, and owner withdraws with ve
               };
             },
           } as never,
-          ownerCommitment: async () => {
-            if (!reviewAvailable)
-              throw new Error("Approval fixture is unavailable");
-            return commitment as never;
-          },
+          monthly: {
+            commitment: async () => {
+              if (!reviewAvailable)
+                throw new Error("Award fixture is unavailable");
+              return commitment as never;
+            },
+          } as never,
           solanaFundingConfig: async (id, network, vault) => {
             expect(id).toBe("eliza");
             expect(network).toBe(deployment.network);
@@ -682,7 +692,7 @@ test("Solana wallet deposits, recovers after reload, and owner withdraws with ve
   await page.getByLabel("Contribution month").fill("2026-09");
   await page.getByRole("button", { name: "Load awards", exact: true }).click();
   await page
-    .getByRole("button", { name: "Review commitment for local-contributor" })
+    .getByRole("button", { name: "Reserve award for local-contributor" })
     .click();
   const ownerActions = page.getByRole("region", {
     name: "Authorize award commitment",

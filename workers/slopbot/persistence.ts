@@ -6,6 +6,7 @@ import type {
   D1Statement,
   D1TransactionalDatabase,
 } from "../../backend/d1";
+import { notifySlopbotInstallationLost } from "../../backend/notifications/events";
 import { PRICE_VERSION, priceUsage } from "./contracts";
 import type { CallRecord } from "./models";
 
@@ -157,6 +158,11 @@ export async function completeInstallationDelivery(
           update.sourceUpdatedAt,
         ),
     );
+    if (changedAt !== null) {
+      statements.push(
+        notifySlopbotInstallationLost(db, update.installation.id, changedAt),
+      );
+    }
   }
   statements.push(
     db
@@ -179,17 +185,6 @@ export async function installation(db: D1Database, installationId: number) {
       suspended_at: string | null;
       removed_at: string | null;
     }>();
-}
-
-export async function isParticipant(
-  db: D1Database,
-  githubId: number,
-): Promise<boolean> {
-  const row = await db
-    .prepare("SELECT 1 AS ok FROM points_members WHERE github_id = ?")
-    .bind(String(githubId))
-    .first();
-  return row !== null;
 }
 
 export async function count(
@@ -427,7 +422,7 @@ export async function recordCalls(
 export async function hasRecordedAction(
   db: D1Database,
   reviewKey: string,
-  action: "label",
+  action: "label" | "comment",
 ): Promise<boolean> {
   return (
     (await db

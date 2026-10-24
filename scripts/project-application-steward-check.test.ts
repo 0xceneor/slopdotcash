@@ -80,7 +80,19 @@ async function submit(github: Record<string, unknown>) {
       },
       body: JSON.stringify({ manifest }),
     }),
-    env: { SLOP_DB: db, ADMIN_GITHUB_IDS: "900000001" } as never,
+    env: {
+      SLOP_DB: db,
+      ADMIN_GITHUB_IDS: "900000001",
+      SLOPBOT: {
+        fetch: async () =>
+          Response.json({
+            installation: "installed",
+            installationId: 5151,
+            permission: "admin",
+            roleName: "admin",
+          }),
+      },
+    } as never,
   });
   const body = (await response.json()) as {
     setup?: { checks: { authority: { message: string } } };
@@ -102,7 +114,7 @@ test("the repository owner is accepted as steward, in any login case", async () 
   const exact = await submit({});
   expect(exact.status).toBe(201);
   expect(exact.body.setup?.checks.authority.message).toBe(
-    "@example owns example/open-registry.",
+    "@example has admin access to example/open-registry.",
   );
 
   // GitHub logins are case-insensitive.

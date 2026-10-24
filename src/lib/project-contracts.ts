@@ -82,7 +82,8 @@ export type EnforcementActorRole =
   | "project-moderator"
   | "project-steward"
   | "project-applicant"
-  | "vetting-service";
+  | "vetting-service"
+  | "contributor-flags";
 export type RestrictionState = "clear" | "quarantined" | "banned";
 export type AppealState = "none" | "requested" | "granted" | "denied";
 export type EnforcementResult =
@@ -105,13 +106,20 @@ export type ProjectEnforcement = {
   /** Lowercase repository paths, including transfer aliases. */
   repositoryKeys: string[];
   actor: GithubActor | null;
-  systemIssuer?: {
-    kind: "vetting-service";
-    keySha256: string;
-    assessmentId: string;
-    policyVersion: string;
-    rule: string;
-  };
+  systemIssuer?:
+    | {
+        kind: "vetting-service";
+        keySha256: string;
+        assessmentId: string;
+        policyVersion: string;
+        rule: string;
+      }
+    | {
+        /** Two distinct active contributor flags paused the project. */
+        kind: "contributor-flags";
+        threshold: number;
+        flagIds: string[];
+      };
   /** A steward or applicant may only file a reinstatement request (ELG-02). */
   actorRole: EnforcementActorRole;
   decisionSource: "admin-panel" | "owner-request" | "standing-rule";
@@ -190,17 +198,8 @@ export type RepositoryAccess =
 
 /** Current GitHub authority of the signed-in account over a repository. */
 export type SetupAuthority =
-  | {
-      state: "verified";
-      /**
-       * `installation`: the Slopbot installation read write, maintain or
-       * admin access. `public-github-facts`: the account owns the user
-       * repository or is a public member of its organization; activation
-       * still needs the installation check.
-       */
-      basis: "installation" | "public-github-facts";
-      message: string;
-    }
+  /** The Slopbot installation read write, maintain or admin access. */
+  | { state: "verified"; message: string }
   | { state: "denied"; message: string }
   | { state: "retry"; message: string };
 
@@ -245,7 +244,9 @@ export type ProjectSetupStatus = {
         mode: "monthly";
         network: string;
         symbol: string;
+        /** Integer base units of the asset, which has `decimals`. */
         monthlyAmountMinor: string;
+        decimals: number;
         state: "pledged" | "committed";
         payments: "enabled" | "disabled";
       };

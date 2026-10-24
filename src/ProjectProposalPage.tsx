@@ -11,6 +11,7 @@ import {
 import {
   createProject,
   listProjectSetup,
+  ProjectApiError,
   type ProjectApplication,
   type ProjectSessionState,
   type ProjectSummary,
@@ -23,6 +24,7 @@ import {
 import {
   type OwnedRepository,
   type ProjectSetupStatus,
+  SLOPBOT_INSTALL_URL,
   validRepositoryPath,
 } from "./lib/project-contracts";
 import {
@@ -39,7 +41,12 @@ import {
   slugify,
 } from "./lib/project-proposal";
 import { classifyRevisionChanges } from "./lib/project-revision-changes";
-import { PROJECT_SKILL_TEMPLATES } from "./lib/project-schema.mjs";
+import {
+  formatAssetAmount,
+  monthlyAmountDisplay,
+  PROJECT_SKILL_TEMPLATES,
+  parseAssetAmount,
+} from "./lib/project-schema.mjs";
 import type { ProjectDefinition } from "./lib/projects.mjs";
 import {
   REWARD_ASSET_NETWORKS,
@@ -1162,7 +1169,7 @@ export default function ProjectProposalPage() {
   const manifestText = `${JSON.stringify(manifest, null, 2)}\n`;
   const [submission, setSubmission] = useState<
     | { status: "idle" | "submitting" }
-    | { status: "error"; message: string }
+    | { status: "error"; message: string; install: boolean }
     | {
         status: "submitted";
         projectId: string;
@@ -1176,7 +1183,11 @@ export default function ProjectProposalPage() {
   }
   function submit() {
     setSubmission({ status: "submitting" });
-    createProject(manifest as unknown as ProjectDefinition, referrer).then(
+    createProject(
+      manifest as unknown as ProjectDefinition,
+      referrer,
+      funding.mode === "monthly" ? funding.monthlyAmount.trim() : null,
+    ).then(
       ({ project, setup }) => {
         forgetReferrer();
         setSubmission({
@@ -1193,6 +1204,9 @@ export default function ProjectProposalPage() {
             error instanceof Error
               ? error.message
               : "The project was not created.",
+          install:
+            error instanceof ProjectApiError &&
+            error.code === "slopbot_required",
         }),
     );
   }
@@ -1349,10 +1363,10 @@ export default function ProjectProposalPage() {
       <section className="proposal-intro">
         <h1>Add a project</h1>
         <p>
-          Create your project without waiting for an admin. Slop checks your
-          GitHub access, you install Slopbot, and an automatic security scan
-          runs. The project goes live when those checks pass. Funding is
-          optional. Questions? Email{" "}
+          Create your project without waiting for an admin. First install
+          Slopbot on the repository, so Slop can read your GitHub access. Then
+          an automatic security scan runs. The project goes live when those
+          checks pass. Funding is optional. Questions? Email{" "}
           <a href={CONTACT_MAILTO}>{CONTACT_EMAIL}</a>.
         </p>
       </section>
@@ -1793,10 +1807,11 @@ export default function ProjectProposalPage() {
                   </dd>
                 </div>
                 <div>
-                  <dt>When created</dt>
+                  <dt>Before you create</dt>
                   <dd>
-                    Paused until Slopbot is installed and the security scan
-                    passes
+                    Install Slopbot on {p.repository || "the repository"}. Slop
+                    reads your write access through it. The project stays paused
+                    until the security scan passes.
                   </dd>
                 </div>
                 <div>
@@ -1805,7 +1820,7 @@ export default function ProjectProposalPage() {
                     {p.fundingMode !== "monthly"
                       ? "None"
                       : pool.valid
-                        ? `${formatMonthlyAmount(pool.minor, fundingSymbol)} on ${SETTLEMENT_CHAIN_NAMES[p.settlementChain] ?? p.settlementChain} · pledge`
+                        ? `${formatMonthlyAmount(pool.minor, 6, fundingSymbol)} on ${SETTLEMENT_CHAIN_NAMES[p.settlementChain] ?? p.settlementChain} · pledge`
                         : "Invalid"}
                   </dd>
                 </div>
@@ -1873,6 +1888,12 @@ export default function ProjectProposalPage() {
                 {submission.status === "error" ? (
                   <p className="form-error" role="alert">
                     {submission.message}
+                    {submission.install ? (
+                      <>
+                        {" "}
+                        <a href={SLOPBOT_INSTALL_URL}>Install Slopbot</a>
+                      </>
+                    ) : null}
                   </p>
                 ) : null}
                 {draftNote}
@@ -1987,12 +2008,6 @@ type UpdateDraft = {
   monthlyAmount: string;
 } & Record<(typeof SKILL_RULE_FIELDS)[number], string>;
 
-function centsText(minor: string): string {
-  const amount = BigInt(minor);
-  const cents = (amount % 1_000_000n) / 10_000n;
-  return `${amount / 1_000_000n}${cents === 0n ? "" : `.${cents.toString().padStart(2, "0")}`}`;
-}
-
 const DRAFT_FIELDS = [
   "headline",
   "goal",
@@ -2055,8 +2070,9 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
   const reward = current.reward;
   const monthly = reward.kind === "monthly-pool";
   const capMinor = monthly ? reward.monthlyCapMinor : "0";
-  const hasVault = current.escrow !== undefined;
-  const funded =
+  // Amounts are stored in the asset's base units (owner decision D11).
+  const decimals = current.rewardAsset?.decimals ?? 6;
+  const assetFixed =
     monthly &&
     (reward.fundingState === "committed" ||
       reward.paymentMode === "enabled" ||
@@ -2074,7 +2090,10 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
       current.rewardAsset?.kind === "token" ? current.rewardAsset.address : "",
     tokenSymbol:
       current.rewardAsset?.kind === "token" ? current.rewardAsset.symbol : "",
-    monthlyAmount: capMinor === "0" ? "" : centsText(capMinor),
+    monthlyAmount:
+      capMinor === "0"
+        ? ""
+        : formatAssetAmount(capMinor, decimals).replaceAll(",", ""),
     ...(Object.fromEntries(
       SKILL_RULE_FIELDS.map((field) => [
         field,
@@ -2140,6 +2159,15 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
     setDraft((existing) => ({ ...(existing ?? {}), [field]: next }));
   };
   const amount = monthlyPoolValue(value.monthlyAmount);
+  // The amount in the current asset's base units; null when it cannot be
+  // written with that asset's decimals. The server then refuses it.
+  let amountMinor: string | null = null;
+  if (amount.valid)
+    try {
+      amountMinor = parseAssetAmount(value.monthlyAmount.trim(), decimals);
+    } catch {
+      amountMinor = null;
+    }
   const errors: Record<string, string | undefined> = {
     headline: lengthError(value.headline, 8, 120),
     goal: lengthError(value.goal, 24, 600),
@@ -2168,7 +2196,6 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
     tokenSymbol: value.tokenSymbol,
     monthlyAmount: value.monthlyAmount,
   };
-  const assetFixed = funded || hasVault;
   if (
     choice.mode === "monthly" &&
     !assetFixed &&
@@ -2191,10 +2218,17 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
     const source = current;
     let fundingFields: Record<string, unknown> = {};
     if (source.reward.kind === "monthly-pool") {
-      const cap =
-        choice.mode === "monthly" && amount.valid
-          ? { monthlyCapMinor: amount.minor, monthlyCapDisplay: amount.display }
-          : { monthlyCapMinor: "0", monthlyCapDisplay: "$0" };
+      // In the current asset's base units. The server converts the amount
+      // again from `monthlyAmount` with the decimals it verified.
+      const monthlyCapMinor =
+        choice.mode === "monthly" && amountMinor !== null ? amountMinor : "0";
+      const cap = {
+        monthlyCapMinor,
+        monthlyCapDisplay: monthlyAmountDisplay(
+          monthlyCapMinor,
+          source.rewardAsset,
+        ),
+      };
       // The asset and vault change only when the owner chose a new one.
       const assetTouched =
         draft !== null &&
@@ -2237,8 +2271,10 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
       changes.executable.length +
       changes.financial.length >
     0;
-  const amountText = (minor: string, symbol: string) =>
-    minor === "0" ? "No monthly funding" : formatMonthlyAmount(minor, symbol);
+  const fundingText = (minor: string, digits: number, symbol: string) =>
+    minor === "0"
+      ? "No monthly funding"
+      : formatMonthlyAmount(minor, digits, symbol);
   const diff = [
     {
       field: "headline",
@@ -2270,14 +2306,20 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
           {
             field: "monthly",
             label: "Monthly funding",
-            before: amountText(
+            before: fundingText(
               current.reward.monthlyCapMinor,
+              decimals,
               String(current.reward.currency),
             ),
-            after: amountText(
-              next.reward.monthlyCapMinor,
-              String(next.reward.currency),
-            ),
+            // The typed amount, in whole units of the chosen asset.
+            after:
+              choice.mode === "monthly" && amount.valid
+                ? formatMonthlyAmount(
+                    amount.minor,
+                    6,
+                    String(next.reward.currency),
+                  )
+                : "No monthly funding",
           },
         ]
       : []),
@@ -2294,12 +2336,20 @@ export function ProjectUpdatePage({ project }: { project: ProjectDefinition }) {
         next,
         base.revision,
         value.note,
+        choice.mode === "monthly" && changes.financial.length > 0
+          ? value.monthlyAmount.trim()
+          : null,
       );
+      // The response is the published revision. Use it before allowing the
+      // next edit; a later GET would make a fast new draft appear stale.
+      setBase({
+        revision: result.project.revision,
+        project: result.project.manifest,
+      });
       setSubmission({ state: "published", result });
       setDraft(null);
       setDraftRevision(null);
       setAttempted(false);
-      setReload((count) => count + 1);
     } catch (error) {
       setSubmission({
         state: "error",

@@ -164,8 +164,10 @@ export async function handlePointsApi(
         4096,
         "points join",
       )) as Record<string, unknown>;
+      const keys = Object.keys(value).sort().join();
       if (
-        Object.keys(value).sort().join() !== "assertion,public" ||
+        (keys !== "assertion,public" &&
+          !(keys === "assertion,public,reopen" && value.reopen === true)) ||
         typeof value.assertion !== "string" ||
         !/^slop_assert_v1_[A-Za-z0-9_-]{40,128}$/.test(value.assertion) ||
         typeof value.public !== "boolean"
@@ -202,18 +204,40 @@ export async function handlePointsApi(
         !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/.test(login)
       )
         return json(401, { error: "invalid_identity" });
+      // A closed account opens again only when this sign-in asks to reopen
+      // it, so closing is never undone by an ordinary sign-in.
+      const closed = await deps.db
+        .prepare(
+          "SELECT closed_at FROM points_members WHERE actor_id=? AND github_id=? AND closed_at IS NOT NULL",
+        )
+        .bind(node, id)
+        .first<{ closed_at: string }>();
+      if (closed && value.reopen !== true)
+        return json(409, {
+          error: "account_closed",
+          closedAt: closed.closed_at,
+        });
       const token = randomToken(32);
       const hash = await sha256Hex(token);
       const expires = new Date(Date.parse(now) + 60 * 60 * 1000).toISOString();
       // A unique actor/numeric identity and one atomic batch make retries safe.
       // Sign-in can opt in to a public membership but never hides one; the
       // account visibility control is the only way to make it private.
+      // Closure made the membership private, so a reopened account starts
+      // private unless this sign-in opts in.
       const results = await deps.db.batch([
         deps.db
           .prepare(
-            "INSERT INTO points_members(actor_id,github_id,login,joined_at,public) VALUES(?,?,?,?,?) ON CONFLICT(actor_id) DO UPDATE SET login=excluded.login, public=MAX(points_members.public,excluded.public) WHERE points_members.github_id=excluded.github_id",
+            "INSERT INTO points_members(actor_id,github_id,login,joined_at,public) VALUES(?,?,?,?,?) ON CONFLICT(actor_id) DO UPDATE SET login=excluded.login, public=MAX(points_members.public,excluded.public), closed_at=NULL WHERE points_members.github_id=excluded.github_id AND (points_members.closed_at IS NULL OR ?)",
           )
-          .bind(node, id, login, now, value.public ? 1 : 0),
+          .bind(
+            node,
+            id,
+            login,
+            now,
+            value.public ? 1 : 0,
+            value.reopen ? 1 : 0,
+          ),
         deps.db
           .prepare(
             "INSERT INTO points_sessions(token_hash,actor_id,expires_at) SELECT ?,actor_id,? FROM points_members WHERE actor_id=? AND github_id=?",
@@ -239,7 +263,8 @@ export async function handlePointsApi(
       route === "/signout" ||
       route === "/visibility" ||
       route === "/sessions" ||
-      route === "/sessions/revoke"
+      route === "/sessions/revoke" ||
+      route === "/account/close"
     ) {
       const token = cookie(request);
       if (!token || !/^[A-Za-z0-9_-]{40,128}$/.test(token))
@@ -287,6 +312,70 @@ export async function handlePointsApi(
           { revoked: true },
           body.id === hash.slice(0, 24) ? sessionCookie("", 0) : undefined,
         );
+      }
+      if (route === "/account/close" && request.method === "POST") {
+        const body = (await readBoundedJson(
+          request,
+          256,
+          "account closure",
+        )) as Record<string, unknown>;
+        // The person confirms by typing their own GitHub login.
+        if (
+          Object.keys(body).join() !== "login" ||
+          typeof body.login !== "string" ||
+          body.login.toLowerCase() !== member.login.toLowerCase()
+        )
+          return json(400, { error: "confirmation_mismatch" });
+        // One atomic batch: deactivate and hide the membership, remove the
+        // optional connections and activity email, then end every session.
+        // Claims keep each X and Telegram ID reserved to this GitHub identity.
+        // Wallets, unpaid obligations, payment and settlement records, private
+        // cases, points history and public GitHub work are not touched.
+        const results = await deps.db.batch([
+          deps.db
+            .prepare(
+              "UPDATE points_members SET closed_at=?, public=0 WHERE actor_id=? AND closed_at IS NULL",
+            )
+            .bind(now, member.actor_id),
+          deps.db
+            .prepare("DELETE FROM points_x_flows WHERE actor_id=?")
+            .bind(member.actor_id),
+          deps.db
+            .prepare("DELETE FROM points_x_links WHERE actor_id=?")
+            .bind(member.actor_id),
+          deps.db
+            .prepare("DELETE FROM points_telegram_flows WHERE actor_id=?")
+            .bind(member.actor_id),
+          deps.db
+            .prepare("DELETE FROM points_telegram_links WHERE actor_id=?")
+            .bind(member.actor_id),
+          // The 0033 opt-out trigger suppresses queued activity mail.
+          deps.db
+            .prepare(
+              "UPDATE notification_email_preferences SET enabled=0, destination_version='', updated_at=? WHERE github_id=? AND enabled=1",
+            )
+            .bind(now, member.github_id),
+          deps.db
+            .prepare("DELETE FROM points_sessions WHERE actor_id=?")
+            .bind(member.actor_id),
+        ]);
+        if (results.some((r) => !r.success))
+          throw new Error("Account closure failed");
+        // A repeated request that raced the first one finds the account
+        // already closed; it reports that closure instead of failing.
+        let closedAt: string | null = now;
+        if (results[0].meta?.changes !== 1)
+          closedAt =
+            (
+              await deps.db
+                .prepare(
+                  "SELECT closed_at FROM points_members WHERE actor_id=?",
+                )
+                .bind(member.actor_id)
+                .first<{ closed_at: string | null }>()
+            )?.closed_at ?? null;
+        if (!closedAt) throw new Error("Account closure failed");
+        return json(200, { closed: true, closedAt }, sessionCookie("", 0));
       }
       if (route === "/signout" && request.method === "POST") {
         await deps.db

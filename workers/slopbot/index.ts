@@ -2,17 +2,25 @@
 // fetch: verify and deduplicate webhooks, then enqueue identifiers only.
 // queue: re-read GitHub state and run the review pipeline.
 import { findRegisteredRepositoryById } from "../../src/lib/repositories.mjs";
+import { dispatchDueAppeals } from "./appeals";
 import { resumeBudgetBlocks } from "./budget-blocks";
-import type { Job } from "./contracts";
+import { APPEAL_COMMANDS, type Job } from "./contracts";
 import { verifyWebhookSignature } from "./github";
+import { dispatchMaintainerHolds } from "./maintainer-holds";
 import * as store from "./persistence";
 import { QUALITY_MARKER } from "./quality";
-import { registeredRepository } from "./registry";
+import { registeredRepository, reviewRegistration } from "./registry";
 import {
   handleRepositoryAccess,
   REPOSITORY_ACCESS_URL,
 } from "./repository-access";
-import { recordHumanSignal, reviewItem } from "./review";
+import {
+  applyAppealCommand,
+  applyMaintainerHold,
+  escalateDueAppeal,
+  recordHumanSignal,
+  reviewItem,
+} from "./review";
 import { dispatchSpendAlert } from "./spend-alerts";
 import {
   consumePendingValueRequest,
@@ -121,12 +129,24 @@ export function jobFor(
         ...item,
         qualityCommentId: payload.comment?.id,
       };
-    if (
-      action !== "created" ||
-      !(payload.comment?.body ?? "").trim().startsWith("/slopbot appeal")
-    )
-      return null;
-    return { kind: "appeal", ...base, ...item, senderId: sender.id };
+    if (action !== "created") return null;
+    const text = (payload.comment?.body ?? "").trim();
+    if (text.startsWith("/slopbot appeal"))
+      return { kind: "appeal", ...base, ...item, senderId: sender.id };
+    const command = APPEAL_COMMANDS.find(
+      (name) =>
+        text === `/slopbot ${name}` ||
+        text.startsWith(`/slopbot ${name}\n`) ||
+        text.startsWith(`/slopbot ${name} `),
+    );
+    if (command === undefined) return null;
+    return {
+      kind: "appeal_command",
+      command,
+      ...base,
+      ...item,
+      senderId: sender.id,
+    };
   }
   if (action === "reopened")
     return { kind: "human_reopen", ...base, ...item, senderId: sender.id };
@@ -355,11 +375,13 @@ export default {
       }
       const job = jobFor(event, deliveryId, payload, env.SLOPBOT_APP_USER_ID);
       if (job !== null) {
-        if (!(await registeredRepository(env.SLOPBOT_DB, job))) {
+        // Paused projects stay registered: their review is security-only.
+        if ((await reviewRegistration(env.SLOPBOT_DB, job)) === null) {
           await store.completeDelivery(env.SLOPBOT_DB, deliveryId);
-          return new Response("repository is not active in the Slop registry", {
-            status: 202,
-          });
+          return new Response(
+            "repository is not registered in the Slop registry",
+            { status: 202 },
+          );
         }
         await env.SLOPBOT_QUEUE.send(job);
       }
@@ -382,6 +404,8 @@ export default {
 
   async scheduled(_event: unknown, env: Env) {
     await resumeBudgetBlocks(env.SLOPBOT_DB, env.SLOPBOT_QUEUE);
+    await dispatchMaintainerHolds(env.SLOPBOT_DB, env.SLOPBOT_QUEUE);
+    await dispatchDueAppeals(env.SLOPBOT_DB, env.SLOPBOT_QUEUE);
     if (env.SLOP_NOTIFY)
       await dispatchSpendAlert(env.SLOPBOT_DB, env.SLOP_NOTIFY);
     await consumePendingValueRequest(env);
@@ -402,7 +426,13 @@ export default {
         const outcome =
           message.body.kind === "review"
             ? await reviewItem(env, message.body)
-            : await recordHumanSignal(env, message.body);
+            : message.body.kind === "maintainer_hold"
+              ? await applyMaintainerHold(env, message.body)
+              : message.body.kind === "appeal_command"
+                ? await applyAppealCommand(env, message.body)
+                : message.body.kind === "appeal_due"
+                  ? await escalateDueAppeal(env, message.body)
+                  : await recordHumanSignal(env, message.body);
         console.log(
           JSON.stringify({
             delivery: message.body.deliveryId,

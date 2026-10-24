@@ -11,15 +11,12 @@ import type { ProjectDefinition } from "../../src/lib/projects.mjs";
 
 export const PROJECT_API_CONTRACT_VERSION = "project-registry-v1";
 /**
- * Public GitHub facts about the repository and the signed-in account. A
- * mismatch means the manifest misstates the repository and is refused;
- * `proven` (owner of a user repository, or public member of its
- * organization) lets an owner create and edit the paused project before
- * Slopbot can read the exact repository permission.
+ * Public GitHub facts about the manifest's repositories. A mismatch means the
+ * manifest misstates a repository, an alias or the steward and is refused.
+ * These facts never grant authority: only the Slopbot installation read does.
  */
 export type RepositoryControl =
-  | { state: "proven"; reason: string }
-  | { state: "unproven"; reason: string }
+  | { state: "matched" }
   | { state: "mismatch"; reason: string };
 
 /** A project created by its owner through self-service setup. */

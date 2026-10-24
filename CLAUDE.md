@@ -228,7 +228,9 @@ attribution footer.
 Slopbot is required and always free, and runs only on registered repositories.
 It scores PRs by perceived size and value, credits useful reviews, and applies
 the published penalty table. Automatic closure is limited to verified
-Slop-skill participants, excluding maintainers. An uncertain finding goes to
+Slop-skill participants, excluding maintainers: a slop.cash member whose own
+authenticated Slop run records a `pull_request_opened` event for that exact PR
+(PRD section 11). A copied marker is never proof. An uncertain finding goes to
 the maintainer first; after 7 days without maintainer action, Slopbot applies
 its verdict as a label only and never closes. Slopbot triages each appeal first,
 and a moderator decides escalated appeals. Do not charge project vaults for bot

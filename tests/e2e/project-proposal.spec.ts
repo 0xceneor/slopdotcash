@@ -129,22 +129,20 @@ const CREATED_SETUP = {
   slug: "open-protein",
   revision: 1,
   status: "paused",
-  state: "action_required",
+  state: "waiting",
   nextAction: {
-    kind: "install_slopbot",
-    message:
-      "Slopbot is not installed on example/open-protein. Install it on this repository; Slopbot is free and required before the project is ready.",
-    href: "https://github.com/apps/slopdotcash/installations/new",
+    kind: "wait_for_scan",
+    message: "The security scan is queued. Nothing is needed from you.",
+    href: null,
   },
   checks: {
     authority: {
       state: "verified",
-      basis: "public-github-facts",
-      message: "@example-maintainer is a public member of example.",
+      message: "@example-maintainer has admin access to example/open-protein.",
     },
     installation: {
-      state: "missing",
-      message: "Slopbot is not installed on example/open-protein.",
+      state: "installed",
+      message: "Slopbot is installed on example/open-protein.",
     },
     scan: {
       state: "queued",
@@ -387,8 +385,8 @@ test("drafts a project through the setup steps and creates it without an admin",
   ).toEqual([]);
 
   expect(manifest.reward).not.toHaveProperty("reviewBudget");
-  // Creation posts the reviewed manifest and criteria, then shows one setup
-  // status whose next action is the Slopbot installation.
+  // Creation posts the reviewed manifest, criteria and monthly amount, then
+  // shows one setup status with the next action.
   await handoff.click();
   await expect(
     page.getByRole("heading", { name: "Project created" }),
@@ -397,16 +395,14 @@ test("drafts a project through the setup steps and creates it without an admin",
     "Referred by @example-referrer.",
   );
   await expect(
-    page.getByRole("heading", { name: "Setup status: Action needed" }),
+    page.getByRole("heading", {
+      name: "Setup status: Waiting for the security scan",
+    }),
   ).toBeVisible();
-  await expect(
-    page.getByRole("link", { name: "Install Slopbot" }),
-  ).toHaveAttribute(
-    "href",
-    "https://github.com/apps/slopdotcash/installations/new",
-  );
   expect(submitted).toMatchObject({
     referrer: "example-referrer",
+    // Whole USDC units; the server stores them in the asset's base units.
+    monthlyAmount: "2500",
     manifest: {
       id: "open-protein",
       status: "paused",

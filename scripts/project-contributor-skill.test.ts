@@ -101,7 +101,7 @@ async function served(path: string): Promise<Uint8Array> {
 
 const text = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
-test("the contributor skill revalidates its authority before new work and each GitHub write", async () => {
+test("the contributor skill revalidates its authority before install, work and each GitHub write", async () => {
   const skill = text(await served("skill.md"));
   const step = skill
     .split("\n\n")
@@ -110,8 +110,9 @@ test("the contributor skill revalidates its authority before new work and each G
       paragraph.includes("scripts/run-receipt.mjs authorize`"),
     );
   expect(step).toBeDefined();
-  expect(step).toMatch(/before new work/iu);
-  expect(step).toMatch(/before each GitHub write/iu);
+  expect(step).toMatch(/before installing dependencies/iu);
+  expect(step).toMatch(/choosing work and each GitHub write/iu);
+  expect(step).toMatch(/refuses a project that two contributor flags/iu);
   expect(step).toMatch(/if it fails[^.]*no GitHub write/iu);
   // The archive the installer activates ships the script the step runs.
   expect(
@@ -122,5 +123,24 @@ test("the contributor skill revalidates its authority before new work and each G
 test("the contributor skill never opens an issue for the contributor", async () => {
   expect(text(await served("skill.md")).replace(/\s+/gu, " ")).toMatch(
     /never open or submit an issue/iu,
+  );
+});
+
+test("the contributor skill stops locally on a malicious-code risk and keeps project rules authoritative", async () => {
+  const skill = text(await served("skill.md")).replace(/\s+/gu, " ");
+  expect(skill).toMatch(
+    /Stop the local workflow at once if you find a wallet drainer, credential or password theft, secret exfiltration/iu,
+  );
+  expect(skill).toMatch(/Do not install, run, work around or fix it/iu);
+  expect(skill).toContain("https://slop.cash/projects/open-registry");
+  // Repository rules decide the work; only a small safety boundary is fixed.
+  expect(skill).toMatch(/The project decides the work/iu);
+  expect(skill).not.toMatch(/follow this skill\./iu);
+  // Exact identity is required; signed receipts stay optional diagnostics.
+  expect(skill).toMatch(
+    /disclose(?:s)? the exact provider, model and client/iu,
+  );
+  expect(skill).toContain(
+    "A signed run receipt (`run-receipt.mjs start` and `finish`) is optional and never blocks submission.",
   );
 });

@@ -1,3 +1,4 @@
+import { isBaseUnits } from "./escrow-policy.mjs";
 import { resolveRewardCapMinor } from "./reward-cap.mjs";
 
 /**
@@ -9,7 +10,6 @@ import { resolveRewardCapMinor } from "./reward-cap.mjs";
 export function assertAllocationFundingBasis(value) {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new TypeError("invalid allocation funding basis");
-  const money = /^(0|[1-9][0-9]{0,19})$/u;
   if (
     Object.keys(value).sort().join(",") !==
       "committedMinor,cycleId,fundingState,instrumentId,monthlyCapMinor" ||
@@ -17,8 +17,7 @@ export function assertAllocationFundingBasis(value) {
     !/^\d{4}-(?:0[1-9]|1[0-2])$/u.test(value.cycleId) ||
     !["pledged", "committed"].includes(value.fundingState) ||
     value.committedMinor !== "0" ||
-    typeof value.monthlyCapMinor !== "string" ||
-    !money.test(value.monthlyCapMinor) ||
+    !isBaseUnits(value.monthlyCapMinor) ||
     value.instrumentId !== null
   )
     throw new TypeError("invalid allocation funding basis");

@@ -1,8 +1,9 @@
 /**
- * Self-service project setup (PRD section 4, owner decisions of 22 October
- * 2026). A project starts without routine admin approval once its owner has
- * current GitHub authority, Slopbot is installed on the repository and a
- * security scan of the exact revision is clean. This module derives the one
+ * Self-service project setup (PRD section 4, owner decisions of 22 and 24
+ * October 2026). A project starts without routine admin approval once
+ * Slopbot is installed on the repository, the installation reads write,
+ * maintain or admin access for its owner, and a security scan of the exact
+ * revision is clean. This module derives the one
  * setup status an owner sees, and the checks behind it. Funding is reported
  * separately because a project works without it.
  */
@@ -24,7 +25,6 @@ import {
   type CloudflareVettingPersistence,
   vettedContentSha256,
 } from "../vetting/persistence";
-import type { RepositoryControl } from "./contracts";
 import type { ProjectRestriction } from "./enforcement";
 
 /**
@@ -133,46 +133,31 @@ function writes(access: RepositoryAccess): boolean {
 
 /**
  * Current authority of `actor` over the project's repository. The Slopbot
- * installation is authoritative when present: it reads the exact
- * repository permission. Before installation, public GitHub facts (owner of
- * a user repository, or public member of its organization) let an owner
- * create and edit the paused project; activation needs the installation read.
+ * installation read is the one authority path (owner decision D11 of 24
+ * October 2026): it reads the exact repository permission, and write,
+ * maintain or admin access is required. Without an installation, authority
+ * cannot be read, so the account cannot create, edit or activate a project.
  */
 export function setupAuthority(
-  control: RepositoryControl | null,
   access: AccessCheck,
   actor: GithubActor,
   repository: string,
 ): SetupAuthority {
-  if (access.state === "read" && access.access.installation === "installed") {
-    if (writes(access.access))
-      return {
-        state: "verified",
-        basis: "installation",
-        message: `@${actor.githubLogin} has ${access.access.roleName ?? access.access.permission} access to ${repository}.`,
-      };
+  if (access.state === "retry")
+    return { state: "retry", message: access.message };
+  if (access.access.installation !== "installed")
     return {
       state: "denied",
-      message: `@${actor.githubLogin} has ${access.access.permission} access to ${repository}. Write, maintain or admin access is required. Ask a maintainer with that access to finish setup.`,
+      message: `Slop reads your access to ${repository} through Slopbot. Install Slopbot on ${repository}, then try again.`,
     };
-  }
-  if (control?.state === "proven")
+  if (writes(access.access))
     return {
       state: "verified",
-      basis: "public-github-facts",
-      message: `${control.reason}.`,
-    };
-  if (control === null || access.state === "retry")
-    return {
-      state: "retry",
-      message:
-        access.state === "retry"
-          ? access.message
-          : "GitHub could not be checked. Try again.",
+      message: `@${actor.githubLogin} has ${access.access.roleName ?? access.access.permission} access to ${repository}.`,
     };
   return {
     state: "denied",
-    message: `${control.reason}. Install Slopbot on ${repository} so Slop can read your write access, then try again.`,
+    message: `@${actor.githubLogin} has ${access.access.permission} access to ${repository}. Write, maintain or admin access is required. Ask a maintainer with that access to finish setup.`,
   };
 }
 
@@ -188,6 +173,8 @@ export function setupFunding(
     network: String(reward.chain),
     symbol: String(reward.currency),
     monthlyAmountMinor: reward.monthlyCapMinor,
+    // Without a reward asset the pool is a reviewed 6-decimal stablecoin.
+    decimals: manifest.rewardAsset?.decimals ?? 6,
     state: reward.fundingState === "committed" ? "committed" : "pledged",
     payments: reward.paymentMode,
   };
@@ -240,7 +227,7 @@ function scanCheck(
 
 /**
  * Builds the one status an owner sees. The next action is the first unmet
- * check in setup order: authority, Slopbot installation, then the scan.
+ * check in setup order: Slopbot installation, authority, then the scan.
  */
 export function projectSetupStatus(input: {
   project: ProjectRecord;
@@ -302,12 +289,6 @@ export function projectSetupStatus(input: {
         ? `This project is ${restriction.state === "clear" ? "banned" : restriction.state}. Contributor work is closed. The steward or the account that created the project may request reinstatement.`
         : "This project is delisted. Its history stays public.",
     );
-  } else if (authority.state === "retry") {
-    state = "retry";
-    nextAction = action("retry_authority", authority.message);
-  } else if (authority.state === "denied") {
-    state = "action_required";
-    nextAction = action("ask_maintainer", authority.message);
   } else if (installation.state === "retry") {
     state = "retry";
     nextAction = action("retry_installation", installation.message);
@@ -315,9 +296,15 @@ export function projectSetupStatus(input: {
     state = "action_required";
     nextAction = action(
       "install_slopbot",
-      `${installation.message} Install it on this repository; Slopbot is free and required before the project is ready.`,
+      `${installation.message} Install it on this repository; Slopbot is free, and Slop reads your access through it.`,
       SLOPBOT_INSTALL_URL,
     );
+  } else if (authority.state === "retry") {
+    state = "retry";
+    nextAction = action("retry_authority", authority.message);
+  } else if (authority.state === "denied") {
+    state = "action_required";
+    nextAction = action("ask_maintainer", authority.message);
   } else if (scan.state === "cleared" && project.status === "active") {
     state = "ready";
     nextAction = action(

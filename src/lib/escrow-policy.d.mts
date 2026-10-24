@@ -83,6 +83,7 @@ export declare function assertEscrowPolicy(value: unknown): EscrowPolicy;
 export declare function assertEscrowTransition(
   previous: EscrowPolicy | undefined,
   next: EscrowPolicy | undefined,
+  allowUnfundedChange?: boolean,
 ): void;
 /** One reviewed deployment with the network registry's values, as the payment workers read it. */
 export type PaymentDeploymentRecord = EscrowDeployment & {
@@ -103,3 +104,6 @@ export type SecurityEscrowPolicy = Omit<EscrowPolicy, "feeBasisPoints"> & {
 export declare function assertSecurityEscrowPolicy(
   value: unknown,
 ): SecurityEscrowPolicy;
+
+export const MAX_BASE_UNITS: bigint;
+export function isBaseUnits(value: unknown): value is string;

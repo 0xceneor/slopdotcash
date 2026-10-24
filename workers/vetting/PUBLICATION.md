@@ -2,7 +2,9 @@
 
 PRD VET-05 to VET-07 and MVP-12 require a policy service outside the guest
 and model context. `publication.ts` reuses the intake result parser and
-disposition rules. `service.ts` signs the exact request bytes. Neither module
+disposition rules. `publishResult` publishes either a bounded scan result
+(`slop-vetting-result-v2`, composed by `bounded-scan.ts`) or a historical
+secure-VM result; `reconcileResult` below reconciles only the historical form. `service.ts` signs the exact request bytes. Neither module
 starts a VM, acquires evidence, chooses a provider or runs automatically.
 
 The trusted scheduler supplies the actual collector observation, exact private

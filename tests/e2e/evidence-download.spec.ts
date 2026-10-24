@@ -56,6 +56,12 @@ test("large private evidence downloads with a single-use browser grant @registry
     repositoryId: String(facts.id),
     repositoryNodeId: facts.node_id,
   };
+  // Creation reads the account's access through the Slopbot installation.
+  const installed = await fetch(
+    `${process.env.SLOP_E2E_GITHUB_API_ORIGIN}/__fixture/slopbot/${repository}/installed`,
+    { method: "PUT" },
+  );
+  expect(installed.status).toBe(204);
   const submitted = await api("projects", {
     manifest: projectManifest,
   });

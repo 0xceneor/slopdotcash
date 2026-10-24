@@ -100,14 +100,11 @@ beforeAll(async () => {
   commitSha = git("rev-parse", "HEAD");
   treeSha = git("rev-parse", "HEAD^{tree}");
   blobSha = git("rev-parse", `HEAD:${sourcePath}`);
-  const { db, sqlite } = sqliteD1([
-    "0019_project_registry.sql",
-    "0020_project_application_github_check.sql",
-    "0023_project_enforcements.sql",
-    "0024_notifications.sql",
-    "0025_community_security_vetting.sql",
-    "0026_private_security_cases.sql",
-  ]);
+  const { db, sqlite } = sqliteD1(
+    (await readdir(new URL("../migrations", import.meta.url)))
+      .filter((name) => name.endsWith(".sql"))
+      .sort(),
+  );
   retained = await localVettingEvidence(db, () => now);
   projects = new CloudflareProjectPersistence(db);
   vetting = new CloudflareVettingPersistence(db);
@@ -198,10 +195,7 @@ beforeAll(async () => {
             now: () => now,
             randomId: () => "unused",
             sessionActor: async () => null,
-            repositoryControl: async () => ({
-              state: "unproven",
-              reason: "fixture",
-            }),
+            repositoryControl: async () => ({ state: "matched" }),
             readTokenMetadata: async () => {
               throw new Error("unused");
             },

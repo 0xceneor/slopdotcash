@@ -71,7 +71,7 @@ async function request(
   body: Record<string, unknown>,
 ) {
   const response = await fetch(
-    `/api/v1/payments/projects/${encodeURIComponent(plan.projectId)}/awards/${encodeURIComponent(plan.cycleId)}/solana-commitment`,
+    `/api/v1/payments/projects/${encodeURIComponent(plan.projectId)}/monthly/${encodeURIComponent(plan.cycleId)}/solana-commitment`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -109,8 +109,7 @@ export async function reviewSolanaCommitment(
     wallet: wallet.address,
     githubUserId: plan.award.githubUserId,
     manifestSha256: plan.manifestSha256,
-    proposalSha256: plan.proposalSha256,
-    decisionsSha256: plan.decisionsSha256,
+    snapshotSha256: plan.snapshotSha256,
   });
   if (JSON.stringify(value.plan) !== JSON.stringify(plan))
     throw new Error("The prepared award changed. Reload its review.");

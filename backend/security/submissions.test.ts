@@ -625,8 +625,20 @@ describe("private intake: send outcomes", () => {
       priority: "urgent",
       analyzer: "deterministic-v1",
     });
-    // Both technical approvers are notified; the reporter acted, so is not.
-    expect(t.outbox()).toEqual([MAINTAINER.githubId, MAINTAINER_2.githubId]);
+    // Both technical approvers get the case notice; the reporter gets only
+    // the generic receipt, which asks for no acknowledgment.
+    expect(t.outbox()).toEqual([
+      MAINTAINER.githubId,
+      REPORTER.githubId,
+      MAINTAINER_2.githubId,
+    ]);
+    expect(
+      t.sqlite
+        .query(
+          "SELECT template_version FROM security_notification_outbox WHERE recipient_github_id = ?",
+        )
+        .all(REPORTER.githubId),
+    ).toEqual([{ template_version: "security-receipt-v1" }]);
     // The reporter sees the verified receipt in their case view.
     const view = await t.call(REPORTER, "GET", `security-cases/${verified.id}`);
     expect(view.body.case).toMatchObject({
@@ -806,7 +818,11 @@ describe("private intake: send outcomes", () => {
       `security-cases/${t.cases()[0].id}`,
     );
     expect(JSON.stringify(view.body)).not.toContain(second.ghsa_id);
-    expect(t.outbox()).toEqual([MAINTAINER.githubId, MAINTAINER_2.githubId]);
+    expect(t.outbox()).toEqual([
+      MAINTAINER.githubId,
+      REPORTER.githubId,
+      MAINTAINER_2.githubId,
+    ]);
   });
 
   test("a marker match authored by someone else is ignored", async () => {

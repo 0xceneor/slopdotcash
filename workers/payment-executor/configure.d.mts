@@ -6,6 +6,8 @@ export interface PaymentStackInput {
   deployments: unknown;
   registry: unknown;
   registryDatabase: { database_name: string; database_id: string };
+  /** The Pages `MONTHLY_PAYMENT_SCHEDULE` for the ordinary dispatcher. */
+  monthlySchedule?: string;
 }
 export interface PaymentStackConfig {
   name: string;

@@ -32,6 +32,9 @@ crons = ["*/5 * * * *"]
 [vars]
 # Off until the owner approves Slopbot v2 closures (PRD BOT-06, BOT-12).
 SLOPBOT_CLOSURE_ENABLED = "false"
+# Slop moderators who decide escalated appeals (owner decision, PRD section 11):
+# lalalune and drew-dot-com, by immutable GitHub ID.
+PROJECT_MODERATOR_GITHUB_IDS = "18633264,202660855"
 
 [observability]
 enabled = true

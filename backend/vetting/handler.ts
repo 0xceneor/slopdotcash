@@ -2,18 +2,26 @@ import { pathParts } from "../api-path";
 /**
  * Community project security vetting API (PRD VET-01 to VET-08, MVP-12).
  *
- * Admins queue a scan of one exact project revision. The external secure-VM
- * vetting service reads the queue and posts results; both service routes
- * need an Ed25519 signature from a key in VETTING_RESULT_PUBLIC_KEYS. Without
- * a configured key every vetting route that depends on the service reports
- * it unavailable, and no revision can be cleared.
+ * Slop queues scans of exact project revisions automatically when their
+ * executable content changes (the signed refresh), after a flag pause, or
+ * when an admin asks. The external scanner service reads the queue and posts
+ * bounded malicious-code scan results; its routes need an Ed25519 signature
+ * from a key in VETTING_RESULT_PUBLIC_KEYS. Without a configured key every
+ * vetting route that depends on the service reports it unavailable, and no
+ * revision can be cleared.
  */
 
 import type { ProjectSetupStatus } from "../../src/lib/project-contracts";
 import type { ProjectDefinition } from "../../src/lib/projects.mjs";
 import { type ApiError, fail } from "../api-error";
-import type { ProjectPersistence, WebSession } from "../projects/contracts";
+import type {
+  GithubActor,
+  ProjectPersistence,
+  ProjectRecord,
+  WebSession,
+} from "../projects/contracts";
 import { type EdgeCache, purgeProjectCache } from "../projects/edge-cache";
+import { pausedByFlagsOnly, projectRestriction } from "../projects/enforcement";
 import {
   isRecord,
   readJsonObject,
@@ -21,6 +29,7 @@ import {
   sha256Hex,
 } from "../trace/validation";
 import type { VettingEvidence } from "./evidence";
+import type { ProjectFlagStore } from "./flags";
 import {
   type CloudflareVettingPersistence,
   summarize,
@@ -28,12 +37,12 @@ import {
   type VettingPin,
   vettedContentSha256,
 } from "./persistence";
+import { MAX_VETTING_RESULT_BYTES, VettingResultError } from "./result";
 import {
-  dispositionProblems,
-  MAX_VETTING_RESULT_BYTES,
-  parseVettingResult,
-  VettingResultError,
-} from "./result";
+  isScanResult,
+  parseRecordedVettingResult,
+  recordedResultProblems,
+} from "./scan-result";
 
 export const VETTING_SIGNATURE_CONTEXT = "slop-vetting:v1";
 /** Signed requests older or newer than this are refused. */
@@ -45,8 +54,10 @@ export type VettingApiDependencies = {
   evidence?: VettingEvidence;
   projects: Pick<
     ProjectPersistence,
-    "getProject" | "listProjects" | "enforcementGeneration"
+    "getProject" | "listProjects" | "enforcementGeneration" | "listEnforcements"
   >;
+  /** Contributor flags, shown to administrators beside each project. */
+  flags?: Pick<ProjectFlagStore, "activeFlags">;
   /** Raw 32-byte Ed25519 public keys of the vetting service, base64. */
   resultPublicKeys: string | undefined;
   /** Configured administrators and project moderators; never inferred from scan content. */
@@ -147,11 +158,7 @@ export async function signedVettingRequest(
 ): Promise<{ body: Uint8Array; keySha256: string }> {
   const keys = await serviceKeys(deps.resultPublicKeys);
   if (keys.length === 0)
-    fail(
-      503,
-      "vetting_unavailable",
-      "The secure-VM vetting service is not configured",
-    );
+    fail(503, "vetting_unavailable", "The vetting service is not configured");
   const timestamp = request.headers.get("x-slop-vetting-timestamp") ?? "";
   const keyId = request.headers.get("x-slop-vetting-key") ?? "";
   const signature = base64Bytes(
@@ -242,9 +249,11 @@ async function adminOverview(
             queueRegistrationAvailable,
             reason: queueRegistrationAvailable
               ? "Private evidence storage or policy is unavailable. You may queue a scan, but acquisition and clean clearance must wait."
-              : "The secure-VM service key is unavailable. New scans cannot be queued, acquired or recorded. Existing decisions still require current retained evidence.",
+              : "The vetting service key is unavailable. New scans cannot be queued, acquired or recorded. Existing decisions still require current retained evidence.",
           },
     assessments: assessments.map(adminAssessment),
+    // Moderators read flag evidence here; a flag needs no approval to count.
+    flags: (await deps.flags?.activeFlags(deps.now())) ?? [],
   });
 }
 
@@ -268,15 +277,40 @@ async function requestAssessment(
     fail(
       503,
       "vetting_unavailable",
-      "The secure-VM vetting service is not configured, so a scan cannot be queued",
+      "The vetting service is not configured, so a scan cannot be queued",
     );
   const project = await deps.projects.getProject(body.projectId);
   if (project === null) fail(404, "not_found", "Project not found");
   // Only the current revision is scanned: an older one can never be served.
   if (project.revision !== body.revision)
     fail(409, "stale_revision", "Scan the project's current revision");
-  // The queue assigns the exact commits to scan (VET-07); the service cannot
-  // choose them, and a result for any other commit is refused.
+  const queued = await queueAssessment(
+    deps,
+    project,
+    { githubId: session.githubId, githubLogin: session.githubLogin },
+    reason,
+  );
+  if (queued === "conflict")
+    fail(409, "assessment_queued", "This revision already has a queued scan");
+  return json(201, { assessment: adminAssessment(queued) });
+}
+
+/**
+ * Queues one scan of a project's current revision at its live pin. The
+ * queue assigns the exact commit and template digest (VET-07); the service
+ * cannot choose them, and a result for any other commit is refused. Returns
+ * "conflict" when this revision already has a queued scan. Throws
+ * `pin_unavailable` when the live pin cannot be read.
+ */
+export async function queueAssessment(
+  deps: Pick<
+    VettingApiDependencies,
+    "vetting" | "livePin" | "now" | "randomId"
+  >,
+  project: ProjectRecord,
+  requestedBy: GithubActor,
+  reason: string,
+) {
   let pin: VettingPin;
   try {
     pin = await deps.livePin(project.manifest);
@@ -295,20 +329,149 @@ async function requestAssessment(
     contentSha256: await vettedContentSha256(project.manifest),
     commitSha: pin.commitSha,
     templateSha256: pin.templateSha256,
-    requestedBy: {
-      githubId: session.githubId,
-      githubLogin: session.githubLogin,
-    },
+    requestedBy,
     requestedAt: deps.now().toISOString(),
     requestReason: reason,
   };
   if (!/^vet_[a-f0-9]{32}$/u.test(assessment.id))
     fail(500, "internal_error", "Assessment id is invalid");
   if ((await deps.vetting.createAssessment(assessment)) === "conflict")
-    fail(409, "assessment_queued", "This revision already has a queued scan");
+    return "conflict" as const;
   const stored = await deps.vetting.getAssessment(assessment.id);
   if (stored === null) fail(500, "internal_error", "Assessment vanished");
-  return json(201, { assessment: adminAssessment(stored) });
+  return stored;
+}
+
+/**
+ * The steward on whose behalf an automatic scan runs. The requester fields
+ * of an automatic scan name the project steward, and its reason says it was
+ * automatic; no person pressed a button.
+ */
+export function stewardActor(manifest: ProjectDefinition): GithubActor {
+  return {
+    githubId: manifest.steward.github.actorId,
+    githubLogin: manifest.steward.github.login,
+  };
+}
+
+/**
+ * Queues an automatic scan for the project steward, when the vetting service
+ * is configured. A failure leaves the scan to the next signed refresh, so it
+ * never undoes the change that asked for it.
+ */
+export async function queueAutomaticScan(
+  deps: Pick<
+    VettingApiDependencies,
+    "vetting" | "livePin" | "now" | "randomId" | "resultPublicKeys"
+  >,
+  project: ProjectRecord,
+  reason: string,
+): Promise<"queued" | "already_queued" | "unavailable"> {
+  if (!(await vettingServiceAvailable(deps.resultPublicKeys)))
+    return "unavailable";
+  try {
+    return (await queueAssessment(
+      deps,
+      project,
+      stewardActor(project.manifest),
+      reason,
+    )) === "conflict"
+      ? "already_queued"
+      : "queued";
+  } catch {
+    return "unavailable";
+  }
+}
+
+/** Automatic scans one signed refresh may queue. */
+const MAX_AUTOMATIC_SCANS = 25;
+
+/**
+ * Queues the scans that changed executable content needs, without an admin
+ * (PRD sections 4 and 8): a listed project whose current content or live
+ * pin has no scan, and a project that flags alone paused and that has no
+ * scan requested since the pause. Banned and moderator-restricted projects
+ * wait for a moderator. The signed scanner service calls this before it
+ * reads the queue.
+ */
+async function refreshQueue(
+  request: Request,
+  deps: VettingApiDependencies,
+): Promise<Response> {
+  const { body } = await signedVettingRequest(request, deps, 1024);
+  if (new TextDecoder().decode(body) !== "{}")
+    fail(400, "invalid_request", "Send an empty JSON object");
+  const [projects, records] = await Promise.all([
+    deps.projects.listProjects(),
+    deps.projects.listEnforcements(),
+  ]);
+  const queued: string[] = [];
+  const skipped: { projectId: string; reason: string }[] = [];
+  for (const project of projects) {
+    if (queued.length >= MAX_AUTOMATIC_SCANS) break;
+    const restriction = projectRestriction(project.id, records);
+    const flagPaused = pausedByFlagsOnly(restriction);
+    if (restriction.state !== "clear" && !flagPaused) continue;
+    if (!flagPaused && project.manifest.listingTier === "retired") continue;
+    let reason: string | null = null;
+    if (flagPaused) {
+      // A fresh scan must cover the live pin and every active flag. New
+      // evidence queues another scan even when the source did not change.
+      const since = restriction.since ?? "";
+      let live: VettingPin;
+      try {
+        live = await deps.livePin(project.manifest);
+      } catch {
+        skipped.push({ projectId: project.id, reason: "pin_unavailable" });
+        continue;
+      }
+      const assessments = await deps.vetting.projectAssessments(project.id);
+      const fresh = await Promise.all(
+        assessments.map(
+          async (assessment) =>
+            assessment.revision === project.revision &&
+            assessment.requestedAt >= since &&
+            assessment.commitSha === live.commitSha &&
+            assessment.templateSha256 === live.templateSha256 &&
+            (await deps.vetting.assessmentCoversActiveFlags(assessment.id)),
+        ),
+      );
+      if (!fresh.some(Boolean))
+        reason =
+          "Automatic fresh scan after two contributor flags paused the project";
+    } else {
+      const clearance = await deps.vetting.manifestClearance(
+        project.id,
+        project.manifest,
+        project.revision,
+        () => deps.livePin(project.manifest),
+      );
+      if (clearance.state === "unscanned")
+        reason = "Automatic scan of new project content";
+      else if (clearance.state === "stale")
+        reason =
+          "Automatic rescan: executable content or skill template changed";
+    }
+    if (reason === null) continue;
+    try {
+      const assessment = await queueAssessment(
+        deps,
+        project,
+        stewardActor(project.manifest),
+        reason,
+      );
+      if (assessment !== "conflict") queued.push(assessment.id);
+    } catch (error) {
+      skipped.push({
+        projectId: project.id,
+        reason:
+          typeof error === "object" && error !== null && "code" in error
+            ? String((error as ApiError).code)
+            : "queue_failed",
+      });
+    }
+  }
+  return json(200, { queued, skipped });
 }
 
 /**
@@ -357,8 +520,8 @@ async function serviceResult(
   }
   if (!isRecord(value))
     fail(400, "invalid_request", "The result must be an object");
-  const result = parseVettingResult(value);
-  const problems = dispositionProblems(result);
+  const result = parseRecordedVettingResult(value);
+  const problems = recordedResultProblems(result);
   if (problems.length > 0)
     fail(
       422,
@@ -393,14 +556,43 @@ async function serviceResult(
       "commit_mismatch",
       `The result must scan commit ${assessment.commitSha} with skill template ${assessment.templateSha256}, which the queue assigned`,
     );
+  if (isScanResult(result) && result.reusedAssessmentId !== null) {
+    // A cached clean scan stands in only for byte-identical executable
+    // content of the same repository under the same policy and template.
+    const cached = await deps.vetting.getAssessment(result.reusedAssessmentId);
+    const prior = cached?.result;
+    if (
+      result.disposition !== "clean" ||
+      cached === null ||
+      cached.state !== "clean" ||
+      prior == null ||
+      !isScanResult(prior) ||
+      prior.reusedAssessmentId !== null ||
+      prior.assessed.repository.toLowerCase() !==
+        result.assessed.repository.toLowerCase() ||
+      prior.assessed.inputManifestSha256 !==
+        result.assessed.inputManifestSha256 ||
+      prior.assessed.templateSha256 !== result.assessed.templateSha256 ||
+      prior.policyVersion !== result.policyVersion ||
+      prior.scan.runId !== result.scan.runId ||
+      prior.scan.reportSha256 !== result.scan.reportSha256
+    )
+      fail(
+        422,
+        "reuse_mismatch",
+        "A reused scan must cite an original clean scan of the same repository, executable inventory, template, policy and report",
+      );
+  }
   if (
     result.disposition === "clean" &&
-    !(await deps.evidence?.complete(result))
+    !(await deps.evidence?.retained(result))
   )
     fail(
       422,
       "evidence_incomplete",
-      "Clean results require a complete authorized canonical assembly and its exact retained evidence",
+      isScanResult(result)
+        ? "Clean scan results require the exact retained report, inventory, dependency locks and artifacts"
+        : "Clean results require a complete authorized canonical assembly and its exact retained evidence",
     );
   const resultText = JSON.stringify(result);
   const recorded = await deps.vetting.recordResult({
@@ -483,6 +675,8 @@ export async function handleVettingApi(
         return await serviceQueue(request, deps);
       case "POST vetting/results":
         return await serviceResult(request, deps);
+      case "POST vetting/refresh":
+        return await refreshQueue(request, deps);
     }
     return json(404, { error: "not_found" });
   } catch (caught) {

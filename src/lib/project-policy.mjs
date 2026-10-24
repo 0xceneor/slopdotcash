@@ -177,7 +177,17 @@ export function assertProjectPolicyTransition(previousValue, nextValue) {
   const previous = assertHistoricalProjectDefinition(previousValue);
   const next = assertProjectDefinition(nextValue);
   if (previous.id !== next.id) throw new TypeError("project id cannot change");
-  assertEscrowTransition(previous.escrow, next.escrow);
+  // An undeployed, unfunded monthly pledge can change networks. Published
+  // fees and all deployed vault records still keep their original terms.
+  const unfundedMonthly =
+    previous.reward.kind === "monthly-pool" &&
+    previous.reward.fundingState !== "committed" &&
+    BigInt(previous.reward.committedMinor) === 0n &&
+    previous.reward.paymentMode !== "enabled" &&
+    (previous.escrow?.deployments ?? []).length === 0 &&
+    previous.funding.addresses.length === 0 &&
+    (previous.funding.commitments ?? []).length === 0;
+  assertEscrowTransition(previous.escrow, next.escrow, unfundedMonthly);
   assertSecurityBountyTransition(previous.securityBounty, next.securityBounty);
   assertFundingRouteTransition(
     previous.funding.addresses,

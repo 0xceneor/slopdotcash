@@ -74,7 +74,7 @@ beforeEach(async () => {
   retained = await localVettingEvidence(db, () => NOW);
   vetting = new CloudflareVettingPersistence(
     db,
-    async (a) => a.result !== null && retained.evidence.complete(a.result),
+    async (a) => a.result !== null && retained.evidence.retained(a.result),
   );
   keys = await vettingKeyPair();
   configuredKeys = keys.publicKey;
@@ -97,7 +97,13 @@ function projectApi(request: Request) {
     randomId: () =>
       `00000000-0000-4000-8000-${String(++ids).padStart(12, "0")}`,
     sessionActor: async (value) => actorOf(value),
-    repositoryControl: async () => ({ state: "proven", reason: "fixture" }),
+    repositoryControl: async () => ({ state: "matched" }),
+    repositoryAccess: async () => ({
+      installation: "installed",
+      installationId: 1,
+      permission: "admin",
+      roleName: "admin",
+    }),
     readTokenMetadata: async () => {
       throw new Error("no token reads in this suite");
     },
@@ -499,6 +505,16 @@ describe("community security vetting", () => {
       state: "quarantined",
       assessment: { state: "incomplete", heldArtifacts: 1 },
     });
+    // The owners get one failed-check notice for this assessment.
+    expect(
+      sqlite
+        .query(
+          "SELECT DISTINCT kind, action_path AS path FROM notifications WHERE event_key = ?",
+        )
+        .all(`project-scan:${id}`),
+    ).toEqual([
+      { kind: "project_scan_failed", path: "/projects/open-registry" },
+    ]);
     const refused = await activate();
     expect(refused.status).toBe(422);
     expect((await refused.json()).error).toBe("vetting_required");

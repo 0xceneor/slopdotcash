@@ -6,7 +6,9 @@
  * creates a project, grants featuring, or enables money. Reinstatement needs
  * an appeal and a moderator who did not place the restriction (ELG-02). The
  * project steward or the applicant who listed the project may file the
- * appeal; only a moderator decides it.
+ * appeal; only a moderator decides it. Two standing rules act without a
+ * moderator: two distinct contributor flags quarantine a project, and a
+ * clean fresh scan lifts a quarantine that flags alone placed.
  */
 
 import { assertProjectPolicyTransition } from "../../src/lib/project-policy.mjs";
@@ -333,4 +335,95 @@ export function enforcementRevisionReason(
         ? "Banned by a project moderator"
         : "Quarantined by a project moderator";
   return `${label} (${recordId})`;
+}
+
+/**
+ * Distinct active contributor flags that pause a project (PRD sections 4 and
+ * 8). The pause is a standing rule; no moderator approves a flag first.
+ */
+export const FLAG_PAUSE_THRESHOLD = 2;
+
+/** The rule a signed clean scan cites when it lifts a flag-only pause. */
+export const SCAN_REINSTATEMENT_RULE = "clean-fresh-scan-after-flags";
+
+/**
+ * True when the restriction in force is a quarantine that two contributor
+ * flags placed and that no moderator or vetting ban has since escalated.
+ * Only such a pause reinstates on a clean fresh scan; a moderator decides
+ * every other restriction.
+ */
+export function pausedByFlagsOnly(restriction: ProjectRestriction): boolean {
+  if (restriction.state !== "quarantined") return false;
+  for (let index = restriction.records.length - 1; index >= 0; index -= 1) {
+    const record = restriction.records[index];
+    if (record.action === "quarantine" || record.action === "ban")
+      return record.actorRole === "contributor-flags";
+  }
+  return false;
+}
+
+/**
+ * The signed vetting-service record that lifts a flag-only pause after a
+ * clean scan requested after the pause (PRD section 8). It appends no
+ * revision: the pause never changed the manifest, so clearing the record
+ * restores the project as it was. Returns null when the scan does not
+ * qualify, so the caller records only the scan.
+ */
+export function planScanReinstatement(input: {
+  project: ProjectRecord;
+  restriction: ProjectRestriction;
+  scan: {
+    assessmentId: string;
+    requestedAt: string;
+    contentSha256: string;
+    keySha256: string;
+    policyVersion: string;
+  };
+  /** Content digest of the project's current manifest. */
+  currentContentSha256: string;
+  at: string;
+}): ProjectEnforcement | null {
+  const { project, restriction, scan } = input;
+  if (!pausedByFlagsOnly(restriction) || restriction.since === null)
+    return null;
+  // A scan queued before the pause cannot speak to what the flags reported,
+  // and a scan of other content does not describe the project now. The
+  // pause request itself queues its scan, at or after the pause time.
+  if (
+    scan.requestedAt < restriction.since ||
+    scan.contentSha256 !== input.currentContentSha256
+  )
+    return null;
+  const identity = repositoryIdentity(project.manifest);
+  return {
+    id: `enf_${scan.assessmentId}_reinstate`,
+    projectId: project.id,
+    sequence: restriction.nextSequence,
+    action: "reinstate",
+    stateAfter: "clear",
+    appealAfter: restriction.appeal === "requested" ? "granted" : "none",
+    reason:
+      "A clean fresh security scan lifted a pause that contributor flags alone placed",
+    evidenceReference: scan.assessmentId,
+    repositoryGithubId: restriction.repositoryGithubId ?? identity.githubId,
+    repositoryKeys: [
+      ...new Set([...restriction.repositoryKeys, ...identity.keys]),
+    ],
+    actor: null,
+    actorRole: "vetting-service",
+    decisionSource: "standing-rule",
+    systemIssuer: {
+      kind: "vetting-service",
+      keySha256: scan.keySha256,
+      assessmentId: scan.assessmentId,
+      policyVersion: scan.policyVersion,
+      rule: SCAN_REINSTATEMENT_RULE,
+    },
+    beforeRevision: project.revision,
+    beforeManifestSha256: project.manifestSha256,
+    afterRevision: null,
+    afterManifestSha256: null,
+    result: "no_revision_needed",
+    createdAt: input.at,
+  };
 }

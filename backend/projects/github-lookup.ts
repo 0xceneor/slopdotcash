@@ -34,7 +34,7 @@ export function validGithubLogin(value: string): boolean {
   return LOGIN.test(value);
 }
 
-function requestInit(token: string | undefined): RequestInit {
+export function requestInit(token: string | undefined): RequestInit {
   return {
     headers: {
       accept: "application/vnd.github+json",
@@ -54,7 +54,7 @@ function limited(response: Response): boolean {
   );
 }
 
-async function githubJson(
+export async function githubJson(
   fetcher: GithubFetch,
   token: string | undefined,
   path: string,

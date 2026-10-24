@@ -1,4 +1,4 @@
-import { assertEscrowPolicy } from "./escrow-policy.mjs";
+import { assertEscrowPolicy, isBaseUnits } from "./escrow-policy.mjs";
 import { exactKeys, readRecord as record } from "./record-validation.mjs";
 /**
  * Validates untrusted project folders before they enter discovery, ingestion,
@@ -111,6 +111,58 @@ export function formatMonthlyCapDisplay(value) {
     .replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
   const cents = Number((amount % 1_000_000n) / 10_000n);
   return `$${whole}${cents === 0 ? "" : `.${String(cents).padStart(2, "0")}`}`;
+}
+
+/** Formats integer base units of an asset with `decimals`, without floats. */
+export function formatAssetAmount(value, decimals) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw new TypeError("amount must be canonical integer base units");
+  }
+  const scale = 10n ** BigInt(decimals);
+  const amount = BigInt(value);
+  const whole = (amount / scale)
+    .toString()
+    .replace(/\B(?=(\d{3})+(?!\d))/gu, ",");
+  const fraction =
+    decimals === 0
+      ? ""
+      : (amount % scale).toString().padStart(decimals, "0").replace(/0+$/u, "");
+  return fraction === "" ? whole : `${whole}.${fraction}`;
+}
+
+/**
+ * Converts a decimal amount in whole units of an asset to its integer base
+ * units (owner decision D11: amounts use asset base units).
+ */
+export function parseAssetAmount(value, decimals) {
+  const match =
+    typeof value === "string"
+      ? /^(0|[1-9]\d{0,12})(?:\.(\d{1,36}))?$/u.exec(value)
+      : null;
+  if (!match) throw new TypeError("amount must be a plain decimal number");
+  const fraction = match[2] ?? "";
+  if (fraction.length > decimals) {
+    throw new RangeError(
+      `amount has more decimal places than the asset's ${decimals}`,
+    );
+  }
+  return (
+    BigInt(match[1]) * 10n ** BigInt(decimals) +
+    BigInt(fraction.padEnd(decimals, "0") || "0")
+  ).toString();
+}
+
+/**
+ * The display of a monthly amount in asset base units. A reviewed stablecoin
+ * (6 decimals, so its base units are cent-precise micro-units) keeps the
+ * dollar display; a token names its own symbol, never dollars (PRD section 6).
+ */
+export function monthlyAmountDisplay(value, rewardAsset) {
+  if (rewardAsset?.kind !== "token") return formatMonthlyCapDisplay(value);
+  if (!isBaseUnits(value)) {
+    throw new RangeError("monthly amount is too large");
+  }
+  return `${formatAssetAmount(value, rewardAsset.decimals)} ${rewardAsset.symbol}`;
 }
 
 function text(value, field, { max = 500, min = 1, pattern } = {}) {
@@ -996,7 +1048,8 @@ function validateReward(
           )
         : reward.fundingState !== "committed" ||
           BigInt(committedMinor) <= 0n) ||
-      reward.monthlyCapDisplay !== formatMonthlyCapDisplay(monthlyCapMinor)
+      reward.monthlyCapDisplay !==
+        monthlyAmountDisplay(monthlyCapMinor, rewardAsset)
     ) {
       throw new TypeError(`${field} monthly pool policy is inconsistent`);
     }
@@ -1021,7 +1074,7 @@ function validateReward(
             `${field}.cycleCaps must have unique chronological UTC months`,
           );
         }
-        formatMonthlyCapDisplay(cap.monthlyCapMinor);
+        monthlyAmountDisplay(cap.monthlyCapMinor, rewardAsset);
         previousCycle = cap.cycleId;
       }
     }

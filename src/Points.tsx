@@ -95,13 +95,31 @@ const Context = createContext<{
   requestPoints: () => {},
   setMe: () => {},
 });
+/** A refused points request with the server's stable error code, if any. */
+class PointsRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(`Points request returned ${status}`);
+  }
+}
 async function requestJson(url: string, init: RequestInit = {}) {
   const response = await fetchWithDeadline(url, {
     ...init,
     cache: "no-store",
   });
-  if (!response.ok)
-    throw new Error(`Points request returned ${response.status}`);
+  if (!response.ok) {
+    let code: string | null = null;
+    try {
+      const body = await readBoundedJson(response, 4096, "points error");
+      const error = (body as { error?: unknown } | null)?.error;
+      if (typeof error === "string") code = error;
+    } catch {
+      // The status alone still describes the refusal.
+    }
+    throw new PointsRequestError(response.status, code);
+  }
   return readBoundedJson(response, 24 * 1024 * 1024, "points");
 }
 async function loadPoints(signal: AbortSignal) {
@@ -636,9 +654,10 @@ function JoinPoints({ showHeading = true }: { showHeading?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [authorization, setAuthorization] = useState<string | null>(null);
+  const [closedAccount, setClosedAccount] = useState(false);
   const active = useRef<AbortController | null>(null);
   useEffect(() => () => active.current?.abort(), []);
-  async function start() {
+  async function start(reopen = false) {
     active.current?.abort();
     const c = new AbortController();
     active.current = c;
@@ -690,16 +709,28 @@ function JoinPoints({ showHeading = true }: { showHeading?: boolean }) {
       const joined = await requestJson("/api/v1/points/join", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          assertion,
-          public: false,
-        }),
+        body: JSON.stringify(
+          reopen
+            ? { assertion, public: false, reopen: true }
+            : { assertion, public: false },
+        ),
         signal: c.signal,
       });
+      setClosedAccount(false);
       setMe(member(joined));
-      setMessage("You’re signed in. Your welcome points are recorded.");
+      setMessage(
+        reopen
+          ? "Your account is open again. Connections and activity email stay off until you turn them on."
+          : "You’re signed in. Your welcome points are recorded.",
+      );
     } catch (e) {
-      if (!c.signal.aborted)
+      if (c.signal.aborted) return;
+      if (e instanceof PointsRequestError && e.code === "account_closed") {
+        setClosedAccount(true);
+        setMessage(
+          "You closed this account. Reopen it to sign in; your records and unpaid awards are unchanged.",
+        );
+      } else
         setMessage(
           e instanceof TypeError
             ? "Could not reach Slop. Check your connection and try again."
@@ -801,10 +832,14 @@ function JoinPoints({ showHeading = true }: { showHeading?: boolean }) {
             className="button primary-button"
             type="button"
             disabled={busy || session === "loading"}
-            onClick={() => void start()}
+            onClick={() => void start(closedAccount)}
           >
             <GithubIcon aria-hidden="true" />
-            {busy ? "Waiting for GitHub…" : "Continue with GitHub"}
+            {busy
+              ? "Waiting for GitHub…"
+              : closedAccount
+                ? "Reopen account with GitHub"
+                : "Continue with GitHub"}
           </button>
           {busy ? (
             <button
@@ -850,6 +885,10 @@ export function LoginPage() {
 }
 export function AccountPage() {
   const { me, session } = useContext(Context);
+  const [closedNotice, setClosedNotice] = useState("");
+  useEffect(() => {
+    if (me) setClosedNotice("");
+  }, [me]);
   return (
     <main className="shell route-main points-page">
       <h1>Account</h1>
@@ -860,7 +899,7 @@ export function AccountPage() {
         <a href="/earnings">Payouts</a>
         <a href="/inbox">Inbox</a>
         {me ? <a href="#sessions">Sessions</a> : null}
-        <a href="#recovery">Recovery and closure</a>
+        <a href="#recovery">{me ? "Recovery and closure" : "Recovery"}</a>
       </nav>
       <div id="profile">
         <JoinPoints />
@@ -878,26 +917,110 @@ export function AccountPage() {
       )}
       {me ? <AccountSessions /> : null}
       <section id="recovery">
-        <h2>Recovery and closure</h2>
+        <h2>{me ? "Recovery and closure" : "Recovery"}</h2>
+        {closedNotice ? <p role="status">{closedNotice}</p> : null}
         <p>
-          Lost access to GitHub?{" "}
+          Lost access to GitHub, or someone else controls your account?{" "}
           <a href={`${CONTACT_MAILTO}?subject=Account%20recovery`}>
             Request private account recovery
           </a>
           .
         </p>
-        <p>
-          <a href={`${CONTACT_MAILTO}?subject=Account%20closure`}>
-            Request account closure
-          </a>
-          . Support reviews unpaid awards before closure. Public GitHub
-          contributions and finalized payment records remain.
-        </p>
+        {me ? (
+          <AccountClosure login={me.actor.login} onClosed={setClosedNotice} />
+        ) : null}
       </section>
       <p>
         <a href="/points#rules">Points and earning rules</a>
       </p>
     </main>
+  );
+}
+/**
+ * Self-service closure (PRD section 3). Closing ends every session and
+ * removes optional connections; obligations and records stay, and signing in
+ * again with the same GitHub account can reopen it.
+ */
+function AccountClosure({
+  login,
+  onClosed,
+}: {
+  login: string;
+  onClosed: (notice: string) => void;
+}) {
+  const { setMe } = useContext(Context);
+  const [confirmation, setConfirmation] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const inputId = useId();
+  const matches = confirmation.trim().toLowerCase() === login.toLowerCase();
+  return (
+    <form
+      className="account-closure"
+      aria-labelledby={`${inputId}-heading`}
+      onSubmit={async (event) => {
+        event.preventDefault();
+        if (!matches || busy) return;
+        setBusy(true);
+        setError("");
+        try {
+          await requestJson("/api/v1/points/account/close", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ login: confirmation.trim() }),
+          });
+          onClosed(
+            "Your account is closed and every session is signed out. Sign in with GitHub to reopen it and claim any unpaid award.",
+          );
+          setMe(null);
+        } catch (caught) {
+          setError(
+            caught instanceof PointsRequestError &&
+              caught.code === "confirmation_mismatch"
+              ? "The username does not match this account."
+              : caught instanceof PointsRequestError && caught.status === 401
+                ? "Your session ended. Sign in again to close your account."
+                : "Could not confirm whether your account closed. Reload this page to check your sign-in state before trying again.",
+          );
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <h3 id={`${inputId}-heading`}>Close your account</h3>
+      <p>Closing your account:</p>
+      <ul>
+        <li>signs out every session;</li>
+        <li>
+          removes your X and Telegram connections and turns off activity email;
+        </li>
+        <li>hides your membership from Slop people lists and profiles.</li>
+      </ul>
+      <p>
+        Unpaid awards stay reserved for you, and your wallets, payment and
+        settlement records, private cases and points history are kept. Public
+        GitHub work stays public. Sign in again with this GitHub account to
+        reopen it and claim a payout.
+      </p>
+      <label htmlFor={inputId}>
+        Type your GitHub username, {login}, to confirm
+      </label>
+      <input
+        id={inputId}
+        autoComplete="off"
+        spellCheck={false}
+        value={confirmation}
+        onChange={(event) => setConfirmation(event.target.value)}
+      />
+      <button
+        className="button danger-button"
+        type="submit"
+        disabled={!matches || busy}
+      >
+        {busy ? "Closing account…" : "Close account"}
+      </button>
+      {error ? <p role="alert">{error}</p> : null}
+    </form>
   );
 }
 function AccountSessions() {

@@ -1,25 +1,32 @@
-name: Close monthly rewards
+name: Propose monthly allocations
 
-# Trusted main code freezes the prior UTC month and opens an auditable PR.
-# Pull-request code never executes with write credentials in this workflow.
+# GitHub runs a schedule only on the default branch, so the scheduled run
+# dispatches this workflow on main and development. Each
+# dispatched run freezes the complete ledger of the last closed UTC month and
+# writes the proposed private allocation of every funded monthly project to
+# its branch's D1 database: main to slop-private, development to
+# slop-staging. Nothing is committed, published or opened as a pull request.
+# Owners change amounts privately; the payments coordinator finalizes the
+# current allocations at the owner-decided cutoff, 72 hours after the month
+# ends (decision D1, backend/payments/README.md). Writing a month's proposal is
+# idempotent, so the run repeats on the first three days of the month, before
+# that cutoff, to recover from a failed run.
 on:
   schedule:
-    - cron: "11 0 1 * *"
+    - cron: "11 0 1-3 * *"
   workflow_dispatch:
     inputs:
       cycle:
-        description: "Closed UTC month to prepare (YYYY-MM); blank means previous month"
+        description: "Closed UTC month to propose (YYYY-MM); blank means previous month"
         required: false
         type: string
 
 concurrency:
-  group: army-monthly-rewards
+  group: slop-monthly-allocations-${{ github.ref }}
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  issues: read
-  pull-requests: write
+  contents: read
 
 env:
   CI: "true"
@@ -27,28 +34,59 @@ env:
   NODE_VERSION: "24.15.0"
 
 jobs:
+  dispatch:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch on main and development
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A dispatch from GITHUB_TOKEN starts a run. Dispatch both branches
+          # before failing on either.
+          status=0
+          for ref in main development; do
+            if gh workflow run monthly-rewards.yml --repo "$GITHUB_REPOSITORY" --ref "$ref"; then
+              echo "Dispatched monthly allocations on $ref."
+            else
+              echo "::error::Could not dispatch monthly allocations on $ref."
+              status=1
+            fi
+          done
+          exit "$status"
+
   propose:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development')
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    environment:
+      # Production writes only from main; staging only from development.
+      name: ${{ github.ref == 'refs/heads/main' && 'eliza-army-production' || 'slop-staging' }}
     steps:
-      - name: Checkout trusted main
+      - name: Checkout trusted branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-          persist-credentials: true
+          persist-credentials: false
 
-      - name: Verify trusted main checkout
+      - name: Verify trusted checkout
         run: |
           set -euo pipefail
-          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
-            echo "::error::Monthly rewards must run from refs/heads/main."
-            exit 1
-          fi
           checked_out_sha="$(git rev-parse HEAD)"
           if [ "$checked_out_sha" != "$GITHUB_SHA" ]; then
-            echo "::error::Monthly rewards checkout $checked_out_sha does not match event SHA $GITHUB_SHA."
+            echo "::error::Monthly allocation checkout $checked_out_sha does not match event SHA $GITHUB_SHA."
             exit 1
           fi
 
@@ -92,12 +130,10 @@ jobs:
           printf 'cutoff=%s\n' "$cutoff" >> "$GITHUB_OUTPUT"
 
       - name: Snapshot the D1 project registry
-        # Projects live only in the production D1 registry. The committed
-        # snapshot can be empty or stale, so the close reads the registry as
-        # it is now. Each cycle archives the exact bytes of the project's
-        # newest D1 revision (scripts/project-revision-policy.mjs).
+        # Projects live only in the D1 registry of each environment. Each
+        # proposal stores the exact bytes of the project's newest revision.
         env:
-          SLOP_API_ORIGIN: https://slop.cash
+          SLOP_API_ORIGIN: ${{ github.ref == 'refs/heads/main' && 'https://slop.cash' || 'https://staging.slop.cash' }}
         run: bun run projects:sync
 
       - name: Validate registry and evaluator awards
@@ -111,38 +147,27 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: bun run leaderboard:generate -- --cutoff "${{ steps.cycle.outputs.cutoff }}"
 
-      - name: Freeze source and prepare every project
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: bun run rewards:close-month -- --cycle "${{ steps.cycle.outputs.cycle }}"
+      - name: Propose private allocations
+        run: bun run rewards:propose-month -- --cycle "${{ steps.cycle.outputs.cycle }}" --sql "$RUNNER_TEMP/monthly-allocations.sql"
 
-      - name: Verify immutable cycle chain
-        run: bun run cycles:check
-
-      - name: Open review PR
+      - name: Store proposals in D1
         env:
-          GH_TOKEN: ${{ github.token }}
-          CYCLE: ${{ steps.cycle.outputs.cycle }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          if [ -z "$(git status --porcelain -- cycles src/lib/project-promotion.generated.json)" ]; then
-            echo "No new cycle artifacts for $CYCLE."
+          if [ ! -s "$RUNNER_TEMP/monthly-allocations.sql" ]; then
+            echo "No funded monthly project for ${{ steps.cycle.outputs.cycle }}."
             exit 0
           fi
-          branch="chore/rewards-${CYCLE}-${GITHUB_RUN_ID}"
-          git config user.name "elizaOS rewards bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          # The synced registry snapshot lets cycles:check on the review PR
-          # resolve every project that the new cycles name.
-          git add -- cycles src/lib/project-promotion.generated.json \
-            src/lib/project-registry.generated.mjs \
-            src/lib/project-revisions.generated.json
-          git commit -m "chore: prepare ${CYCLE} reward review"
-          git push --set-upstream origin "$branch"
-          gh pr create \
-            --base main \
-            --head "$branch" \
-            --title "chore: review ${CYCLE} rewards" \
-            --body "Freezes the complete ${CYCLE} UTC contribution ledger and opens the 14-day public reward review. No payment is approved or sent by this PR."
+          # An existing month keeps its stored proposal; the import is one
+          # transaction and rolls back on failure.
+          if [ "$GITHUB_REF" = refs/heads/main ]; then
+            ./node_modules/.bin/wrangler d1 execute slop-private \
+              --remote --config workers/identity/wrangler.toml \
+              --file "$RUNNER_TEMP/monthly-allocations.sql"
+          else
+            ./node_modules/.bin/wrangler d1 execute slop-staging \
+              --remote --config wrangler.staging.toml \
+              --file "$RUNNER_TEMP/monthly-allocations.sql"
+          fi

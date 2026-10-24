@@ -29,6 +29,10 @@ export const NEVER_CLOSE: ReadonlySet<Category> = new Set([
   "missing_evidence",
 ]);
 
+// The only categories a security-only review acts on, while contributor work
+// on a paused, flagged or removed project is stopped (PRD section 5).
+export const SECURITY_CATEGORIES: ReadonlySet<Category> = new Set(["scam"]);
+
 export type CategoryMode = "off" | "label" | "close";
 export type Audience = "protection" | "participants";
 
@@ -320,14 +324,12 @@ export function priceUsage(key: string, usage: Usage) {
     0n,
   );
   const cost = (micro + 999_999n) / 1_000_000n;
-  const billed = (cost * 11n + 9n) / 10n;
-  if (billed > BigInt(Number.MAX_SAFE_INTEGER))
+  if (cost > BigInt(Number.MAX_SAFE_INTEGER))
     throw new Error("Model price exceeds the supported integer range");
+  // Internal provider cost for budgets and alerts. Slopbot is free (PRD
+  // section 5): no markup or customer charge is derived from it.
   return {
     costMicroUsd: Number(cost),
-    // A standalone estimate. The cost journal applies this rounding to the
-    // accumulated billable cost of the entire review, not to each call.
-    billedMicroUsdc: Number(billed),
     reconciliation: entry.reconciliation,
   };
 }
@@ -337,6 +339,9 @@ export const SHADOW_MIN_REVIEWS = 50;
 export const AUTHOR_DAILY_CAP = 3;
 export const CLOSE_CONFIDENCE = 0.9;
 export const REOPEN_BREAKER_RATIO = 0.1;
+
+export const APPEAL_COMMANDS = ["accept", "reject", "uphold", "deny"] as const;
+export type AppealCommand = (typeof APPEAL_COMMANDS)[number];
 
 // The queue carries identifiers only; the consumer re-reads GitHub state.
 export type Job =
@@ -361,4 +366,40 @@ export type Job =
       itemKind: "issue" | "pull_request";
       number: number;
       senderId: number;
+    }
+  | {
+      kind: "appeal_command";
+      /** accept or reject: the appellant or a maintainer; uphold or deny: a
+       * Slop moderator, on an escalated appeal only. */
+      command: AppealCommand;
+      deliveryId: string;
+      installationId: number;
+      repositoryId: number;
+      owner: string;
+      repo: string;
+      itemKind: "issue" | "pull_request";
+      number: number;
+      senderId: number;
+    }
+  | {
+      kind: "appeal_due";
+      appealKey: string;
+      deliveryId: string;
+      installationId: number;
+      repositoryId: number;
+      owner: string;
+      repo: string;
+      itemKind: "issue" | "pull_request";
+      number: number;
+    }
+  | {
+      kind: "maintainer_hold";
+      reviewKey: string;
+      deliveryId: string;
+      installationId: number;
+      repositoryId: number;
+      owner: string;
+      repo: string;
+      itemKind: "issue" | "pull_request";
+      number: number;
     };

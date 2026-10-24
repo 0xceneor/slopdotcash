@@ -31,11 +31,25 @@ const MODERATOR_TOKEN = process.env.SLOP_E2E_MODERATOR_TOKEN ?? "";
 const VETTING_PUBLIC_KEY = process.env.SLOP_E2E_VETTING_PUBLIC_KEY ?? "";
 const VETTING_PRIVATE_KEY = process.env.SLOP_E2E_VETTING_PRIVATE_KEY ?? "";
 const GITHUB_FIXTURE = process.env.SLOP_E2E_GITHUB_API_ORIGIN ?? "";
+/** A contributor session from the security roles, used as a flagger. */
+const SECURITY_ACCOUNT = {
+  id: "900000011",
+  login: "e2e-reporter-a",
+  token: (
+    JSON.parse(process.env.SLOP_E2E_SECURITY_TOKENS ?? "{}") as Record<
+      string,
+      string
+    >
+  )["reporter-a"],
+};
 
 function walkthroughOptions() {
-  return process.env.SLOP_E2E_VIDEO === "1"
-    ? { recordVideo: { dir: test.info().outputPath("walkthrough-videos") } }
-    : {};
+  return {
+    viewport: test.info().project.use.viewport,
+    ...(process.env.SLOP_E2E_VIDEO === "1"
+      ? { recordVideo: { dir: test.info().outputPath("walkthrough-videos") } }
+      : {}),
+  };
 }
 
 /** Posts a harmless signed scan result for the project's queued scan. */
@@ -193,6 +207,22 @@ function fixtureProjects() {
   };
 }
 
+/** Sets the GitHub account facts that flag eligibility reads. */
+async function setGithubUser(
+  id: string,
+  login: string,
+  createdAt: string,
+  merged: number,
+) {
+  if (!GITHUB_FIXTURE) throw new Error("Missing E2E GitHub fixture");
+  const url = new URL(`${GITHUB_FIXTURE}/__fixture/github-users/${id}`);
+  url.searchParams.set("login", login);
+  url.searchParams.set("createdAt", createdAt);
+  url.searchParams.set("merged", String(merged));
+  const response = await fetch(url, { method: "PUT" });
+  if (response.status !== 204) throw new Error("GitHub fixture refused");
+}
+
 /** Sets what the Slopbot GitHub App reads in the loopback GitHub fixture. */
 async function setSlopbot(path: string) {
   if (!GITHUB_FIXTURE) throw new Error("Missing E2E GitHub fixture");
@@ -334,6 +364,8 @@ test("an owner creates a paused project without admin approval @registry", async
   const page = await context.newPage();
   const errors = observe(page);
   await signIn(page, APPLICANT_TOKEN);
+  // Owner decision D11: Slop reads authority through the installation.
+  await setSlopbot(`${project.repository}/installed`);
   await draftApplication(page, project);
   await page
     .getByRole("button", { name: "Create project", exact: true })
@@ -361,8 +393,10 @@ test("an owner creates a paused project without admin approval @registry", async
       (entry: { projectId: string }) => entry.projectId === project.id,
     ),
   ).toMatchObject([{ revision: 1 }]);
-  // Without the Slopbot installation, the project stays paused.
-  await expect(page.locator("main")).toContainText("Slopbot");
+  // Until the scan passes, the project stays paused.
+  await expect(page.locator(".project-setup-status h2")).toHaveText(
+    "Setup status: Waiting for the security scan",
+  );
   await expectAccessible(page);
   expect(errors).toEqual([]);
   await context.close();
@@ -376,6 +410,7 @@ test("an owner creates and updates directly; an admin can delist by exception @r
   const owner = await ownerContext.newPage();
   const ownerErrors = observe(owner);
   await signIn(owner, OWNER_TOKEN);
+  await setSlopbot(`${project.repository}/installed`);
   await draftApplication(owner, project);
   await owner
     .getByRole("button", { name: "Create project", exact: true })
@@ -707,13 +742,21 @@ test("the applicant's inbox lists each decision and revision once and keeps the 
   const inbox = await (
     await page.request.get("/api/v1/notifications", { headers: { cookie } })
   ).json();
-  // One row per event: the decision and the revision, never a duplicate.
-  const mine = inbox.notifications.filter(
+  // One row per event: the revision and, once per assessment, each earlier
+  // scan that could not establish clearance. Never a duplicate.
+  const mine: { kind: string; eventKey: string }[] = inbox.notifications.filter(
     (entry: { subject: string }) => entry.subject === project.id,
   );
-  expect(mine.map((entry: { kind: string }) => entry.kind).sort()).toEqual([
-    "project_revision",
-  ]);
+  const scans = mine.filter((entry) => entry.kind === "project_scan_failed");
+  expect(scans.length).toBeGreaterThan(0);
+  for (const scan of scans)
+    expect(scan.eventKey).toMatch(/^project-scan:[A-Za-z0-9_-]+$/u);
+  expect(
+    mine
+      .filter((entry) => entry.kind !== "project_scan_failed")
+      .map((entry) => entry.kind)
+      .sort(),
+  ).toEqual(["project_revision"]);
   const keys = inbox.notifications.map(
     (entry: { eventKey: string }) => entry.eventKey,
   );
@@ -880,6 +923,7 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   await adminContext.close();
 
   const moderatorContext = await browser.newContext({
+    viewport: test.info().project.use.viewport,
     recordVideo: { dir: test.info().outputPath("enforcement-video") },
   });
   const moderator = await moderatorContext.newPage();
@@ -1044,7 +1088,7 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   await applicantContext.close();
 });
 
-test("an owner resumes setup after installing Slopbot; a failed scan and lost access each show the next action @registry", async ({
+test("an owner installs Slopbot before creation and resumes setup; a failed scan and lost access each show the next action @registry", async ({
   browser,
   request,
 }) => {
@@ -1054,29 +1098,44 @@ test("an owner resumes setup after installing Slopbot; a failed scan and lost ac
   const errors = observe(page);
   await signIn(page, OWNER_TOKEN);
   await draftApplication(page, project);
-  await page
-    .getByRole("button", { name: "Create project", exact: true })
-    .click();
+  const create = page.getByRole("button", {
+    name: "Create project",
+    exact: true,
+  });
+  await create.click();
 
-  // New setup: the paused project is listed, its first scan is queued, and
-  // the one next action is to install Slopbot.
-  const created = page.locator(".project-setup-status");
-  await expect(created.locator("h2")).toHaveText("Setup status: Action needed");
-  await expect(created.getByRole("status")).toContainText(
-    `Slopbot is not installed on ${project.repository}.`,
+  // Owner decision D11: without the Slopbot installation, Slop cannot read
+  // the account's access, so nothing is created. The next action links the
+  // installation, and the draft stays.
+  const refused = page.locator("form").getByRole("alert");
+  await expect(refused).toContainText(
+    `Install Slopbot on ${project.repository}, then try again.`,
   );
   await expect(
-    created.getByRole("link", { name: "Install Slopbot" }),
+    refused.getByRole("link", { name: "Install Slopbot" }),
   ).toHaveAttribute(
     "href",
     "https://github.com/apps/slopdotcash/installations/new",
   );
+  expect(await listedProject(page, project.id)).toBeUndefined();
+  await expectAccessible(page);
+
+  // New setup: after the installation, the same draft creates the paused
+  // project. Slopbot reads admin access, and the first scan is queued.
+  await setSlopbot(`${project.repository}/installed`);
+  await create.click();
+  const created = page.locator(".project-setup-status");
+  await expect(created.locator("h2")).toHaveText(
+    "Setup status: Waiting for the security scan",
+  );
+  await expect(created).toContainText(
+    `Confirmed. @e2e-owner has admin access to ${project.repository}.`,
+  );
   await expect(created).toContainText("Queued. The security scan is queued.");
   await expectAccessible(page);
 
-  // Resumed setup: after the installation, the owner checks again from
-  // "Your projects" on a new page load. Slopbot reads admin access.
-  await setSlopbot(`${project.repository}/installed`);
+  // Resumed setup: the owner checks again from "Your projects" on a new
+  // page load.
   await page.goto("/projects/new", { waitUntil: "networkidle" });
   await page.getByText("Your projects", { exact: true }).click();
   const entry = page.locator("#your-projects li", { hasText: project.name });
@@ -1110,6 +1169,14 @@ test("an owner resumes setup after installing Slopbot; a failed scan and lost ac
     "Setup status: Waiting for the security scan",
   );
   await expectAccessible(page);
+  // The failed scan reaches the owner's inbox once (PRD NOT-01).
+  await page.goto("/inbox", { waitUntil: "networkidle" });
+  await expect(
+    page.locator(".inbox-item", {
+      hasText: `The security scan of ${project.id} could not finish.`,
+    }),
+  ).toHaveCount(1);
+  await expectAccessible(page);
 
   // Owner edit: a text-only change publishes at once as revision 2.
   await page.goto(`/projects/${project.id}/manage`, {
@@ -1125,7 +1192,40 @@ test("an owner resumes setup after installing Slopbot; a failed scan and lost ac
   await expect(
     page.getByRole("status").filter({ hasText: "Published revision 2" }),
   ).toBeVisible();
-  expect(errors).toEqual([]);
+  // The only console error so far is the refused creation before install.
+  expect(errors).toHaveLength(1);
+  expect(errors[0]).toContain("409");
+
+  // A policy with no deployed or funded vault must not lock the asset.
+  await expect(
+    page.getByRole("combobox", { name: "Network", exact: true }),
+  ).toBeEnabled();
+  await page
+    .getByRole("combobox", { name: "Network", exact: true })
+    .selectOption("ethereum");
+  await page.getByLabel("Monthly amount (USDC)").fill("1200");
+  await page
+    .getByLabel("Revision note", { exact: true })
+    .fill("Use USDC on Ethereum from next month");
+  await page.getByRole("button", { name: "Publish changes" }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Published revision 3" }),
+  ).toBeVisible();
+  const switched = await listedProject(page, project.id);
+  const now = new Date();
+  expect(switched).toMatchObject({
+    rewardAsset: { network: "ethereum", kind: "stablecoin" },
+    reward: {
+      monthlyCapMinor: "1200000000",
+      cycleCaps: [
+        { cycleId: now.toISOString().slice(0, 7), monthlyCapMinor: "0" },
+      ],
+    },
+  });
+  await page.screenshot({
+    path: test.info().outputPath("unfunded-asset-change.png"),
+    fullPage: true,
+  });
 
   // Permission loss: Slopbot now reads only read access. The setup status
   // names the next action, and the owner cannot publish another change.
@@ -1150,15 +1250,17 @@ test("an owner resumes setup after installing Slopbot; a failed scan and lost ac
     history.revisions.filter(
       (revision: { projectId: string }) => revision.projectId === project.id,
     ),
-  ).toHaveLength(2);
+  ).toHaveLength(3);
   expect(await listedProject(page, project.id)).toMatchObject({
     status: "paused",
     headline: "Accepted setup outcomes with a clear project scope",
   });
   await expectAccessible(page);
-  // The only console error is the browser's report of the refused publish.
-  expect(errors).toHaveLength(1);
-  expect(errors[0]).toContain("403");
+  // The only console errors are the browser's reports of the refused
+  // creation (409) and the refused publish (403).
+  expect(errors).toHaveLength(2);
+  expect(errors[0]).toContain("409");
+  expect(errors[1]).toContain("403");
   await context.close();
 });
 
@@ -1239,12 +1341,13 @@ test("an applicant publishes an application stored before self-service setup wit
   await expect(entry).toContainText(
     "submitted 2026-10-01 before self-service setup",
   );
+  await setSlopbot(`${project.repository}/installed`);
   await entry.getByRole("button", { name: "Create this project" }).click();
   await expect(entry.locator(".project-setup-status h2")).toHaveText(
-    "Setup status: Action needed",
+    "Setup status: Waiting for the security scan",
   );
   await expect(entry.locator(".project-setup-status")).toContainText(
-    `Slopbot is not installed on ${project.repository}.`,
+    `Confirmed. @e2e-owner has admin access to ${project.repository}.`,
   );
   expect(await listedProject(page, project.id)).toMatchObject({
     name: project.name,
@@ -1478,4 +1581,165 @@ test("repository lookup failures explain the next action and preserve the draft 
     fullPage: true,
   });
   await context.close();
+});
+
+test("two contributors flag through the form, pause the project and notify moderators @registry", async ({
+  browser,
+}) => {
+  const readPrivate = (page: Page, path: string) =>
+    page.evaluate(async (url) => (await fetch(url)).json(), path);
+  const suffix = test.info().project.name.replace(/-chromium$/u, "");
+  const project = {
+    id: `flag-flow-${suffix}`,
+    repository: `e2e-owner/flag-flow-${suffix}`,
+    name: `Flag flow ${suffix}`,
+  };
+  // Owner decision D3: a flagger's GitHub account is at least 30 days old
+  // and has at least 1 merged pull request in a registered project.
+  await setGithubUser("900000002", "e2e-applicant", "2020-01-01T00:00:00Z", 2);
+  await setGithubUser(
+    SECURITY_ACCOUNT.id,
+    SECURITY_ACCOUNT.login,
+    "2021-06-01T00:00:00Z",
+    1,
+  );
+  await setGithubUser(
+    "900000004",
+    "e2e-moderator",
+    new Date().toISOString(),
+    3,
+  );
+
+  const ownerContext = await browser.newContext(walkthroughOptions());
+  const owner = await ownerContext.newPage();
+  const ownerErrors = observe(owner);
+  await signIn(owner, OWNER_TOKEN);
+  await draftApplication(owner, project);
+  await owner
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(
+    owner.getByRole("heading", { name: "Project created" }),
+  ).toBeVisible();
+  expect(await listedProject(owner, project.id)).toMatchObject({
+    status: "paused",
+  });
+  const fileFlag = (token: string) =>
+    owner.request.post(`/api/v1/project-flags/${project.id}`, {
+      headers: {
+        origin: new URL(owner.url()).origin,
+        cookie: `__Host-slop_points=${token}`,
+      },
+      data: {
+        category: "other",
+        evidence: "Synthetic fixture: a refused flag must not be recorded.",
+      },
+    });
+  // The project's own owner and a new GitHub account cannot flag.
+  const ownFlag = await fileFlag(OWNER_TOKEN);
+  expect(ownFlag.status()).toBe(403);
+  expect(await ownFlag.json()).toMatchObject({ error: "owner_cannot_flag" });
+  const newAccount = await fileFlag(MODERATOR_TOKEN);
+  expect(newAccount.status()).toBe(403);
+  expect(await newAccount.json()).toMatchObject({
+    error: "flagger_account_too_new",
+  });
+
+  const adminContext = await browser.newContext(walkthroughOptions());
+  const admin = await adminContext.newPage();
+  await signIn(admin, ADMIN_TOKEN);
+
+  const firstContext = await browser.newContext(walkthroughOptions());
+  const first = await firstContext.newPage();
+  const firstErrors = observe(first);
+  await signIn(first, APPLICANT_TOKEN);
+  const firstEvidence =
+    "Synthetic fixture: install.js requests credentials before starting.";
+  await first.goto(`/projects/${project.id}`, { waitUntil: "networkidle" });
+  await first
+    .getByText("Report malicious code in this project", { exact: true })
+    .click();
+  await first.getByRole("textbox", { name: /^Evidence/u }).fill(firstEvidence);
+  await first.getByRole("button", { name: "Flag this project" }).click();
+  await expect(
+    first.getByRole("status").filter({ hasText: "Flag recorded" }),
+  ).toContainText("Your flag counts");
+  const ownPath = `/api/v1/project-flags/${project.id}`;
+  expect(await readPrivate(first, ownPath)).toMatchObject({
+    restriction: "clear",
+    pausedByFlags: false,
+  });
+  await expectAccessible(first);
+  await first.screenshot({
+    path: test.info().outputPath("first-flag.png"),
+    fullPage: true,
+  });
+
+  const secondContext = await browser.newContext(walkthroughOptions());
+  const second = await secondContext.newPage();
+  const secondErrors = observe(second);
+  await signIn(second, SECURITY_ACCOUNT.token);
+  expect(await readPrivate(second, ownPath)).toMatchObject({
+    flag: null,
+  });
+  await second.goto(`/projects/${project.id}`, { waitUntil: "networkidle" });
+  await second
+    .getByText("Report malicious code in this project", { exact: true })
+    .click();
+  await second
+    .getByRole("combobox", { name: /^Risk/u })
+    .selectOption("unsafe-execution");
+  await second
+    .getByRole("textbox", { name: /^Evidence/u })
+    .fill("Synthetic fixture: setup.sh runs an unverified downloaded script.");
+  await second.getByRole("button", { name: "Flag this project" }).click();
+  await expect(
+    second.getByRole("status").filter({ hasText: "Flag recorded" }),
+  ).toContainText("now paused");
+  await expect(second.locator("main")).not.toContainText(firstEvidence);
+  await expect(second.locator("#start")).toContainText(
+    "Do not install this project's skill or start work while the project is paused.",
+  );
+  expect(await readPrivate(second, ownPath)).toMatchObject({
+    restriction: "quarantined",
+    pausedByFlags: true,
+  });
+  expect(
+    (await second.request.get(`/projects/${project.id}/skill.md`)).status(),
+  ).toBe(410);
+  await expectAccessible(second);
+  await second.screenshot({
+    path: test.info().outputPath("second-flag-paused.png"),
+    fullPage: true,
+  });
+
+  await second.reload({ waitUntil: "networkidle" });
+  await second
+    .getByText("Report malicious code in this project", { exact: true })
+    .click({ timeout: 10000 });
+  await expect(
+    second.getByRole("button", { name: "Withdraw my flag" }),
+  ).toBeVisible();
+  await second.getByRole("button", { name: "Withdraw my flag" }).click();
+  await expect(
+    second.getByRole("status").filter({ hasText: "Flag withdrawn" }),
+  ).toBeVisible();
+  expect(await readPrivate(second, ownPath)).toMatchObject({
+    flag: null,
+    restriction: "quarantined",
+  });
+  const inbox = await readPrivate(admin, "/api/v1/notifications");
+  expect(
+    inbox.notifications.filter(
+      (notice: { subject: string; kind: string }) =>
+        notice.subject === project.id && notice.kind === "project_quarantined",
+    ),
+  ).toHaveLength(1);
+  expect(ownerErrors).toEqual([]);
+  expect(firstErrors).toEqual([]);
+  expect(secondErrors).toEqual([]);
+  await ownerContext.close();
+  await firstContext.close();
+  await secondContext.close();
+  await adminContext.close();
 });

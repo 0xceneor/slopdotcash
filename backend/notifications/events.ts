@@ -1,9 +1,18 @@
 /**
- * Inbox event statements (PRD NOT-01, migration 0024). Each writer adds one
- * of these to the same D1 batch as its source change, after that change, so
- * the notification commits only with it. Every statement reads its facts
- * back from the committed source row, so a change that did not happen writes
- * nothing, and the (event_key, recipient) key makes a replay a no-op.
+ * Inbox event statements (PRD NOT-01, migrations 0024 and 0063). Each writer
+ * adds one of these to the same D1 batch as its source change, after that
+ * change, so the notification commits only with it. Every statement reads its
+ * facts back from the committed source row, so a change that did not happen
+ * writes nothing, and the (event_key, recipient) key makes a replay a no-op:
+ * one source transition is one event.
+ *
+ * Notices report outcomes and exceptions, not routine admission steps:
+ * setup completion (`project_ready`), failed checks (`project_scan_failed`,
+ * `project_installation_lost`), payment exceptions (`payout_held`,
+ * `payout_exception`) and private report receipts
+ * (`security_report_received`). Only private case notices that ask a role
+ * holder to act (`security_case`) carry an acknowledgment and escalation;
+ * every other notice is read state only.
  */
 
 type Preparer<S> = {
@@ -34,11 +43,31 @@ const LISTED_BY = (
             WHERE p.id = ${projectId} AND p.source_application_id IS NULL
               AND first.actor_github_id IS NOT NULL`;
 
+/** SQL that keeps only canonical GitHub account ids as recipients. */
+const GITHUB_ID = (column: string) =>
+  `typeof(${column}) = 'text' AND length(${column}) BETWEEN 1 AND 20
+   AND ${column} GLOB '[1-9]*' AND ${column} NOT GLOB '*[^0-9]*'`;
+
 /**
- * A later manifest revision reaches the account that listed the project (its
+ * The people who answer for a project: the account that listed it and its
+ * current GitHub steward. `project` is a SQL expression for the project id.
+ */
+const PROJECT_OWNERS = (project: string) => `(
+  ${LISTED_BY(project)}
+  UNION
+  SELECT json_extract(manifest, '$.steward.github.actorId')
+    FROM projects
+   WHERE id = ${project}
+)`;
+
+/**
+ * A manifest revision reaches the account that listed the project (its
  * applicant, or its self-service creator) and its GitHub steward, never the
- * account that made the revision. Revision 1 lists the project; its creator
- * made it, so it sends no notice.
+ * account that made the revision. A revision that makes the project active,
+ * from nothing or from paused, is setup completion or a return to work and is
+ * reported as `project_ready`; any other later revision is
+ * `project_revision`. A first revision that is not active only lists the
+ * project, so it writes nothing.
  */
 export function notifyProjectRevision<S>(
   db: Preparer<S>,
@@ -51,9 +80,22 @@ export function notifyProjectRevision<S>(
     .prepare(
       `${INSERT}
        SELECT 'project-revision:' || r.project_id || ':' || r.revision,
-              recipient, 'project_revision', r.project_id, r.reason,
+              recipient,
+              CASE WHEN r.ready THEN 'project_ready' ELSE 'project_revision' END,
+              r.project_id, CASE WHEN r.ready THEN NULL ELSE r.reason END,
               '/projects/' || r.project_id, r.created_at, ?4
-         FROM project_revisions r
+         FROM (
+           SELECT rev.*,
+                  json_extract(rev.manifest, '$.status') = 'active' AND
+                  COALESCE((SELECT json_extract(prior.manifest, '$.status')
+                              FROM project_revisions prior
+                             WHERE prior.project_id = rev.project_id
+                               AND prior.revision = rev.revision - 1),
+                           'none') <> 'active' AS ready
+             FROM project_revisions rev
+            WHERE rev.project_id = ?1 AND rev.revision = ?2
+              AND rev.manifest_sha256 = ?3 AND rev.created_at = ?4
+         ) r
          JOIN (
            ${LISTED_BY("?1")}
            UNION
@@ -62,13 +104,83 @@ export function notifyProjectRevision<S>(
             WHERE project_id = ?1 AND revision = ?2
               AND json_type(manifest, '$.steward.github.actorId') = 'text'
          )
-        WHERE r.project_id = ?1 AND r.revision = ?2 AND r.revision > 1
-          AND r.manifest_sha256 = ?3 AND r.created_at = ?4
+        WHERE (r.revision > 1 OR r.ready)
           AND recipient IS NOT r.actor_github_id
-          AND recipient GLOB '[1-9]*' AND recipient NOT GLOB '*[^0-9]*'
+          AND ${GITHUB_ID("recipient")}
        ${ONCE}`,
     )
     .bind(projectId, revision, manifestSha256, at);
+}
+
+/**
+ * A completed scan that could not establish clearance (state `incomplete`)
+ * reaches the project's owners, once per assessment. A malicious result is
+ * reported by its enforcement record instead; a clean result needs no notice
+ * because the project status shows it.
+ */
+export function notifyProjectScanFailed<S>(
+  db: Preparer<S>,
+  assessmentId: string,
+): S {
+  return db
+    .prepare(
+      `${INSERT}
+       SELECT 'project-scan:' || v.id, owners.recipient, 'project_scan_failed',
+              v.project_id, NULL, '/projects/' || v.project_id,
+              v.completed_at, v.completed_at
+         FROM vetting_assessments v
+         JOIN ${PROJECT_OWNERS("(SELECT project_id FROM vetting_assessments WHERE id = ?1)")} owners
+        WHERE v.id = ?1 AND v.state = 'incomplete' AND v.completed_at IS NOT NULL
+          AND ${GITHUB_ID("owners.recipient")}
+       ${ONCE}`,
+    )
+    .bind(assessmentId);
+}
+
+/**
+ * Slopbot's GitHub installation was suspended or removed at `at`. Each
+ * project with a registered repository under that account reaches its
+ * owners once, because reviews stop until Slopbot is installed again.
+ */
+export function notifySlopbotInstallationLost<S>(
+  db: Preparer<S>,
+  installationId: number,
+  at: string,
+): S {
+  return db
+    .prepare(
+      `${INSERT}
+       SELECT 'slopbot-installation:' || i.installation_id || ':' || ?2 || ':' || p.id,
+              owners.recipient, 'project_installation_lost', p.id, NULL,
+              '/projects/' || p.id, ?2, ?2
+         FROM slopbot_installations i
+         JOIN projects p ON EXISTS (
+           SELECT 1 FROM project_repositories r
+            WHERE r.project_id = p.id
+              AND substr(r.repository_key, 1, length(i.account_login) + 1) =
+                  lower(i.account_login) || '/'
+         )
+         JOIN (
+           SELECT p2.id AS project_id, a.applicant_github_id AS recipient
+             FROM projects p2
+             JOIN project_applications a ON a.id = p2.source_application_id
+           UNION
+           SELECT p2.id, first.actor_github_id
+             FROM projects p2
+             JOIN project_revisions first
+               ON first.project_id = p2.id AND first.revision = 1
+            WHERE p2.source_application_id IS NULL
+              AND first.actor_github_id IS NOT NULL
+           UNION
+           SELECT id, json_extract(manifest, '$.steward.github.actorId')
+             FROM projects
+         ) owners ON owners.project_id = p.id
+        WHERE i.installation_id = ?1
+          AND (i.removed_at = ?2 OR i.suspended_at = ?2)
+          AND ${GITHUB_ID("owners.recipient")}
+       ${ONCE}`,
+    )
+    .bind(installationId, at);
 }
 
 /** A finalized reservation: an award is now set aside for the contributor. */
@@ -147,11 +259,6 @@ export function notifyWalletChanged<S>(
     .bind(at, claimId);
 }
 
-/** SQL that keeps only canonical GitHub account ids as recipients. */
-const GITHUB_ID = (column: string) =>
-  `typeof(${column}) = 'text' AND length(${column}) BETWEEN 1 AND 20
-   AND ${column} GLOB '[1-9]*' AND ${column} NOT GLOB '*[^0-9]*'`;
-
 /**
  * A held payout is a payout exception for the project's GitHub steward
  * (migration 0029). The row names only the project, never the contributor or
@@ -181,6 +288,36 @@ export function notifyPayoutException<S>(
 }
 
 /**
+ * An underfunded frozen month is a payout exception for the project's GitHub
+ * steward (PRD sections 6 and 9; owner decision D1). The key has no time, so
+ * each project month sends one notice however often the coordinator retries.
+ * The row names only the project and month, never an amount or a contributor.
+ */
+export function notifyMonthlyUnderfunded<S>(
+  db: Preparer<S>,
+  projectId: string,
+  period: string,
+  at: string,
+): S {
+  return db
+    .prepare(
+      `${INSERT}
+       SELECT 'monthly-underfunded:' || r.project_id || ':' || r.period,
+              json_extract(p.manifest, '$.steward.github.actorId'),
+              'payout_exception', r.project_id,
+              'The ' || r.period || ' monthly awards wait for funds. No award is created until the vault covers the whole month.',
+              '/projects/' || r.project_id || '/awards', r.frozen_at, ?
+         FROM monthly_payment_runs r
+         JOIN projects p ON p.id = r.project_id
+        WHERE r.project_id = ? AND r.period = ?
+          AND r.obligations_created_at IS NULL
+          AND ${GITHUB_ID("json_extract(p.manifest, '$.steward.github.actorId')")}
+       ${ONCE}`,
+    )
+    .bind(at, projectId, period);
+}
+
+/**
  * An ADM-06 enforcement record reaches the applicant who listed the project
  * and its current GitHub steward. The row carries no reason or evidence
  * reference: those stay in the admin panel. The project page shows the
@@ -203,13 +340,7 @@ export function notifyProjectEnforcement<S>(
               e.project_id, NULL, '/projects/' || e.project_id,
               e.created_at, e.created_at
          FROM project_enforcements e
-         JOIN (
-           ${LISTED_BY("(SELECT project_id FROM project_enforcements WHERE id = ?1)")}
-           UNION
-           SELECT json_extract(manifest, '$.steward.github.actorId')
-             FROM projects
-            WHERE id = (SELECT project_id FROM project_enforcements WHERE id = ?1)
-         )
+         JOIN ${PROJECT_OWNERS("(SELECT project_id FROM project_enforcements WHERE id = ?1)")}
         WHERE e.id = ?1 AND ${GITHUB_ID("recipient")}
           AND e.action IN ('quarantine', 'ban', 'request_reinstatement',
                            'reinstate', 'deny_reinstatement')
@@ -322,4 +453,29 @@ export function notifySecurityCase<S>(
       JSON.stringify(input.recipients),
       input.awardState ?? null,
     );
+}
+
+/**
+ * Verified receipt of a private report reaches its reporter once per case
+ * (PRD section 8). The row holds only the private case reference and a
+ * sign-in link. Its private mail uses the receipt template, which asks for
+ * no acknowledgment and never escalates for a missed one.
+ */
+export function notifySecurityReportReceived<S>(
+  db: Preparer<S>,
+  caseId: string,
+): S {
+  return db
+    .prepare(
+      `${INSERT}
+       SELECT 'security-receipt:' || c.id, c.reporter_github_id,
+              'security_report_received', c.id, NULL, '/security',
+              c.verified_at, c.verified_at
+         FROM security_cases c
+        WHERE c.id = ? AND c.submission_state = 'verified'
+          AND c.verified_at IS NOT NULL
+          AND ${GITHUB_ID("c.reporter_github_id")}
+       ${ONCE}`,
+    )
+    .bind(caseId);
 }

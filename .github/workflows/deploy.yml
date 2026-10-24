@@ -757,16 +757,21 @@ jobs:
           if (xKeys.length === 1) throw new TypeError("X OAuth credentials must be configured together");
           const telegramKeys = actual.filter((name) => ["TELEGRAM_BOT_TOKEN", "TELEGRAM_BOT_USERNAME", "TELEGRAM_WEBHOOK_SECRET"].includes(name));
           if (telegramKeys.length !== 0 && telegramKeys.length !== 3) throw new TypeError("Telegram bot settings must be configured together");
-          // Intake remains off until its mode and complete credential set are configured.
-          // Permit staged provisioning without accepting arbitrary secret names.
-          const intakeKeys = new Set([
+          // Optional owner-provisioned secrets for private-report intake and
+          // private security analysis (PRD sections 8 and 11). They stay inert
+          // until their feature is enabled; any other name still fails closed.
+          const optional = [
+            "ANTHROPIC_SECURITY_API_KEY",
             "GITHUB_INTAKE_APP_CLIENT_ID",
             "GITHUB_INTAKE_APP_CLIENT_SECRET",
             "GITHUB_INTAKE_APP_ID",
             "GITHUB_INTAKE_APP_PRIVATE_KEY",
             "SLOP_INTAKE_GRANT_KEY",
-          ]);
-          const required = actual.filter((name) => !xKeys.includes(name) && !telegramKeys.includes(name) && !intakeKeys.has(name) && name !== "SURPLUS_API_KEY");
+            "SURPLUS_API_KEY",
+          ];
+          const required = actual.filter(
+            (name) => !xKeys.includes(name) && !telegramKeys.includes(name) && !optional.includes(name),
+          );
           if (JSON.stringify(required) !== JSON.stringify(expected)) {
             throw new TypeError("Pages secret inventory is incomplete or contains unexpected entries");
           }

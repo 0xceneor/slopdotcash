@@ -191,9 +191,12 @@ The contributor skill must:
 - respect the target repository’s instructions and contribution policy;
 - allow any provider, model, and client with exact disclosure;
 - test the result and disclose the exact provider, model, and client;
+- put the visible `Made via @slopdotcash` line once in every PR it opens;
 - offer signed receipts and private traces as optional evidence, never as a
   submission prerequisite; upload only contributor-reviewed traces through the
   authenticated write-only path;
+- after the PR exists, record a `pull_request_opened` event that names the PR
+  node ID through the contributor's own authenticated Slop session;
 - never claim an issue, publish a placeholder PR, handle keys, or move money.
 
 The current reviewer skill is separate and advisory. The PRD requires free Slopbot on registered
@@ -277,6 +280,18 @@ what the user does, what occurs, and why it matters. Include detailed test steps
 expected results, actual results, the exact tested revision, and limitations.
 Include `Made via @slopdotcash` on PRs without replacing required model
 attribution. Owners and maintainers write issues; contributors write PRs.
+
+The attribution rule (the recorded decision in PRD section 11; sections 4 and 5) has two
+levels:
+
+| Purpose | Required evidence |
+| --- | --- |
+| Ordinary submission | The visible `Made via @slopdotcash` line and the exact provider, model, and client. A signed run receipt is optional and never blocks submission. |
+| Automatic closure or penalty | The author is a slop.cash member, matched by immutable GitHub ID, and has a `trace_runs` row from their own authenticated Slop session for this project with a `pull_request_opened` event that names this PR node ID. |
+
+A copied marker or footer alone never proves membership or skill use. Usage
+totals and traces are diagnostic only; they never set a reward and never gate a
+submission.
 
 ## Definition of done
 

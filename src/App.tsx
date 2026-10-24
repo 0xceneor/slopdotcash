@@ -78,6 +78,7 @@ import {
 } from "./Presentation";
 import { ProfilePage } from "./ProfilePage";
 import { ProjectLeaderboard } from "./ProjectLeaderboard";
+import { ProjectRiskFlag } from "./ProjectRiskFlag";
 
 export { safeProposalHttpsUrl } from "./lib/project-proposal";
 export {
@@ -287,7 +288,7 @@ function useRoute(): Route {
 
 const PRIVATE_PAGE_TITLES = new Map<Route["kind"], string>([
   ["admin", "Admin"],
-  ["owner-awards", "Review awards"],
+  ["owner-awards", "Monthly awards"],
   ["account", "Account"],
   ["login", "Log in"],
   ["earnings", "Your payouts"],
@@ -502,9 +503,12 @@ function TypewriterHeroHeading() {
   );
 }
 
-function monthlyPoolCapLabel(reward: ProjectDefinition["reward"]): string {
+/** A token pool names its asset; only a stablecoin pool reads as dollars. */
+function monthlyPoolCapLabel(project: ProjectDefinition): string {
+  const reward = project.reward;
   const minor = BigInt(reward.monthlyCapMinor);
-  if (minor % 1_000_000n !== 0n) return reward.monthlyCapDisplay;
+  if (project.rewardAsset?.kind === "token" || minor % 1_000_000n !== 0n)
+    return reward.monthlyCapDisplay;
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -547,7 +551,7 @@ function ProjectOwnerAvatar({ project }: { project: ProjectDefinition }) {
 function ProjectCard({ project }: { project: ProjectDefinition }) {
   const amount =
     project.reward.kind === "monthly-pool"
-      ? monthlyPoolCapLabel(project.reward)
+      ? monthlyPoolCapLabel(project)
       : (project.reward.externalOpportunity?.advertisedAmountDisplay ??
         "External");
   return (
@@ -591,7 +595,7 @@ function ProjectRow({ project }: { project: ProjectDefinition }) {
   const amount = monthlyPoolPointsOnly(project.reward)
     ? "$0 + points (Points only)"
     : project.reward.kind === "monthly-pool"
-      ? `${monthlyPoolCapLabel(project.reward)}/mo target`
+      ? `${monthlyPoolCapLabel(project)}/mo target`
       : `${project.reward.externalOpportunity?.advertisedAmountDisplay ?? "External prize"} + points`;
   return (
     <li>
@@ -951,7 +955,10 @@ export function ProjectParticipation({
     return (
       <section className="section" id="start">
         <h2>Project paused</h2>
-        <p>A Slop admin opens the project after review.</p>
+        <p>
+          Do not install this project's skill or start work while the project is
+          paused.
+        </p>
       </section>
     );
   }
@@ -1117,7 +1124,7 @@ function ProjectPaymentHistory({
           Draft a project update
         </Link>
         {project.escrow && (
-          <Link href={`/projects/${project.slug}/awards`}>Review awards</Link>
+          <Link href={`/projects/${project.slug}/awards`}>Monthly awards</Link>
         )}
       </div>
       {directState.status === "error" && !externalPrize ? (
@@ -1411,7 +1418,7 @@ function ProjectPage({
                     monthlyPoolUnfunded(project.reward) ? (
                       UNFUNDED_POOL_HEADLINE
                     ) : (
-                      `${monthlyPoolCapLabel(project.reward)} / mo`
+                      `${monthlyPoolCapLabel(project)} / mo`
                     )
                   ) : (
                     <>
@@ -1503,6 +1510,7 @@ function ProjectPage({
             view={view}
           />
         ) : null}
+        <ProjectRiskFlag key={`flag:${project.id}`} projectId={project.id} />
       </div>
     </main>
   );
@@ -1575,17 +1583,17 @@ function HowItWorksPage() {
               </p>
             </li>
             <li>
-              <strong>3. Review awards</strong>
+              <strong>3. Adjust awards</strong>
               <p>
-                Check each monthly proposal within the funded cap. Record
-                changes and holds with public reasons.
+                Change any proposed amount privately within the cap before the
+                monthly cutoff, or leave it to the automatic default.
               </p>
             </li>
             <li>
               <strong>4. Send payment</strong>
               <p>
-                Commit approved awards to the project escrow. Approval alone
-                does not prove payment.
+                Reserve the final awards in the project escrow. A reservation
+                alone does not prove payment.
               </p>
             </li>
           </ol>
@@ -1722,10 +1730,11 @@ function HowItWorksPage() {
             funding is committed.
           </p>
           <p>
-            Monthly proposals have a 14-day public review. A funded award can
-            wait for a wallet; confirming one later does not require another
-            monthly cycle. Historical records keep their recorded fee and
-            authority rules.
+            The owner may change proposed amounts privately before the monthly
+            cutoff; current allocations are then distributed automatically
+            unless the owner turned that off. A funded award can wait for a
+            wallet; confirming one later does not require another monthly cycle.
+            Historical records keep their recorded fee and authority rules.
           </p>
         </details>
       </section>
@@ -1857,12 +1866,12 @@ function HowItWorksPage() {
           </p>
         </details>
         <details>
-          <summary>What is the 14-day review?</summary>
+          <summary>Who decides the monthly amounts?</summary>
           <p>
-            It reviews the monthly allocation, not your code. After the freeze
-            the proposal is public for 14 days, and the maintainer may approve,
-            hold, exclude, reduce, or increase rows, each with a public reason.
-            It is separate from pull request reviews on GitHub.
+            The project owner. After a month closes, the owner may change
+            proposed amounts privately until the monthly cutoff. Slop publishes
+            the final awards and their payment evidence, not the changes. This
+            is separate from pull request reviews on GitHub.
           </p>
         </details>
       </section>
@@ -2290,11 +2299,11 @@ function SponsorsPage({
           <li>
             <strong>03 · You decide and sign</strong>
             <p>
-              Maintainers review proposed awards within the cap and record
-              changes with a public reason. The project owner commits approved
-              awards to the project escrow, which pays them from reserved funds.
-              Slop marks an award paid only when finalized on-chain evidence
-              reconciles the award and the fee.
+              The project owner may change proposed awards privately within the
+              cap until the monthly cutoff, when the current allocations are
+              finalized. The owner reserves them in the project escrow, which
+              pays them from reserved funds. Slop marks an award paid only when
+              finalized on-chain evidence reconciles the award and the fee.
             </p>
           </li>
         </ol>
@@ -2304,8 +2313,9 @@ function SponsorsPage({
             <ul>
               <li>The monthly cap, with exact-cycle overrides.</li>
               <li>
-                Maintainers may adjust proposed awards within the cap, with a
-                public reason. Amount changes restart the 14-day review.
+                Proposed awards may change privately within the cap before the
+                monthly cutoff. Automatic monthly payment is on by default and
+                can be turned off.
               </li>
               <li>
                 Whether to add a named review budget as a second cash line.
@@ -3017,7 +3027,20 @@ function AppContent({ route }: { route: Route }) {
     content = project ? (
       <ProjectPage project={project} retry={retry} state={state} />
     ) : (
-      <NotFound title="Project not found" />
+      <main className="shell route-main">
+        <h1>Project not found</h1>
+        <p>
+          This project is not available in the public registry. If you flagged
+          it, sign in to view or withdraw your own flag.
+        </p>
+        <ProjectRiskFlag
+          key={`flag:${route.projectId}`}
+          projectId={route.projectId ?? ""}
+        />
+        <p>
+          <Link href="/">See open projects</Link>
+        </p>
+      </main>
     );
   } else if (route.kind === "funding-project") {
     const project = findProject(route.projectId ?? "");

@@ -226,3 +226,131 @@ export async function signedVettingHeaders(
     "x-slop-vetting-signature": btoa(String.fromCharCode(...signature)),
   };
 }
+
+/**
+ * A harmless bounded malicious-code scan result (`slop-vetting-result-v2`).
+ * The private report is the retained trace fixture, the inventory is the
+ * retained review-input fixture and the dependency lock is retained too, so
+ * `retain(assessmentId, runId)` makes a clean result admissible.
+ */
+export function vettingScanResult(
+  target: VettingFixtureTarget,
+  disposition: "clean" | "incomplete" | "malicious",
+  options: {
+    runId?: string;
+    reusedAssessmentId?: string | null;
+    /** Escalates the primary review so a specialist must clear it. */
+    ambiguous?: boolean;
+    specialist?: boolean;
+  } = {},
+) {
+  const inventory = VETTING_EVIDENCE_OBJECTS[1].sha256;
+  const complete = (items: number) => ({ state: "complete", items });
+  const review = (role: "primary" | "specialist") => ({
+    provider: role === "primary" ? "anthropic" : "openai",
+    model: role === "primary" ? "claude-opus-5-5" : "gpt-5.5",
+    promptPolicyRevision: "slop-scan-review-1",
+    inputManifestSha256: inventory,
+    runId: `${role}-scan-${target.revision}`,
+    status: "completed",
+    verdict:
+      disposition === "malicious"
+        ? "malicious-suspected"
+        : role === "primary" && options.ambiguous
+          ? "findings"
+          : "no-findings",
+    risk:
+      disposition === "malicious"
+        ? "high"
+        : role === "primary" && options.ambiguous
+          ? "ambiguous"
+          : "low",
+    findingCount:
+      disposition === "malicious" || (role === "primary" && options.ambiguous)
+        ? 1
+        : 0,
+  });
+  return {
+    schemaVersion: "slop-vetting-result-v2",
+    assessmentId: target.assessmentId,
+    projectId: target.projectId,
+    revision: target.revision,
+    manifestSha256: target.manifestSha256,
+    disposition,
+    policyVersion: "scan-policy-1",
+    assessed: {
+      repository: target.repository,
+      commitSha: target.commitSha,
+      templateSha256: target.templateSha256,
+      inputManifestSha256: inventory,
+      dependencyLocks: [
+        { path: "bun.lock", sha256: VETTING_EVIDENCE_OBJECTS[5].sha256 },
+      ],
+    },
+    scan: {
+      runId: options.runId ?? `scan-run-${target.revision}`,
+      startedAt: "2026-10-18T11:00:00.000Z",
+      completedAt: "2026-10-18T11:05:00.000Z",
+      reportSha256: VETTING_TRACE_SHA,
+    },
+    coverage: {
+      source: complete(42),
+      manifests: complete(2),
+      dependencies: complete(1),
+      installScripts: complete(1),
+      downloads:
+        disposition === "incomplete"
+          ? { state: "partial", items: 1 }
+          : complete(0),
+      agentInstructions: complete(1),
+    },
+    checks: {
+      "wallet-drainer": "passed",
+      "credential-theft":
+        disposition === "malicious" || options.ambiguous ? "flagged" : "passed",
+      "secret-exfiltration": "passed",
+      "unsafe-execution": "passed",
+      "prompt-injection": "passed",
+    },
+    visibilityGaps:
+      disposition === "incomplete"
+        ? ["A postinstall download was not retrievable"]
+        : [],
+    execution: null,
+    reusedAssessmentId: options.reusedAssessmentId ?? null,
+    primaryReview: review("primary"),
+    specialistReview:
+      options.specialist || disposition === "malicious"
+        ? review("specialist")
+        : null,
+    artifacts: [],
+    findings:
+      disposition === "malicious"
+        ? [
+            {
+              severity: "critical",
+              category: "credential-theft",
+              summary: "A postinstall script reads the browser wallet store",
+              evidence: "scripts/postinstall.js:12",
+            },
+          ]
+        : options.ambiguous
+          ? [
+              {
+                severity: "medium",
+                category: "credential-theft",
+                summary: "A script reads ~/.npmrc to choose a registry",
+                evidence: "scripts/registry.js:4",
+              },
+            ]
+          : [],
+    confirmation:
+      disposition === "malicious"
+        ? {
+            basis: "verified-source-evidence",
+            rule: "standing-rule-credential-theft",
+            evidence: ["scripts/postinstall.js:12"],
+          }
+        : null,
+  };
+}

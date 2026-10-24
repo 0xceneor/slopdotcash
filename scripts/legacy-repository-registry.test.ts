@@ -103,9 +103,12 @@ async function submit(id: string): Promise<{ status: number; body: unknown }> {
       fetch: async () =>
         Response.json({ message: "Not Found" }, { status: 404 }),
     },
-    repositoryControl: async () => ({
-      state: "proven",
-      reason: "@applicant owns the repository",
+    repositoryControl: async () => ({ state: "matched" }),
+    repositoryAccess: async () => ({
+      installation: "installed",
+      installationId: 1,
+      permission: "admin",
+      roleName: "admin",
     }),
   };
   const response = await handleProjectApi(

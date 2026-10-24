@@ -108,7 +108,9 @@ activate intake or prove that GitHub or Surplus is available.
   `not-private-report` and uses the manual claim path. The verified case,
   its `submit` or `submit-direct` event (the reporter's own action; the
   detail records `verifiedBy: "github"`), routing fields, the access log and the inbox rows commit with the
-  submission transition. The receipt time is GitHub's `created_at`
+  submission transition. The inbox rows are the technical approvers' case
+  notice and the reporter's generic `security_report_received` receipt, which
+  asks for no acknowledgment. The receipt time is GitHub's `created_at`
   (`receivedAtSource: "github-verified"`), the verifier is the sentinel
   `github`, and `receipt_evidence_digest` stores the SHA-256 of the
   advisory fields GitHub returned.

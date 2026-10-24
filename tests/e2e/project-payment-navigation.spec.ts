@@ -61,6 +61,9 @@ async function fixtures(page: Page) {
   await page.route("**/api/v1/points/**", (route) =>
     route.fulfill({ json: null }),
   );
+  await page.route("**/api/v1/project-session", (route) =>
+    route.fulfill({ json: { session: null } }),
+  );
   await page.route("**/api/v1/slopbot/summary", (route) =>
     route.fulfill({ json: { repositories: [] } }),
   );
@@ -320,5 +323,68 @@ test("a late previous payment request cannot overwrite a retried project", async
     );
   } finally {
     previousResponse.release();
+  }
+});
+
+test("a flag draft does not follow browser history to another project", async ({
+  page,
+}) => {
+  await fixtures(page);
+  await page.route("**/api/v1/project-session", (route) =>
+    route.fulfill({
+      json: {
+        session: { githubId: "4242", githubLogin: "member", admin: false },
+      },
+    }),
+  );
+  await page.route("**/api/v1/payments/projects/*/direct-transfers", (route) =>
+    route.fulfill({ json: { transfers: [], totalMicro: "0" } }),
+  );
+  const pending = gate();
+  let hold = false;
+  let held = false;
+  await page.route("**/api/v1/project-flags/*", async (route) => {
+    if (
+      hold &&
+      new URL(route.request().url()).pathname.endsWith(`/${nextProject}`)
+    ) {
+      held = true;
+      await pending.ready;
+    }
+    await route.fulfill({
+      json: { flag: null, restriction: "clear", pausedByFlags: false },
+    });
+  });
+  try {
+    await page.goto(`${site}/projects/${nextProject}`);
+    await page
+      .locator(".breadcrumb")
+      .getByRole("link", { name: "Projects", exact: true })
+      .click();
+    await page
+      .locator(`a.project-card[href="/projects/${firstProject}"]`)
+      .click();
+    await page
+      .getByText("Report malicious code in this project", { exact: true })
+      .click();
+    await page
+      .getByRole("textbox", { name: /^Evidence/u })
+      .fill("Evidence for the first project only");
+    hold = true;
+    await page.evaluate(() => window.history.go(-2));
+    await expect(page.locator(".breadcrumb")).toHaveText("Projects/Slop");
+    await expect.poll(() => held).toBe(true);
+    await expect(page.getByRole("textbox", { name: /^Evidence/u })).toHaveCount(
+      0,
+    );
+    pending.release();
+    await page
+      .getByText("Report malicious code in this project", { exact: true })
+      .click();
+    await expect(page.getByRole("textbox", { name: /^Evidence/u })).toHaveValue(
+      "",
+    );
+  } finally {
+    pending.release();
   }
 });

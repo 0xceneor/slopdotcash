@@ -1,4 +1,8 @@
-import { ESCROW_NETWORKS, type EscrowChain } from "../escrow-policy.mjs";
+import {
+  ESCROW_NETWORKS,
+  type EscrowChain,
+  MAX_BASE_UNITS,
+} from "../escrow-policy.mjs";
 
 export type PaymentChain = EscrowChain;
 /**
@@ -64,8 +68,7 @@ export interface DirectTransfer {
   transactionId: string;
   blockTime: string;
 }
-/** The largest vault amount: EVM and Solana counters are uint128. */
-export const MAX_BASE_UNITS = (1n << 128n) - 1n;
+export { isBaseUnits, MAX_BASE_UNITS } from "../escrow-policy.mjs";
 export type PayoutPolicy = "ordinary" | "security-bounty";
 /** The 2% payout fee is deducted from the gross award, in base units of the award asset. */
 export function payoutFee(
@@ -80,13 +83,6 @@ export function payoutFee(
   }
   if (policy !== "ordinary") throw new Error("Unknown payout policy");
   return gross / 50n;
-}
-export function isBaseUnits(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    /^(0|[1-9][0-9]{0,38})$/.test(value) &&
-    BigInt(value) <= MAX_BASE_UNITS
-  );
 }
 export function isAssetDecimals(value: unknown): value is number {
   return (

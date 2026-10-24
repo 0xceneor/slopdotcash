@@ -7,6 +7,11 @@
  * spends GitHub's rate limit. The browser's own repository lookup is mocked
  * from the same facts.
  *
+ * Contributor flags read account facts: `GET /user/:id` and the member's
+ * merged pull requests through `GET /repos/:owner/:repo/issues?creator=`.
+ * Accounts are unknown until a test sets them with
+ * `PUT /__fixture/github-users/:id?login=&createdAt=&merged=`.
+ *
  * It also stands in for the automatic private intake GitHub calls: the
  * intake App's OAuth authorization and code exchange, `/user`, the App
  * installation check, and private vulnerability reports. Advisories live in
@@ -359,6 +364,54 @@ async function handlePrivateIntake(state, request, response, url) {
 }
 
 /**
+ * Account facts for contributor flag eligibility. Every merged pull request
+ * the fixture reports belongs to the repository that was asked about.
+ */
+function handleGithubUsers(users, request, response, url) {
+  const send = (status, body) => {
+    response.writeHead(status, { "content-type": "application/json" });
+    response.end(body === undefined ? "" : JSON.stringify(body));
+    return true;
+  };
+  const control = /^\/__fixture\/github-users\/([1-9][0-9]*)$/u.exec(
+    url.pathname,
+  );
+  if (request.method === "PUT" && control) {
+    users.set(control[1], {
+      id: Number(control[1]),
+      login: url.searchParams.get("login") ?? "",
+      type: "User",
+      created_at: url.searchParams.get("createdAt") ?? "",
+      merged: Number(url.searchParams.get("merged") ?? "0"),
+    });
+    return send(204);
+  }
+  if (request.method !== "GET") return false;
+  const user = /^\/user\/([1-9][0-9]*)$/u.exec(url.pathname);
+  if (user) {
+    const found = users.get(user[1]);
+    if (found === undefined) return send(404, { message: "Not Found" });
+    const { merged: _merged, ...facts } = found;
+    return send(200, facts);
+  }
+  if (/^\/repos\/[^/]+\/[^/]+\/issues$/u.test(url.pathname)) {
+    const creator = url.searchParams.get("creator");
+    const found = [...users.values()].find(
+      (entry) => entry.login.toLowerCase() === creator?.toLowerCase(),
+    );
+    return send(
+      200,
+      Array.from({ length: found?.merged ?? 0 }, (_, index) => ({
+        number: index + 1,
+        user: { id: found.id, login: found.login },
+        pull_request: { merged_at: "2026-09-01T00:00:00Z" },
+      })),
+    );
+  }
+  return false;
+}
+
+/**
  * The Slopbot GitHub App's view, reached only by the local Slopbot Worker
  * under `/__slopbot`. Slopbot starts uninstalled everywhere. When installed,
  * a repository owner has admin access and anyone else has no access, unless
@@ -446,6 +499,7 @@ export function startGitHubApiFixture(port) {
   // Private vulnerability reporting per repository; on unless a test sets it.
   const intake = new Map();
   const privateIntake = privateIntakeFixture();
+  const githubUsers = new Map();
   const slopbot = {
     installations: new Map(),
     permissions: new Map(),
@@ -455,6 +509,7 @@ export function startGitHubApiFixture(port) {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
     const path = url.pathname;
     if (handleSlopbotApp(slopbot, request, response, path)) return;
+    if (handleGithubUsers(githubUsers, request, response, url)) return;
     try {
       if (await handlePrivateIntake(privateIntake, request, response, url))
         return;

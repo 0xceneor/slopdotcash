@@ -1,20 +1,17 @@
 # Reward cycles
 
-Reward state is a public, append-only Git workflow. Each closed cycle lives at
-`cycles/<project-id>/<YYYY-MM>/`. Escrow is the only funding mode, so every
-new cycle is an escrow cycle.
+Monthly awards no longer create files here. The trusted monthly workflow
+stores each funded project's proposed allocation privately in D1; the owner
+changes amounts privately, and the owner or the automatic cutoff freezes the
+final allocation (see "Monthly allocations and the automatic monthly
+coordinator" in `backend/payments/README.md`). The public record of a month
+is its final awards and their finalized payment evidence. No review pull
+request, public decision or public adjustment reason exists for new months.
 
-## Escrow cycles
+This directory keeps historical cycle records unchanged. A closed cycle lives
+at `cycles/<project-id>/<YYYY-MM>/`.
 
-The trusted first-of-month workflow first runs `projects:sync` against
-`https://slop.cash`, because projects live only in the D1 registry. It then
-runs `rewards:close-month`. For every active, verified project whose escrow
-policy is effective for the closed month, it writes
-`cycles/<project-id>/<YYYY-MM>/escrow-v2/` and opens a review PR that also
-carries the synced registry snapshot. A project without an effective escrow
-policy has no payable cycle and is skipped.
-Existing complete cycles are left untouched; a directory that holds only one of
-the proposal and the source snapshot is refused as partial.
+## Historical escrow cycles
 
 An escrow cycle directory holds only these files:
 
@@ -26,18 +23,9 @@ An escrow cycle directory holds only these files:
 - `github-identities.json`: the numeric GitHub identities of the leaders;
 - `proposal.json`: the deterministic gross proposal;
 - `decisions.json` (optional): the owner's per-row decisions, each with a
-  public reason for a changed amount;
+  public reason for a changed amount, under the rules of that time;
 - `platform-approvals.json` (optional): platform approvals bound to the exact
   proposal and decisions digests.
-
-`bun run rewards:plan-escrow` produces unsigned owner requests from a
-review-complete proposal. Run `projects:sync` first. The planner checks that
-its local policy matches both the live D1 project and the exact immutable
-revision bytes. It records the revision URL, number, and digest in
-`currentDeploymentPublication`. A changed or unavailable registry record stops
-the plan. The financial policy must still match the reviewed cycle archive.
-Proposal, decision, and separate approval records require exact-byte merged
-PR evidence on `development`; the existing review period still applies.
 
 The escrow contract enforces reserved awards, the 2%
 fee, and exact-once payment. No command in this repository reads a private key,
@@ -68,7 +56,6 @@ from the validated cycle index. This compact funding history ships with the
 application so homepage project cards never wait for the ledger or cycle fetch.
 `cycles:check` rejects a stale copy; refresh timestamps are excluded so
 unchanged history keeps the application asset bytes stable.
-The monthly close workflow includes the regenerated history in its review PR.
 Existing immutable cycle files stay unchanged.
 
 ## Unsafe destination reports

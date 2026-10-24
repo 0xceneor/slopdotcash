@@ -223,35 +223,89 @@ the actual payments API. Wallet registration and signing trigger real local
 binding, payout, and finality indexing. This is local product evidence, not a
 real GitHub OAuth or public testnet deployment result.
 
-### Owner award review
+### Monthly allocations and the automatic monthly coordinator
 
-`GET /api/v1/payments/projects/:projectId/awards/:YYYY-MM` requires the current
-project steward's site session and current GitHub maintainer permission. The
-repository's immutable ID must match the D1 policy. The endpoint loads frozen
-cycle artifacts from a pinned `main` commit of the canonical repository and uses the
-same proposal reconstruction and publication-review checks as the owner CLI.
-It rechecks the D1 revision before returning the result.
+Automatic monthly payment is the PRD default for a funded project (PRD
+sections 6 and 7). Migration `0062` adds its private records.
 
-The response separates published decisions from verified review completion.
-Missing decisions, the 14-day review period, and unavailable approval evidence
-cannot produce a verified review. Held and excluded awards remain visible.
-This read route neither approves awards nor reserves or transfers funds.
-`reviewVerified` does not establish current funding or wallet authority.
+1. **Proposal.** The trusted `monthly-rewards.yml` workflow runs on the first
+   three days of each month, on `main` for `slop-private` and on
+   `development` for `slop-staging`. It freezes the complete ledger of the
+   closed UTC month and runs `bun run rewards:propose-month -- --cycle
+   YYYY-MM --sql <file>`. For each active, verified monthly-pool project whose
+   escrow policy is effective for the month and whose monthly amount is
+   positive, it stores one `monthly_reward_bases` row with the exact D1
+   revision bytes and one `monthly_reward_base_rows` row per scored
+   contributor: integer base units by largest remainder of the shared pool,
+   plus any committed review line. A month's proposal is written once; a later
+   run never adds or replaces rows. Unfunded projects and private bounty
+   programs get no proposal. No cycle file, public decision or review PR is
+   created.
+2. **Private changes.** The owner, with current GitHub write, maintain or
+   admin permission on the immutable repository, changes amounts through
+   `GET /api/v1/payments/projects/:projectId/monthly/:YYYY-MM` and
+   `POST .../monthly/:YYYY-MM/allocations` (`githubUserId`, `grossBase`,
+   `expectedSequence`). The month's total never exceeds its monthly amount, so
+   unallocated funds never raise a later month. Nobody changes their own
+   allocation. Each change is an append-only `monthly_allocation_changes` row
+   kept only for dispute handling and reconciliation; no route returns it and
+   no public reason exists. `POST .../monthly-settings` (`automatic`) turns
+   the automatic default off or on again.
+3. **Execution snapshot.** `POST .../monthly/:YYYY-MM/finalize`
+   (`expectedSequence`) freezes the current allocations now. Otherwise the
+   payments Worker's scheduled coordinator freezes them at the cutoff,
+   unless the owner turned the default off, the project is restricted or
+   paused, or its vault network is not served. The cutoff is
+   `MONTHLY_PAYMENT_SCHEDULE`, `{"firstPeriod":"YYYY-MM",
+   "cutoffSecondsAfterPeriodEnd":N}`, counted from 00:00 UTC on the next
+   1st. Owner decision D1 (24 October 2026) sets the calendar UTC month,
+   `{"firstPeriod":"2026-11","cutoffSecondsAfterPeriodEnd":259200}`: the
+   first automatic month is November 2026 and the cutoff is 72 hours after
+   the month ends. The value lives once in the `[vars]` of `wrangler.toml`
+   and `wrangler.staging.toml`; `workers/payment-executor/configure.mjs`
+   copies it to the ordinary dispatcher. Earlier months are never frozen
+   automatically. Without the value nothing is frozen automatically, and a
+   malformed value fails the run. While the automatic default is on, the
+   allocations cannot change after the cutoff. Either path writes the single
+   `monthly_payment_runs` row of that month; a frozen month accepts no
+   further change.
+4. **Obligations.** The coordinator creates one `monthly_payment_obligations`
+   row per positive award once, only when the vault's finalized free balance
+   (a `vault_snapshots` row newer than 30 minutes) covers the month together
+   with every earlier obligation of the same vault that is still unreserved.
+   An underfunded month waits for a deposit and creates nothing. The steward
+   gets one Inbox payout exception for that month (key
+   `monthly-underfunded:PROJECT:YYYY-MM`), however often the coordinator
+   retries.
+5. **Reservation and payment.** The vault contract accepts `commitAward` only
+   from the owner's wallet, so each obligation waits for the owner on the
+   Awards page. `POST .../monthly/:YYYY-MM/commitment` and
+   `.../solana-commitment` recheck the steward, repository authority, project
+   revision, enforcement state, served network, execution snapshot digest and
+   funded obligation, and return an unsigned plan for that award. Each source
+   digest is fixed per project, month and actor, independent of amount, so the
+   contract refuses a second reservation of the same award. The existing
+   dispatcher and executor then pay reserved awards one recipient at a time;
+   a walletless award stays reserved until its contributor binds a wallet.
+   Award states come from the finalized chain projection.
 
-`POST /api/v1/payments/projects/:projectId/awards/:YYYY-MM/commitment`
-rechecks the current steward, repository authority, published review, frozen
-proposal and decisions, recipient identity, project revision, and enforcement
-state. The request names the reviewed hashes, network and recipient. Only an
-approved positive award on an enabled project and configured network returns
-a commitment plan. It does not change the published decision or send a transaction.
+The public surface shows only final awards and payment evidence from the
+chain. A paused project keeps its funded obligations.
+
+The coordinator keeps its records in `PAYMENTS_DB` with `vault_snapshots` and
+`payment_obligations`, and reads the registry from `REGISTRY_DB`. The Pages
+API reads the same tables from `SLOP_DB`, so in each environment they are the
+same database (`slop-private`, `slop-staging`).
+
+Historical `cycles/<project>/<YYYY-MM>/escrow-v2/` records keep their original
+publication, public-reason and related-party rules; `cycles:check` still
+validates them. They are no longer an input to new commitments.
 
 The EVM browser flow verifies the vault and free balance through the selected
-owner wallet. The Solana flow uses the authenticated `solana-commitment` route
-under the same cycle path: `review` returns an unsigned, simulated transaction
-for the approved award; `check` verifies the exact submitted signature and
+owner wallet. The Solana flow's `review` step returns an unsigned, simulated
+transaction for the award; `check` verifies the exact submitted signature and
 finalized reservation. Solana RPC configuration comes only from the service.
 The browser reconstructs the expected message before requesting the owner's
 signature. Both flows save the pending request before the wallet call and
-support recovery after reload without a second submission. Transaction checks
-do not require the published review to remain available after submission.
-A finalized reservation is a commitment, not a payment.
+support recovery after reload without a second submission. A finalized
+reservation is a commitment, not a payment.

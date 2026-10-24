@@ -22,6 +22,7 @@ import type { GithubActor as Actor } from "../../src/lib/project-contracts";
 import type { SecurityBountyTerms } from "../../src/lib/security-bounty.mjs";
 import { fail } from "../api-error";
 import type { D1QueryStatement as D1Statement } from "../d1";
+import { notifySecurityReportReceived } from "../notifications/events";
 import {
   type AdvisoryFacts,
   type FailureCode,
@@ -767,6 +768,8 @@ async function writeVerifiedCase(
         "INSERT INTO security_case_access_log (case_id, actor_github_id, actor_role, action, at) SELECT ?, ?, 'reporter', 'write', ? WHERE EXISTS (SELECT 1 FROM security_cases WHERE id = ?)",
       )
       .bind(caseId, reporter.githubId, at, caseId),
+    // The reporter's receipt: generic, and it asks for no acknowledgment.
+    notifySecurityReportReceived(deps.db, caseId),
     ...inboxStatements(deps, {
       caseId,
       revision: 1,

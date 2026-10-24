@@ -4093,6 +4093,17 @@ small {
   gap: 0.75rem;
 }
 
+.account-closure {
+  display: grid;
+  gap: 0.75rem;
+  max-width: 40rem;
+  margin-block: 1.5rem;
+}
+
+.account-closure .button {
+  justify-self: start;
+}
+
 /* Contributor profile: tiles, charts and payout states. */
 .profile-page .profile-totals {
   gap: 12px;
@@ -4852,6 +4863,20 @@ small {
 .security-form {
   display: grid;
   gap: 10px;
+}
+
+.project-risk-flag {
+  display: grid;
+  gap: 10px;
+  margin: 24px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.project-risk-flag summary {
+  cursor: pointer;
+  font-weight: 600;
 }
 
 .security-action {
