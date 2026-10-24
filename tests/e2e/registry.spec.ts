@@ -773,14 +773,21 @@ test("the applicant's inbox lists each decision and revision once and keeps the 
   const inbox = await (
     await page.request.get("/api/v1/notifications", { headers: { cookie } })
   ).json();
-  // One row per event: the decision and the revision, never a duplicate.
-  const mine = inbox.notifications.filter(
+  // One row per event: the decision, the revision and, once per assessment,
+  // each earlier scan that could not establish clearance. Never a duplicate.
+  const mine: { kind: string; eventKey: string }[] = inbox.notifications.filter(
     (entry: { subject: string }) => entry.subject === project.id,
   );
-  expect(mine.map((entry: { kind: string }) => entry.kind).sort()).toEqual([
-    "application_approved",
-    "project_revision",
-  ]);
+  const scans = mine.filter((entry) => entry.kind === "project_scan_failed");
+  expect(scans.length).toBeGreaterThan(0);
+  for (const scan of scans)
+    expect(scan.eventKey).toMatch(/^project-scan:[A-Za-z0-9_-]+$/u);
+  expect(
+    mine
+      .filter((entry) => entry.kind !== "project_scan_failed")
+      .map((entry) => entry.kind)
+      .sort(),
+  ).toEqual(["application_approved", "project_revision"]);
   const keys = inbox.notifications.map(
     (entry: { eventKey: string }) => entry.eventKey,
   );
