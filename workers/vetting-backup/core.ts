@@ -1,4 +1,5 @@
 /** Daily private copies of scanner bytes. No HTTP access or source deletion. */
+import type { ProjectD1Database } from "../../backend/projects/cloudflare-persistence";
 import type { R2Bucket } from "../../backend/trace/cloudflare-persistence";
 import { sha256Hex } from "../../backend/trace/validation";
 import {
@@ -23,6 +24,7 @@ type BackupJob = {
   bytes: number;
 };
 export type BackupEnvironment = {
+  EVIDENCE_DATABASE: ProjectD1Database;
   EVIDENCE_SOURCE: ArchiveBucket;
   EVIDENCE_BACKUPS: ArchiveBucket;
   EVIDENCE_BACKUP_QUEUE: { send(job: BackupJob): Promise<void> };
@@ -283,12 +285,21 @@ export async function restoreCheck(
   return { key, sha256: found.sha256, sizeBytes: found.sizeBytes };
 }
 
+/** Calendar-year retention uses the database clock, not a caller-supplied date. */
+export async function pruneAccessAudit(env: BackupEnvironment) {
+  if (env.EVIDENCE_BACKUP_MODE !== "enabled") return;
+  await env.EVIDENCE_DATABASE.prepare(
+    "DELETE FROM vetting_evidence_audit WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 year')",
+  ).run();
+}
+
 export default {
   fetch() {
     return new Response(null, { status: 404 });
   },
   async scheduled(event: { scheduledTime: number }, env: BackupEnvironment) {
     await startDailyBackup(env, event.scheduledTime);
+    await pruneAccessAudit(env);
   },
   async queue(
     batch: { messages: { body: BackupJob; ack(): void; retry(): void }[] },

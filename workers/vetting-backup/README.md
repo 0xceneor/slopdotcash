@@ -24,7 +24,7 @@ The backup bucket must have the approved 30-day lifecycle rule. Each day uses
 a separate prefix, so deleting an original does not make an older backup live
 longer than that rule. A raw-byte backup does not back up D1 assessment,
 inventory, policy or audit rows. D1 recovery, case-closure retention and the
-one-year access-log policy remain separate required controls.
+hosted recovery verification remain separate required controls.
 
 `restoreCheck` verifies the completion receipt and page hash chain, reads the
 selected copied bytes, and restores them under a separate `restore-checks/`
@@ -32,6 +32,22 @@ prefix in a supplied private destination. It checks the restored bytes too.
 It cannot replace a live evidence key. Use an isolated destination with its
 own disposal policy for a live restoration exercise; this source does not
 claim that exercise has occurred.
+
+## Access-log retention
+
+The same daily scheduled invocation removes scanner access audit entries older
+than one calendar year, using the D1 clock. Migration 0067 replaces the blanket
+no-delete trigger with a guard that still refuses deletion of newer or invalidly
+dated records. Updates remain forbidden. A date index bounds the selection work.
+The cleanup acts only on `vetting_evidence_audit`; it does not remove case closure,
+assessment, contributor-trace or payment records. A cleanup failure fails the
+scheduled invocation; it does not qualify as a completed retention run.
+
+Both environments bind their existing private D1 database. Migrations must apply
+before this Worker releases, as the checked-in deployment workflow requires.
+The real local D1 workflow applies the migrations, refuses premature deletion,
+keeps both records while disabled, and removes only an old entry when scheduled.
+Hosted scheduling and retention still need release verification.
 
 ## Release
 

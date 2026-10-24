@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { convertV4MiniflareOptions, Miniflare } from "miniflare";
+import { unstable_splitSqlQuery as splitSqlQuery } from "wrangler";
 
 const directory = await mkdtemp(join(tmpdir(), "slop-backup-workflow-"));
 let runtime;
@@ -27,9 +28,13 @@ try {
     { encoding: "utf8" },
   );
   assert.equal(build.status, 0, build.stderr);
-  const { startDailyBackup, backupPage, restoreCheck } = await import(
-    pathToFileURL(bundle).href
-  );
+  const {
+    default: worker,
+    startDailyBackup,
+    backupPage,
+    restoreCheck,
+    pruneAccessAudit,
+  } = await import(pathToFileURL(bundle).href);
   const workerBundle = join(directory, "worker-entry.mjs");
   const workerBuild = spawnSync(
     "bun",
@@ -50,6 +55,7 @@ try {
       compatibilityDate: "2026-07-30",
       bindings: { EVIDENCE_BACKUP_MODE: "enabled" },
       r2Buckets: ["EVIDENCE_SOURCE", "EVIDENCE_BACKUPS", "RESTORED"],
+      d1Databases: ["EVIDENCE_DATABASE"],
       queueProducers: {
         EVIDENCE_BACKUP_QUEUE: { queueName: "evidence-backup" },
       },
@@ -67,7 +73,26 @@ try {
   const backups = await runtime.getR2Bucket("EVIDENCE_BACKUPS");
   const restored = await runtime.getR2Bucket("RESTORED");
   const queue = await runtime.getQueueProducer("EVIDENCE_BACKUP_QUEUE");
+  const db = await runtime.getD1Database("EVIDENCE_DATABASE");
+  for (const migration of [
+    "0034_vetting_private_evidence.sql",
+    "0067_vetting_audit_retention.sql",
+  ])
+    for (const query of splitSqlQuery(
+      await readFile(`migrations/${migration}`, "utf8"),
+    ))
+      await db.prepare(query).run();
+  await db
+    .prepare(
+      "INSERT INTO vetting_evidence_audit(id,actor,action,assessment_id,created_at) VALUES('old','fixture','read','fixture',strftime('%Y-%m-%dT%H:%M:%fZ','now','-1 year','-1 day')),('recent','fixture','read','fixture',strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+    )
+    .run();
+  await assert.rejects(
+    db.prepare("DELETE FROM vetting_evidence_audit WHERE id='recent'").run(),
+    /one year/,
+  );
   const env = {
+    EVIDENCE_DATABASE: db,
     EVIDENCE_SOURCE: source,
     EVIDENCE_BACKUPS: backups,
     EVIDENCE_BACKUP_QUEUE: queue,
@@ -84,7 +109,20 @@ try {
   const day = new Date(now).toISOString().slice(0, 10);
   await startDailyBackup({ ...env, EVIDENCE_BACKUP_MODE: "off" }, now);
   assert.equal((await backups.list()).objects.length, 0);
-  await startDailyBackup(env, now);
+  await pruneAccessAudit({ ...env, EVIDENCE_BACKUP_MODE: "off" });
+  assert.equal(
+    (
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM vetting_evidence_audit")
+        .first()
+    ).count,
+    2,
+  );
+  await worker.scheduled({ scheduledTime: now }, env);
+  assert.deepEqual(
+    (await db.prepare("SELECT id FROM vetting_evidence_audit").all()).results,
+    [{ id: "recent" }],
+  );
   const completionKey = `daily/${day}/complete.json`;
   const deadline = Date.now() + 30_000;
   let complete = await backups.get(completionKey);

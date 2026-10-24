@@ -10,6 +10,11 @@ EVIDENCE_BACKUP_MODE = "off"
 [triggers]
 crons = ["17 2 * * *"]
 
+[[d1_databases]]
+binding = "EVIDENCE_DATABASE"
+database_name = "slop-private"
+database_id = "1b453124-2709-45af-8389-151a8105c461"
+
 [[r2_buckets]]
 binding = "EVIDENCE_SOURCE"
 bucket_name = "slop-vetting-evidence"
