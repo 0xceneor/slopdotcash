@@ -328,3 +328,41 @@ test("acquired source is reread by digest and its gaps keep the scan incomplete"
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("a bounded result cannot clear findings that exceed its report limit", async () => {
+  const inspection = inspectRepository({
+    files: [
+      ...Array.from({ length: 200 }, (_, index) =>
+        file(
+          `a${String(index).padStart(3, "0")}.ts`,
+          "// Fixture text: ~/.npmrc",
+        ),
+      ),
+      file("z.ts", "// Fixture text: ~/.ssh/id_rsa"),
+    ],
+  });
+  expect(inspection.findings).toHaveLength(201);
+  expect(inspection.findings.at(-1)?.severity).toBe("high");
+  verdict = "no-findings";
+  const primary = await review(
+    inspection.inventory,
+    inspection.inventorySha256,
+  );
+  const specialist = await review(
+    inspection.inventory,
+    inspection.inventorySha256,
+  );
+  const { result } = composeScanResult({
+    queued,
+    inspection,
+    policyVersion: "scan-policy-1",
+    runId: "scan-report-overflow",
+    startedAt: "2026-10-18T11:00:00.000Z",
+    completedAt: "2026-10-18T11:05:00.000Z",
+    primary,
+    specialist,
+  });
+  expect(result.findings).toHaveLength(200);
+  expect(result.visibilityGaps).toContain("More than 200 scan findings");
+  expect(parseVettingScanResult(result).disposition).toBe("incomplete");
+});
