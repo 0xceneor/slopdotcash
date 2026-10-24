@@ -36,14 +36,15 @@ column stays in immutable run history but no longer determines current access.
 The old `accessDurationSeconds` and `evidenceAccessDurationSeconds` policy fields
 are rejected; deployment must supply both explicit durations.
 
-This implements the case lifecycle and access clock, not R2 deletion. Physical
-deletion must be coordinated with daily snapshots; the one-year audit retention
-and hosted restoration qualification remain required before attestation.
+The backup worker implements separately gated R2 deletion after its snapshot
+completes, plus one-year audit retention. See
+[the storage workflow](../../workers/vetting-backup/README.md). Hosted backup,
+deletion and restoration qualification remain required before attestation.
 
-The attestation is an operator assertion. This application does not automatically
-verify or execute physical deletion, legal holds, backup, or recovery. Those
-controls remain external or unresolved. Access expiry is enforced independently;
-it is not proof of physical retention compliance. VET-03 acceptance stays open
+The attestation is an operator assertion. The storage worker performs configured
+backup and retention work, but this does not prove hosted access controls or
+successful recovery. Access expiry is enforced independently; it is not proof
+of physical retention compliance. VET-03 acceptance stays open
 until the responsible humans approve and demonstrate those controls. Policy
 references must identify the approved public access and retention terms; private
 operational evidence must not be published with those terms.

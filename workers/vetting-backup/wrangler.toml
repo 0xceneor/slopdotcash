@@ -6,6 +6,7 @@ preview_urls = false
 
 [vars]
 EVIDENCE_BACKUP_MODE = "off"
+EVIDENCE_RETENTION_MODE = "off"
 
 [triggers]
 crons = ["17 2 * * *"]

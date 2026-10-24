@@ -414,6 +414,7 @@ jobs:
       - name: Publish and verify isolated staging
         env:
           SLOP_VETTING_BACKUP_RELEASE: ${{ vars.SLOP_VETTING_BACKUP_STAGING_RELEASE }}
+          SLOP_VETTING_RETENTION_RELEASE: ${{ vars.SLOP_VETTING_RETENTION_STAGING_RELEASE }}
           SLOP_NOTIFY_RELEASE: ${{ vars.SLOP_NOTIFY_STAGING_RELEASE }}
           SLOP_NOTIFY_MAIL_PILOTS: ${{ vars.SLOP_NOTIFY_STAGING_MAIL_PILOTS }}
           GH_TOKEN: ${{ github.token }}
@@ -676,6 +677,7 @@ jobs:
           SLOP_NOTIFY_MAIL_PILOTS: ${{ vars.SLOP_NOTIFY_MAIL_PILOTS }}
           SLOP_FEE_CONVERTER_RELEASE: ${{ vars.SLOP_FEE_CONVERTER_RELEASE }}
           SLOP_VETTING_BACKUP_RELEASE: ${{ vars.SLOP_VETTING_BACKUP_RELEASE }}
+          SLOP_VETTING_RETENTION_RELEASE: ${{ vars.SLOP_VETTING_RETENTION_RELEASE }}
         # wrangler.toml owns pages_build_output_dir. A positional directory
         # bypasses that deployment contract and must not be added here.
         run: |

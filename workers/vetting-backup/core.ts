@@ -1,14 +1,17 @@
-/** Daily private copies of scanner bytes. No HTTP access or source deletion. */
+/** Private scanner backup and retention. No HTTP access. */
 import type { ProjectD1Database } from "../../backend/projects/cloudflare-persistence";
 import type { R2Bucket } from "../../backend/trace/cloudflare-persistence";
 import { sha256Hex } from "../../backend/trace/validation";
 import {
+  chunkKey,
+  chunkLayout,
   EVIDENCE_CHUNK_BYTES,
   verifiedPart,
 } from "../../backend/vetting/evidence-chunks";
 
 type ListedObject = { key: string; size: number; uploaded: Date };
 export type ArchiveBucket = R2Bucket & {
+  delete(key: string): Promise<void>;
   list(options: { prefix: string; limit: number; cursor?: string }): Promise<{
     objects: ListedObject[];
     truncated: boolean;
@@ -16,6 +19,7 @@ export type ArchiveBucket = R2Bucket & {
   }>;
 };
 type BackupJob = {
+  kind?: "backup" | "cleanup";
   day: string;
   page: number;
   cursor?: string;
@@ -29,6 +33,7 @@ export type BackupEnvironment = {
   EVIDENCE_BACKUPS: ArchiveBucket;
   EVIDENCE_BACKUP_QUEUE: { send(job: BackupJob): Promise<void> };
   EVIDENCE_BACKUP_MODE?: string;
+  EVIDENCE_RETENTION_MODE?: string;
 };
 type Copy = {
   key: string;
@@ -87,7 +92,21 @@ export async function startDailyBackup(
   scheduledTime: number,
 ) {
   if (env.EVIDENCE_BACKUP_MODE !== "enabled") return;
-  const day = new Date(scheduledTime).toISOString().slice(0, 10);
+  const requestedDay = new Date(scheduledTime).toISOString().slice(0, 10);
+  await env.EVIDENCE_DATABASE.prepare(
+    "INSERT OR IGNORE INTO vetting_storage_cycles(day,started_at,phase) VALUES(?,?,'backup')",
+  )
+    .bind(requestedDay, new Date(scheduledTime).toISOString())
+    .run();
+  const cycle = await env.EVIDENCE_DATABASE.prepare(
+    "SELECT day,started_at,phase FROM vetting_storage_cycles WHERE phase <> 'complete' LIMIT 1",
+  ).first<{ day: string; started_at: string; phase: string }>();
+  if (!cycle) return;
+  const day = cycle.day;
+  if (cycle.phase === "cleanup") {
+    await enqueueCleanup(env, day);
+    return;
+  }
   const startKey = `${root(day)}/start.json`;
   if (!(await jsonRecord(env.EVIDENCE_BACKUPS, startKey))) {
     await immutable(
@@ -96,14 +115,16 @@ export async function startDailyBackup(
       encoder.encode(
         JSON.stringify({
           day,
-          startedAt: new Date(scheduledTime).toISOString(),
+          startedAt: cycle.started_at,
         }),
       ),
       "application/json",
     );
   }
-  if (await jsonRecord(env.EVIDENCE_BACKUPS, `${root(day)}/complete.json`))
+  if (await jsonRecord(env.EVIDENCE_BACKUPS, `${root(day)}/complete.json`)) {
+    await finishBackup(env, day);
     return;
+  }
   await env.EVIDENCE_BACKUP_QUEUE.send({
     day,
     page: 0,
@@ -116,6 +137,17 @@ export async function startDailyBackup(
 export async function backupPage(env: BackupEnvironment, job: BackupJob) {
   if (env.EVIDENCE_BACKUP_MODE !== "enabled")
     throw new Error("Evidence backup is disabled");
+  const cycle = await env.EVIDENCE_DATABASE.prepare(
+    "SELECT phase FROM vetting_storage_cycles WHERE day=?",
+  )
+    .bind(job.day)
+    .first<{ phase: string }>();
+  if (!cycle) throw new Error("Unknown storage cycle");
+  if (cycle.phase === "complete") return;
+  if (cycle.phase === "cleanup") {
+    await enqueueCleanup(env, job.day);
+    return;
+  }
   if (!Number.isSafeInteger(job.page) || job.page < 0)
     throw new Error("Invalid backup page");
   const start = await jsonRecord<{ day: string; startedAt: string }>(
@@ -225,6 +257,116 @@ export async function backupPage(env: BackupEnvironment, job: BackupJob) {
     ),
     "application/json",
   );
+  await finishBackup(env, job.day);
+}
+
+async function enqueueCleanup(env: BackupEnvironment, day: string) {
+  await env.EVIDENCE_BACKUP_QUEUE.send({
+    kind: "cleanup",
+    day,
+    page: 0,
+    previous: null,
+    objects: 0,
+    bytes: 0,
+  });
+}
+async function finishBackup(env: BackupEnvironment, day: string) {
+  await env.EVIDENCE_DATABASE.prepare(
+    "UPDATE vetting_storage_cycles SET phase='cleanup' WHERE day=? AND phase='backup'",
+  )
+    .bind(day)
+    .run();
+  await enqueueCleanup(env, day);
+}
+
+/** Called only by the same single-consumer queue after a complete snapshot. */
+export async function cleanupEvidence(env: BackupEnvironment, day: string) {
+  if (env.EVIDENCE_BACKUP_MODE !== "enabled")
+    throw new Error("Evidence backup is disabled");
+  const cycle = await env.EVIDENCE_DATABASE.prepare(
+    "SELECT phase FROM vetting_storage_cycles WHERE day=?",
+  )
+    .bind(day)
+    .first<{ phase: string }>();
+  if (cycle?.phase === "complete") return;
+  if (cycle?.phase !== "cleanup") throw new Error("Snapshot is not complete");
+  if (!(await jsonRecord(env.EVIDENCE_BACKUPS, `${root(day)}/complete.json`)))
+    throw new Error("Snapshot completion receipt is missing");
+  if (env.EVIDENCE_RETENTION_MODE === "enabled") {
+    const rows =
+      (
+        await env.EVIDENCE_DATABASE.prepare(
+          `SELECT o.assessment_id,o.run_id,o.sha256,o.object_key,o.chunks,o.size_bytes
+       FROM vetting_evidence_objects o JOIN vetting_evidence_case_closures c ON c.assessment_id=o.assessment_id
+       WHERE julianday(c.closed_at,'+90 days') <= julianday('now')
+         AND NOT EXISTS (SELECT 1 FROM vetting_evidence_deletions d WHERE d.assessment_id=o.assessment_id AND d.run_id=o.run_id AND d.sha256=o.sha256)
+       ORDER BY o.object_key LIMIT 16`,
+        ).all<{
+          assessment_id: string;
+          run_id: string;
+          sha256: string;
+          object_key: string;
+          chunks: string | null;
+          size_bytes: number;
+        }>()
+      ).results ?? [];
+    for (const row of rows) {
+      if (
+        !/^[a-zA-Z0-9_-]{1,100}$/.test(row.assessment_id) ||
+        !/^[a-zA-Z0-9_-]{1,100}$/.test(row.run_id) ||
+        !/^[a-f0-9]{64}$/.test(row.sha256) ||
+        row.object_key !==
+          `vetting/${row.assessment_id}/${row.run_id}/${row.sha256}`
+      )
+        throw new Error("Invalid retained evidence key");
+      const parts =
+        row.chunks === null
+          ? [
+              {
+                key: row.object_key,
+                sha256: row.sha256,
+                sizeBytes: row.size_bytes,
+              },
+            ]
+          : chunkLayout(JSON.parse(row.chunks), row.size_bytes).map((part) => ({
+              ...part,
+              key: chunkKey(row.object_key, part),
+            }));
+      if (
+        row.chunks !== null &&
+        (await env.EVIDENCE_SOURCE.head(row.object_key))
+      )
+        throw new Error("Unexpected object at chunked evidence root");
+      // A complete snapshot alone does not prove this exact inventory was copied.
+      // Check each saved part before deleting any part of the source object.
+      for (const part of parts)
+        await verifiedPart(
+          env.EVIDENCE_BACKUPS,
+          `${root(day)}/objects/${part.key}`,
+          part.sha256,
+          part.sizeBytes,
+        );
+      for (const part of parts) {
+        await env.EVIDENCE_SOURCE.delete(part.key);
+        if (await env.EVIDENCE_SOURCE.head(part.key))
+          throw new Error("Evidence deletion was not confirmed");
+      }
+      await env.EVIDENCE_DATABASE.prepare(
+        "INSERT OR IGNORE INTO vetting_evidence_deletions(assessment_id,run_id,sha256,deleted_at) VALUES(?,?,?,strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+      )
+        .bind(row.assessment_id, row.run_id, row.sha256)
+        .run();
+    }
+    if (rows.length) {
+      await enqueueCleanup(env, day);
+      return;
+    }
+  }
+  await env.EVIDENCE_DATABASE.prepare(
+    "UPDATE vetting_storage_cycles SET phase='complete',finished_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE day=? AND phase='cleanup'",
+  )
+    .bind(day)
+    .run();
 }
 
 /** Restore into a separate check prefix; never overwrite a live evidence object. */
@@ -307,7 +449,9 @@ export default {
   ) {
     for (const message of batch.messages) {
       try {
-        await backupPage(env, message.body);
+        if (message.body.kind === "cleanup")
+          await cleanupEvidence(env, message.body.day);
+        else await backupPage(env, message.body);
         message.ack();
       } catch {
         message.retry();

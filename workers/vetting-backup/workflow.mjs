@@ -34,6 +34,7 @@ try {
     backupPage,
     restoreCheck,
     pruneAccessAudit,
+    cleanupEvidence,
   } = await import(pathToFileURL(bundle).href);
   const workerBundle = join(directory, "worker-entry.mjs");
   const workerBuild = spawnSync(
@@ -74,9 +75,17 @@ try {
   const restored = await runtime.getR2Bucket("RESTORED");
   const queue = await runtime.getQueueProducer("EVIDENCE_BACKUP_QUEUE");
   const db = await runtime.getD1Database("EVIDENCE_DATABASE");
+  await db
+    .prepare(
+      "CREATE TABLE vetting_assessments(id TEXT PRIMARY KEY,state TEXT,completed_at TEXT)",
+    )
+    .run();
   for (const migration of [
     "0034_vetting_private_evidence.sql",
+    "0035_vetting_evidence_chunks.sql",
+    "0066_vetting_case_retention.sql",
     "0067_vetting_audit_retention.sql",
+    "0068_vetting_storage_cycles.sql",
   ])
     for (const query of splitSqlQuery(
       await readFile(`migrations/${migration}`, "utf8"),
@@ -134,6 +143,17 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 100));
     complete = await backups.get(completionKey);
   }
+  while (
+    (
+      await db
+        .prepare("SELECT phase FROM vetting_storage_cycles WHERE day=?")
+        .bind(day)
+        .first()
+    ).phase !== "complete"
+  ) {
+    assert.ok(Date.now() < deadline, "storage cycle did not finish");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
   const receipt = await complete.json();
   assert.equal(receipt.objects, fixtures.length);
   assert.equal(receipt.pages, 3);
@@ -190,13 +210,174 @@ try {
     null,
   );
 
+  // Retention uses real D1 closure records and raw R2 bytes. Keep open and
+  // recently closed cases, delete only expired cases, including chunked files.
+  const retainedCases = [];
+  for (const [id, age, chunked] of [
+    ["vet_expired_chunks", 91, true],
+    ["vet_expired_single", 91, false],
+    ["vet_recent_case", 89, false],
+    ["vet_open_case", null, false],
+  ]) {
+    await db
+      .prepare("INSERT INTO vetting_assessments VALUES(?,'incomplete',?)")
+      .bind(id, new Date(now).toISOString())
+      .run();
+    if (age !== null)
+      await db
+        .prepare(
+          "INSERT INTO vetting_evidence_case_closures VALUES(?,?, 'fixture', 'fixture closure')",
+        )
+        .bind(id, new Date(now - age * 86400_000).toISOString())
+        .run();
+    const data = Buffer.alloc(chunked ? 9 * 1024 * 1024 : 10, 7);
+    const sha = digest(data),
+      key = `vetting/${id}/run/${sha}`;
+    const chunks = chunked
+      ? [data.subarray(0, 8 * 1024 * 1024), data.subarray(8 * 1024 * 1024)].map(
+          (part, index) => ({
+            index,
+            sha256: digest(part),
+            sizeBytes: part.length,
+          }),
+        )
+      : null;
+    await db
+      .prepare(
+        "INSERT INTO vetting_evidence_runs VALUES(?,'run',?,?,?,'{}',?,?)",
+      )
+      .bind(
+        id,
+        sha,
+        sha,
+        "{}",
+        new Date(now).toISOString(),
+        new Date(now).toISOString(),
+      )
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO vetting_evidence_objects(assessment_id,run_id,sha256,size_bytes,kind,label,content_type,object_key,chunks) VALUES(?,'run',?,?,'trace','fixture','application/octet-stream',?,?)",
+      )
+      .bind(id, sha, data.length, key, chunks ? JSON.stringify(chunks) : null)
+      .run();
+    const keys = chunks
+      ? chunks.map((part) => `${key}/chunks/${part.index}/${part.sha256}`)
+      : [key];
+    if (chunks)
+      for (const part of chunks) {
+        const bytes = data.subarray(
+          part.index * 8 * 1024 * 1024,
+          part.index * 8 * 1024 * 1024 + part.sizeBytes,
+        );
+        await source.put(keys[part.index], bytes, options(bytes));
+      }
+    else await source.put(key, data, options(data));
+    retainedCases.push({ id, age, keys });
+  }
+  const cleanupJobs = [];
+  const retentionEnv = {
+    ...env,
+    EVIDENCE_RETENTION_MODE: "enabled",
+    EVIDENCE_BACKUP_QUEUE: { send: async (job) => cleanupJobs.push(job) },
+  };
+  const retentionTime = now + 86400_000,
+    retentionDay = new Date(retentionTime).toISOString().slice(0, 10);
+  await startDailyBackup(retentionEnv, retentionTime);
+  await assert.rejects(
+    cleanupEvidence(retentionEnv, retentionDay),
+    /Snapshot is not complete/,
+  );
+  // A later cron cannot start a concurrent snapshot or steal the active cycle.
+  await startDailyBackup(retentionEnv, retentionTime + 86400_000);
+  assert.equal(
+    (
+      await db
+        .prepare(
+          "SELECT COUNT(*) AS count FROM vetting_storage_cycles WHERE phase <> 'complete'",
+        )
+        .first()
+    ).count,
+    1,
+  );
+  let injectedFailure = false;
+  while (cleanupJobs.length) {
+    const job = cleanupJobs.shift();
+    if (job.kind !== "cleanup") {
+      await backupPage(retentionEnv, job);
+      continue;
+    }
+    if (!injectedFailure) {
+      injectedFailure = true;
+      const firstKey = retainedCases[0].keys[0];
+      const savedPart = Buffer.from(
+        await (await source.get(firstKey)).arrayBuffer(),
+      );
+      const copyKey = `daily/${retentionDay}/objects/${firstKey}`;
+      await backups.delete(copyKey);
+      await assert.rejects(cleanupEvidence(retentionEnv, retentionDay));
+      assert.ok(
+        await source.head(firstKey),
+        "missing backup must prevent source deletion",
+      );
+      await backups.put(copyKey, savedPart, options(savedPart));
+      let deletes = 0;
+      const interruptSource = new Proxy(source, {
+        get(target, property) {
+          if (property === "delete")
+            return async (key) => {
+              if (++deletes === 2)
+                throw new Error("injected deletion interruption");
+              return target.delete(key);
+            };
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      await assert.rejects(
+        cleanupEvidence(
+          { ...retentionEnv, EVIDENCE_SOURCE: interruptSource },
+          retentionDay,
+        ),
+        /injected deletion interruption/,
+      );
+    }
+    await cleanupEvidence(retentionEnv, job.day);
+  }
+  for (const item of retainedCases)
+    for (const key of item.keys) {
+      assert.equal(Boolean(await source.head(key)), item.age !== 91);
+      assert.ok(
+        await backups.head(`daily/${retentionDay}/objects/${key}`),
+        "cleanup preceded the verified backup",
+      );
+    }
+  assert.equal(
+    (
+      await db
+        .prepare("SELECT COUNT(*) AS count FROM vetting_evidence_deletions")
+        .first()
+    ).count,
+    2,
+  );
+  assert.ok(await source.head("permanent-contributor-trace"));
+  assert.equal(
+    (
+      await db
+        .prepare("SELECT phase FROM vetting_storage_cycles WHERE day=?")
+        .bind(retentionDay)
+        .first()
+    ).phase,
+    "complete",
+  );
+
   // Storage corruption prevents completion; it is never a skipped object.
   const bad = Buffer.from("bad source");
   await source.put("vetting/000-corrupt/run/evidence", bad, {
     customMetadata: { sha256: "0".repeat(64) },
   });
   const jobs = [];
-  const later = now + 86_400_000;
+  const later = now + 3 * 86_400_000;
   const failureEnv = {
     ...env,
     EVIDENCE_BACKUP_QUEUE: {
@@ -214,7 +395,7 @@ try {
     null,
   );
   console.log(
-    "PASS: real queue/R2 pagination, independent grant-free backup, verified restore, source preservation, scope isolation and corruption refusal",
+    "PASS: real queue/R2 pagination, independent grant-free backup, verified restore, source preservation, scope isolation, interruption-safe expired-case deletion and corruption refusal",
   );
 } finally {
   await runtime?.dispose();
