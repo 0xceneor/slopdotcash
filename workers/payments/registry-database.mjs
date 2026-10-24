@@ -41,3 +41,34 @@ export async function readRegistryDatabase() {
     await readFile(new URL("../../wrangler.toml", import.meta.url), "utf8"),
   );
 }
+
+/**
+ * The owner-decided `MONTHLY_PAYMENT_SCHEDULE` (decision D1) of the Pages
+ * `[vars]`, as its TOML literal string. The payments dispatcher gets the same
+ * value, so the owner API and the coordinator use one cutoff. A missing or
+ * repeated value stops the caller; the Worker validates its shape.
+ */
+export function parseMonthlySchedule(toml) {
+  const found = [];
+  let inVars = false;
+  for (const raw of toml.split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("[")) {
+      inVars = line === "[vars]";
+      continue;
+    }
+    const match =
+      inVars && /^MONTHLY_PAYMENT_SCHEDULE\s*=\s*'([^']+)'$/.exec(line);
+    if (match) found.push(match[1]);
+  }
+  if (found.length !== 1)
+    throw new Error("wrangler.toml must set MONTHLY_PAYMENT_SCHEDULE once");
+  return found[0];
+}
+
+/** The monthly payment schedule of this repository's Pages configuration. */
+export async function readMonthlySchedule() {
+  return parseMonthlySchedule(
+    await readFile(new URL("../../wrangler.toml", import.meta.url), "utf8"),
+  );
+}

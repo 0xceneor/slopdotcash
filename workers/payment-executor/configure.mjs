@@ -8,7 +8,10 @@ import {
 } from "../../src/lib/escrow-policy.mjs";
 import { assertProjectRegistry } from "../../src/lib/project-schema.mjs";
 import { HISTORICAL_PROJECTS } from "../../src/lib/projects.mjs";
-import { readRegistryDatabase } from "../payments/registry-database.mjs";
+import {
+  readMonthlySchedule,
+  readRegistryDatabase,
+} from "../payments/registry-database.mjs";
 import { SIGNER_STACKS } from "./signer-stacks.mjs";
 
 // Local generation only: no resource creation, signing, secret reads, or deployment.
@@ -45,6 +48,7 @@ export function paymentStack({
   deployments,
   registry,
   registryDatabase,
+  monthlySchedule,
 }) {
   if (!["ordinary", "security-bounty"].includes(scope))
     throw new Error("Unknown payment scope");
@@ -176,7 +180,14 @@ export function paymentStack({
             SIGNER_STACK: stack,
             CHAIN_FAMILY: family,
           }
-        : { PAYMENT_NETWORKS: JSON.stringify([network]) },
+        : {
+            PAYMENT_NETWORKS: JSON.stringify([network]),
+            // The ordinary dispatcher runs the monthly coordinator with the
+            // owner-decided cutoff of the Pages configuration (decision D1).
+            ...(scope === "ordinary" && monthlySchedule !== undefined
+              ? { MONTHLY_PAYMENT_SCHEDULE: monthlySchedule }
+              : {}),
+          },
       ...(signer
         ? {
             durable_objects: {
@@ -254,6 +265,7 @@ async function main() {
     // The D1 project registry snapshot (`bun run projects:sync`) is the reviewed source.
     registry: HISTORICAL_PROJECTS,
     registryDatabase: await readRegistryDatabase(),
+    monthlySchedule: await readMonthlySchedule(),
   });
   const output = resolve(args.output);
   await mkdir(output, { recursive: true });

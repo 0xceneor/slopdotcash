@@ -258,15 +258,25 @@ sections 6 and 7). Migration `0062` adds its private records.
    paused, or its vault network is not served. The cutoff is
    `MONTHLY_PAYMENT_SCHEDULE`, `{"firstPeriod":"YYYY-MM",
    "cutoffSecondsAfterPeriodEnd":N}`, counted from 00:00 UTC on the next
-   1st. The PRD leaves this value to the owner: until it is set, nothing is
-   frozen automatically, and a malformed value fails the run. Either path
-   writes the single `monthly_payment_runs` row of that month; a frozen month
-   accepts no further change.
+   1st. Owner decision D1 (24 October 2026) sets the calendar UTC month,
+   `{"firstPeriod":"2026-11","cutoffSecondsAfterPeriodEnd":259200}`: the
+   first automatic month is November 2026 and the cutoff is 72 hours after
+   the month ends. The value lives once in the `[vars]` of `wrangler.toml`
+   and `wrangler.staging.toml`; `workers/payment-executor/configure.mjs`
+   copies it to the ordinary dispatcher. Earlier months are never frozen
+   automatically. Without the value nothing is frozen automatically, and a
+   malformed value fails the run. While the automatic default is on, the
+   allocations cannot change after the cutoff. Either path writes the single
+   `monthly_payment_runs` row of that month; a frozen month accepts no
+   further change.
 4. **Obligations.** The coordinator creates one `monthly_payment_obligations`
    row per positive award once, only when the vault's finalized free balance
    (a `vault_snapshots` row newer than 30 minutes) covers the month together
    with every earlier obligation of the same vault that is still unreserved.
-   An underfunded month waits for a deposit and creates nothing.
+   An underfunded month waits for a deposit and creates nothing. The steward
+   gets one Inbox payout exception for that month (key
+   `monthly-underfunded:PROJECT:YYYY-MM`), however often the coordinator
+   retries.
 5. **Reservation and payment.** The vault contract accepts `commitAward` only
    from the owner's wallet, so each obligation waits for the owner on the
    Awards page. `POST .../monthly/:YYYY-MM/commitment` and

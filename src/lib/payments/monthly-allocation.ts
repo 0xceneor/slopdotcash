@@ -20,8 +20,8 @@ export interface MonthlySchedule {
 }
 
 /**
- * Reads `MONTHLY_PAYMENT_SCHEDULE`. The PRD leaves the exact UTC cutoff and
- * start to the owner, so nothing defaults: an unset value returns null and the
+ * Reads `MONTHLY_PAYMENT_SCHEDULE`. Owner decision D1 sets it in the Pages
+ * `[vars]`; nothing defaults in code: an unset value returns null and the
  * automatic process stays off. A malformed value throws.
  */
 export function parseMonthlySchedule(value: unknown): MonthlySchedule | null {

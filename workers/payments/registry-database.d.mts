@@ -4,3 +4,5 @@ export interface RegistryDatabase {
 }
 export function parseRegistryDatabase(toml: string): RegistryDatabase;
 export function readRegistryDatabase(): Promise<RegistryDatabase>;
+export function parseMonthlySchedule(toml: string): string;
+export function readMonthlySchedule(): Promise<string>;

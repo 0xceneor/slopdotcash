@@ -43,11 +43,17 @@ const deployment = {
 const OWNER = "900000071";
 const A = "101";
 const B = "202";
+// Owner decision D1, read from the reviewed Pages configuration: the cutoff of
+// 2026-11 is 72 hours after the month ends.
 const schedule = parseMonthlySchedule(
-  '{"firstPeriod":"2026-11","cutoffSecondsAfterPeriodEnd":3600}',
+  (
+    Bun.TOML.parse(readFileSync("wrangler.toml", "utf8")) as {
+      vars: Record<string, string>;
+    }
+  ).vars.MONTHLY_PAYMENT_SCHEDULE,
 );
-const beforeCutoff = new Date("2026-12-01T00:30:00.000Z");
-const afterCutoff = new Date("2026-12-01T01:00:00.000Z");
+const beforeCutoff = new Date("2026-12-03T23:30:00.000Z");
+const afterCutoff = new Date("2026-12-04T00:00:00.000Z");
 
 let db: ProjectD1Database;
 let sqlite: Database;
@@ -217,7 +223,27 @@ describe("monthly coordinator", () => {
     expect((await coordinate(afterCutoff)).waiting).toEqual([
       { key: `${project.id}/2026-11`, reason: "underfunded" },
     ]);
+    expect((await coordinate(afterCutoff)).waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "underfunded" },
+    ]);
     expect(count("monthly_payment_obligations")).toBe(0);
+    // The steward gets one Inbox payout exception for the month, however
+    // often the coordinator retries; it names no amount or contributor.
+    expect(
+      sqlite
+        .prepare(
+          "SELECT event_key,recipient_github_id,kind,subject,action_path FROM notifications",
+        )
+        .all(),
+    ).toEqual([
+      {
+        event_key: `monthly-underfunded:${project.id}:2026-11`,
+        recipient_github_id: project.manifest.steward.github.actorId,
+        kind: "payout_exception",
+        subject: project.id,
+        action_path: `/projects/${project.id}/awards`,
+      },
+    ]);
     vault("900");
     expect((await coordinate(afterCutoff)).created).toEqual([
       `${project.id}/2026-11`,
@@ -402,7 +428,39 @@ describe("monthly coordinator", () => {
     ]);
   });
 
+  test("after the cutoff the automatic default fixes the allocations until they are frozen", async () => {
+    await rejects(
+      owner().changeAllocation(project.id, "2026-11", actor, {
+        githubUserId: B,
+        grossBase: "100",
+        expectedSequence: 0,
+      }),
+      "cutoff_passed",
+    );
+    await owner().setAutomatic(project.id, actor, false);
+    const view = await owner().changeAllocation(project.id, "2026-11", actor, {
+      githubUserId: B,
+      grossBase: "100",
+      expectedSequence: 0,
+    });
+    expect(view.proposal?.allocations.map((row) => row.grossBase)).toEqual([
+      "600",
+      "100",
+    ]);
+  });
+
+  test("a month before the first automatic period is never frozen automatically", async () => {
+    const later = parseMonthlySchedule(
+      '{"firstPeriod":"2026-12","cutoffSecondsAfterPeriodEnd":259200}',
+    );
+    expect((await coordinate(afterCutoff, later)).waiting).toEqual([
+      { key: `${project.id}/2026-11`, reason: "before-first-period" },
+    ]);
+    expect(count("monthly_payment_runs")).toBe(0);
+  });
+
   test("private changes stay within the cap, never pay their author and are serialized", async () => {
+    clock = beforeCutoff;
     const service = owner();
     await rejects(
       service.changeAllocation(project.id, "2026-11", actor, {

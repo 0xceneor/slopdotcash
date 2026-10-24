@@ -181,6 +181,36 @@ export function notifyPayoutException<S>(
 }
 
 /**
+ * An underfunded frozen month is a payout exception for the project's GitHub
+ * steward (PRD sections 6 and 9; owner decision D1). The key has no time, so
+ * each project month sends one notice however often the coordinator retries.
+ * The row names only the project and month, never an amount or a contributor.
+ */
+export function notifyMonthlyUnderfunded<S>(
+  db: Preparer<S>,
+  projectId: string,
+  period: string,
+  at: string,
+): S {
+  return db
+    .prepare(
+      `${INSERT}
+       SELECT 'monthly-underfunded:' || r.project_id || ':' || r.period,
+              json_extract(p.manifest, '$.steward.github.actorId'),
+              'payout_exception', r.project_id,
+              'The ' || r.period || ' monthly awards wait for funds. No award is created until the vault covers the whole month.',
+              '/projects/' || r.project_id || '/awards', r.frozen_at, ?
+         FROM monthly_payment_runs r
+         JOIN projects p ON p.id = r.project_id
+        WHERE r.project_id = ? AND r.period = ?
+          AND r.obligations_created_at IS NULL
+          AND ${GITHUB_ID("json_extract(p.manifest, '$.steward.github.actorId')")}
+       ${ONCE}`,
+    )
+    .bind(at, projectId, period);
+}
+
+/**
  * An ADM-06 enforcement record reaches the applicant who listed the project
  * and its current GitHub steward. The row carries no reason or evidence
  * reference: those stay in the admin panel. The project page shows the
