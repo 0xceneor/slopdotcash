@@ -473,6 +473,45 @@ describe("monthly coordinator", () => {
     ]);
   });
 
+  test("a funding-time excluded award is not advertised as awaiting payment", async () => {
+    const token = "c".repeat(43);
+    sqlite
+      .prepare(
+        "INSERT INTO points_members(actor_id,github_id,login,joined_at,public) VALUES('node-first',?,'first',?,0)",
+      )
+      .run(A, afterCutoff.toISOString());
+    sqlite
+      .prepare("INSERT INTO points_sessions VALUES(?,?,?)")
+      .run(await sha256Hex(token), "node-first", "2027-01-01T00:00:00.000Z");
+    seedParticipationBan(
+      sqlite,
+      { githubId: A, githubLogin: "first" },
+      { githubId: "900000072", githubLogin: "moderator" },
+      beforeCutoff.toISOString(),
+    );
+    vault("1000");
+    await coordinate(afterCutoff);
+    const response = await handlePaymentsApi(
+      new Request("https://slop.cash/api/v1/payments/me", {
+        headers: { cookie: `__Host-slop_points=${token}` },
+      }),
+      { db, now: () => afterCutoff },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      monthlyAwards: [],
+      payments: [],
+      balances: [],
+    });
+    expect(count("monthly_payment_exclusions")).toBe(1);
+    expect(count("monthly_payment_runs")).toBe(1);
+    expect(
+      (await owner().view(project.id, "2026-11", actor)).run?.awards.find(
+        (a) => a.githubUserId === A,
+      )?.state,
+    ).toBe("excluded");
+  });
+
   test("a contributor's account shows the approved monthly award from the freeze until the vault reserves it", async () => {
     const token = "c".repeat(43);
     sqlite
