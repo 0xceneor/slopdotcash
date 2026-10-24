@@ -886,6 +886,9 @@ export function LoginPage() {
 export function AccountPage() {
   const { me, session } = useContext(Context);
   const [closedNotice, setClosedNotice] = useState("");
+  useEffect(() => {
+    if (me) setClosedNotice("");
+  }, [me]);
   return (
     <main className="shell route-main points-page">
       <h1>Account</h1>

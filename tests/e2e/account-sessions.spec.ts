@@ -274,6 +274,7 @@ for (const lostResponse of [false, true]) {
       .click();
     await (await reopenPopup).close();
     await expect(profile).toContainText("Your account is open again.");
+    await expect(recovery).not.toContainText("Your account is closed");
     expect(joins).toEqual([
       { assertion: `slop_assert_v1_${"a".repeat(48)}`, public: false },
       {
