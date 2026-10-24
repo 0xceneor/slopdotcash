@@ -1306,6 +1306,11 @@ test("owner creates, registers and funds a vault through the real API", async ({
     ).toHaveText(
       "Creation used a monthly cap of 1,000 TEST. The project now uses 2,000 TEST. Use the automatic payment controls below to apply the new cap.",
     );
+    await expect(
+      page
+        .locator(".funding-status-grid")
+        .getByText("2,000 TEST", { exact: true }),
+    ).toBeVisible();
     const state = await (await page.request.get(`${origin}/__fixture`)).json();
     expect(state.project.revision).toBe(3);
     expect(state.scanReads).toBe(afterEdit.scanReads);

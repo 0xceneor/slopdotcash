@@ -177,15 +177,15 @@ export function vaultSnapshotStale(
 }
 
 export function EscrowFunding({
-  project: original,
+  project,
+  onRegistered,
 }: {
   project: ProjectDefinition;
+  onRegistered: (project: ProjectDefinition) => void;
 }) {
-  const [registered, setRegistered] = useState<ProjectDefinition | null>(null);
   const [registrationNotice, setRegistrationNotice] = useState("");
   const [connectedWallet, setConnectedWallet] =
     useState<VaultConnection | null>(null);
-  const project = registered ?? original;
   const [revision, setRevision] = useState(0);
   const totals = useVaultTotals(project, revision);
   const deployed = totals.status !== "none";
@@ -205,7 +205,7 @@ export function EscrowFunding({
         <OwnerVaultSetup
           project={project}
           onRegistered={(updated, wallet, notice) => {
-            setRegistered(updated);
+            onRegistered(updated);
             setConnectedWallet(wallet);
             setRegistrationNotice(notice ?? "");
           }}
