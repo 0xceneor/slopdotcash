@@ -94,8 +94,9 @@ checks. Funding is reported separately; a project works without it.
   (`GET /repos/:owner/:repo/collaborators/:login/permission`); write
   (which includes maintain) or admin is required. Before installation,
   public GitHub facts (owner of a user repository, or public member of its
-  organization) let an owner create and edit the paused project.
-  Activation always needs the installation read. A failed GitHub or
+  organization) let an owner edit an existing paused project. Creation,
+  including publication of a saved application, requires the installation
+  read (owner decision D11). Activation also needs that read. A failed GitHub or
   Slopbot answer is HTTP 503 `github_unavailable` or a `retry` status:
   try again, never an admin task.
 - **Installation.** The Pages Function asks the Slopbot Worker over the
