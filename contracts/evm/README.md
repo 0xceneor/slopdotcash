@@ -216,7 +216,9 @@ without the owner's wallet, an ordinary vault has one more path:
 - The allocation root is a Merkle tree over the awards in order. A leaf is
   `keccak256(0x00, actorId, gross, sourceDigest)` and a node is
   `keccak256(0x01, left, right)`, both packed. An odd last node moves up
-  unchanged. Solana uses the same tree with sha256.
+  unchanged. Solana commits awards one at a time, so it uses a sha256 Merkle
+  sum tree that also binds each subtree's gross total (see
+  `contracts/solana/README.md`).
 
 The authority's role therefore grows from wallet binding to monthly
 attestation. It still cannot withdraw, redirect or pay funds, and it cannot
