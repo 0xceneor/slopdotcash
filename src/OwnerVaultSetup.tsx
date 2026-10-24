@@ -306,9 +306,9 @@ export function OwnerVaultSetup({
         result.project?.id !== project.id
       )
         throw new Error("Registration could not be verified. Check again.");
+      await onRegistered(result.project, wallet, result.notice);
       remember(null);
       setReview(null);
-      await onRegistered(result.project, wallet, result.notice);
     });
   const active = pending ?? review;
   return (
