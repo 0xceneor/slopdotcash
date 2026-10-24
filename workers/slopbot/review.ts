@@ -33,6 +33,12 @@ import {
   sha256Hex,
 } from "./github";
 import {
+  MAINTAINER_HOLD_DAYS,
+  openHold,
+  recordMaintainerHold,
+  resolveHold,
+} from "./maintainer-holds";
+import {
   type CallRecord,
   CONFIRM_ROUTE,
   type ModelEnv,
@@ -595,7 +601,7 @@ function disclosure(call: CallRecord | null): string {
 
 export function commentBody(input: {
   verdict: Verdict;
-  action: "label" | "close";
+  action: "label" | "close" | "hold";
   blockedClose: string | null;
   context: Context;
   triage: CallRecord | null;
@@ -609,15 +615,19 @@ export function commentBody(input: {
     "<!-- slopbot:review -->",
     input.action === "close"
       ? `**Slopbot closed this item** under the repository's \`${verdict.category}\` rule.`
-      : `**Slopbot review:** \`${verdict.category}\``,
+      : input.action === "hold"
+        ? `**Slopbot review (uncertain, maintainer decides):** \`${verdict.category}\``
+        : `**Slopbot review:** \`${verdict.category}\``,
     "",
     neutralize(verdict.summary),
     "",
     rules,
     "",
-    input.blockedClose === null
-      ? ""
-      : `_This item was not closed: ${input.blockedClose}._`,
+    input.action === "hold"
+      ? `_Slopbot is not certain about this finding (${input.blockedClose ?? "uncertain result"}), so a maintainer decides first. If no maintainer acts within ${MAINTAINER_HOLD_DAYS} days, Slopbot adds the \`${categoryLabel(verdict.category)}\` label only. An uncertain finding never closes this item._`
+      : input.blockedClose === null
+        ? ""
+        : `_This item was not closed: ${input.blockedClose}._`,
     "",
     "<details><summary>Review details</summary>",
     "",
@@ -946,6 +956,9 @@ async function runReview(
   let blockedClose: string | null = null;
   let confirm: CallRecord | null = null;
   let close = false;
+  // An uncertain finding goes to the maintainer first and never closes
+  // (PRD section 5). Policy gates such as label-only modes are not uncertainty.
+  let uncertain = verdict.confidence < CLOSE_CONFIDENCE;
   if (scope === "security") {
     if (mode === "close") blockedClose = routing.reason;
   } else if (
@@ -954,8 +967,10 @@ async function runReview(
   ) {
     const proof = grounded(verdict, context, deterministic);
     const state = await closureState(env, job, context, routing.mayClose);
-    if (!proof.ok) blockedClose = proof.why;
-    else if (verdict.confidence < CLOSE_CONFIDENCE)
+    if (!proof.ok) {
+      blockedClose = proof.why;
+      uncertain = true;
+    } else if (verdict.confidence < CLOSE_CONFIDENCE)
       blockedClose = "confidence below closure threshold";
     else if (category === "low_quality" && !qualityFor(verdict, context))
       blockedClose = "no trusted verification of the cited objective defect";
@@ -1021,7 +1036,10 @@ async function runReview(
             blockedClose =
               "source or eligibility changed before shadow recording";
         } else close = true;
-      } else blockedClose = "a second, independent review did not confirm";
+      } else {
+        blockedClose = "a second, independent review did not confirm";
+        uncertain = true;
+      }
     }
   }
 
@@ -1050,6 +1068,41 @@ async function runReview(
       skipReason: reason,
     });
     return reason;
+  }
+  if (uncertain) {
+    await upsertComment(
+      env,
+      job,
+      context,
+      commentBody({
+        verdict,
+        action: "hold",
+        blockedClose: blockedClose ?? "confidence below closure threshold",
+        context,
+        triage,
+        confirm,
+      }),
+      claim,
+    );
+    await store.recordAction(
+      db,
+      reviewKey,
+      job.repositoryId,
+      issue.node_id,
+      "comment",
+      category,
+    );
+    await store.assertReviewClaim(db, claim);
+    const dueAt = await recordMaintainerHold(db, reviewKey, job, {
+      nodeId: issue.node_id,
+      revision: context.revision,
+      category,
+    });
+    await store.finishReview(db, reviewKey, claimToken, "completed", {
+      verdict,
+      action: "hold",
+    });
+    return `held for maintainer until ${dueAt} (${category})`;
   }
   if (close && fresh.issue.assignees.length > 0) {
     close = false;
@@ -1111,7 +1164,7 @@ async function runReview(
   );
   await store.assertReviewClaim(db, claim);
   await requireScope(db, job, scope);
-  const label = `slopbot: ${category.replaceAll("_", " ")}`;
+  const label = categoryLabel(category);
   const labeled = await context.github.request<{ name: string }[]>(
     "POST",
     `/repos/${job.owner}/${job.repo}/issues/${job.number}/labels`,
@@ -1389,14 +1442,7 @@ export async function recordHumanSignal(
   );
   if (issue === null || String(job.senderId) === env.SLOPBOT_APP_USER_ID)
     return "ignored";
-  const pull =
-    job.itemKind === "pull_request"
-      ? await github.get<Pull>(
-          `/repos/${job.owner}/${job.repo}/pulls/${job.number}`,
-        )
-      : null;
-  const revision =
-    pull?.head.sha ?? (await sha256Hex(`${issue.title}\n${issue.body ?? ""}`));
+  const { revision } = await itemRevision(github, job, issue);
   if (job.kind === "appeal" && job.senderId !== issue.user.id)
     return "only the author can appeal";
   let kind: "appeal" | "human_reopen" = job.kind;
@@ -1445,4 +1491,146 @@ export async function recordHumanSignal(
     );
   }
   return kind;
+}
+
+function categoryLabel(category: Category): string {
+  return `slopbot: ${category.replaceAll("_", " ")}`;
+}
+
+async function itemRevision(github: GitHubClient, job: Job, issue: Issue) {
+  const pull =
+    job.itemKind === "pull_request"
+      ? await github.get<Pull>(
+          `/repos/${job.owner}/${job.repo}/pulls/${job.number}`,
+        )
+      : null;
+  const revision =
+    pull?.head.sha ?? (await sha256Hex(`${issue.title}\n${issue.body ?? ""}`));
+  return { pull, revision };
+}
+
+type TimelineEntry = {
+  created_at?: string;
+  submitted_at?: string;
+  actor?: { login: string; id: number } | null;
+  user?: { login: string; id: number } | null;
+};
+
+/** True when a repository maintainer acted on the item since the hold began:
+ * any comment, review, label, assignment or state change. Unknown maintainer
+ * status fails closed: the queue retries and nothing is labeled.
+ */
+async function maintainerActedSince(
+  env: ReviewEnv,
+  github: GitHubClient,
+  repo: Repo,
+  job: Job,
+  since: string,
+): Promise<boolean> {
+  const actors = new Map<number, { login: string; id: number }>();
+  for (let page = 1; ; page++) {
+    if (page > 30)
+      throw new Error("item timeline is too long to verify maintainer action");
+    const entries = await github.get<TimelineEntry[]>(
+      `/repos/${job.owner}/${job.repo}/issues/${job.number}/timeline?per_page=100&page=${page}`,
+    );
+    if (!Array.isArray(entries)) throw new Error("item timeline is unreadable");
+    for (const entry of entries) {
+      const at = entry.submitted_at ?? entry.created_at;
+      const actor = entry.actor ?? entry.user;
+      if (
+        at === undefined ||
+        Date.parse(at) < Date.parse(since) ||
+        !actor ||
+        String(actor.id) === env.SLOPBOT_APP_USER_ID
+      )
+        continue;
+      actors.set(actor.id, actor);
+    }
+    if (entries.length < 100) break;
+  }
+  for (const actor of actors.values()) {
+    const exemption = await authorExemption(
+      github,
+      repo.owner,
+      job.repo,
+      actor,
+    );
+    if (exemption === "unknown")
+      throw new Error("maintainer status is unknown; the hold is retried");
+    if (exemption === "exempt") return true;
+  }
+  return false;
+}
+
+/** Ends a maintainer hold. Without maintainer action in the window, Slopbot
+ * adds the finding's label only; a hold never closes, scores or penalizes.
+ */
+export async function applyMaintainerHold(
+  env: ReviewEnv,
+  job: Extract<Job, { kind: "maintainer_hold" }>,
+): Promise<string> {
+  const db = env.SLOPBOT_DB;
+  const hold = await openHold(db, job.reviewKey);
+  if (hold === null) return "hold already resolved";
+  if (Date.parse(hold.due_at) > Date.now()) return "hold not due";
+  const supersede = async (why: string) => {
+    await resolveHold(db, job.reviewKey, "superseded");
+    return `hold superseded: ${why}`;
+  };
+  const registration = await reviewRegistration(db, job);
+  if (registration === null)
+    return supersede("repository is not registered in the Slop registry");
+  if (
+    registration.scope === "security" &&
+    !SECURITY_CATEGORIES.has(hold.category)
+  )
+    return supersede("security review only");
+  const install = await store.installation(db, job.installationId);
+  if (
+    install === null ||
+    install.removed_at !== null ||
+    install.suspended_at !== null
+  )
+    return supersede("installation removed or suspended");
+  const github = await GitHubClient.forInstallation(
+    env.SLOPBOT_APP_ID,
+    env.SLOPBOT_APP_PRIVATE_KEY,
+    job.installationId,
+  );
+  const repo = await publicRepository(github, job);
+  if (repo === null) return supersede("repository not readable");
+  const issue = await github.get<Issue>(
+    `/repos/${job.owner}/${job.repo}/issues/${job.number}`,
+  );
+  if (issue === null || issue.node_id !== hold.item_node_id)
+    return supersede("item not readable");
+  if (issue.state !== "open") return supersede("item is no longer open");
+  const { pull, revision } = await itemRevision(github, job, issue);
+  if (pull?.merged || revision !== hold.revision)
+    return supersede("item changed after the review");
+  if (await maintainerActedSince(env, github, repo, job, hold.held_at)) {
+    await resolveHold(db, job.reviewKey, "maintainer_acted");
+    return "maintainer acted; no label";
+  }
+  const label = categoryLabel(hold.category);
+  // Reconcile a successful write whose response or local record was lost.
+  if (
+    !issue.labels?.some((entry) =>
+      typeof entry === "string" ? entry === label : entry.name === label,
+    )
+  ) {
+    await requireScope(db, job, registration.scope);
+    await addLabels(env, job, github, [label]);
+  }
+  await store.recordAction(
+    db,
+    job.reviewKey,
+    job.repositoryId,
+    issue.node_id,
+    "label",
+    hold.category,
+  );
+  await resolveHold(db, job.reviewKey, "labeled");
+  return `labeled after the maintainer window (${hold.category})`;
 }

@@ -363,4 +363,15 @@ export type Job =
       itemKind: "issue" | "pull_request";
       number: number;
       senderId: number;
+    }
+  | {
+      kind: "maintainer_hold";
+      reviewKey: string;
+      deliveryId: string;
+      installationId: number;
+      repositoryId: number;
+      owner: string;
+      repo: string;
+      itemKind: "issue" | "pull_request";
+      number: number;
     };
