@@ -11,6 +11,7 @@
   },
   "include": [
     "tests/fixtures.ts",
+    "tests/account-closure-fixture.ts",
     "tests/fixture-checkout.ts",
     "tests/project-application-manifest.ts",
     "tests/sqlite-d1.ts",
