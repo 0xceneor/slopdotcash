@@ -16,6 +16,7 @@ import type { SecurityAnalysisInput, SecurityAnalyzer } from "./analysis";
 import { FAKE_OAUTH, fakeGithub } from "./github-advisories.fake";
 import { handleSecurityApi, type SecurityD1Database } from "./handler";
 import { githubIntakeOAuth, type IntakeConfig } from "./intake-grant";
+import { seedParticipationBan } from "./participation-ban.fixture";
 import { cvss3BaseScore, deterministicAnalyzer } from "./report-analysis";
 import { RECONCILE_QUIET_MS, SUBMITTED_LIMIT_MS } from "./submissions";
 
@@ -1458,4 +1459,61 @@ describe("private intake: analysis, access, privacy and mode", () => {
     });
     expect((await disabled.create()).body.error).toBe("intake_unavailable");
   });
+});
+
+test("a participation ban stops new private reports and sending an existing draft", async () => {
+  const t = setup();
+  const draft = await t.ready();
+  seedParticipationBan(t.sqlite, REPORTER, ADMIN, START);
+  expect((await t.create()).status).toBe(403);
+  expect((await t.send(draft.id, draft.revision)).status).toBe(403);
+  expect(t.row(draft.id).state).toBe("draft");
+  expect(t.github.advisories).toHaveLength(0);
+  expect((await t.call(REPORTER, "GET", "security-submissions")).status).toBe(
+    200,
+  );
+});
+
+test("a ban before the send commits prevents the private GitHub request", async () => {
+  const t = setup();
+  const draft = await t.ready();
+  t.setBeforeBatch(() =>
+    seedParticipationBan(t.sqlite, REPORTER, ADMIN, START),
+  );
+  expect((await t.send(draft.id, draft.revision)).status).toBe(403);
+  expect(t.row(draft.id).state).toBe("draft");
+  expect(t.github.advisories).toHaveLength(0);
+});
+
+test("a concurrent ban leaves no new private submission or creation event", async () => {
+  const t = setup();
+  t.setBeforeBatch(() =>
+    seedParticipationBan(t.sqlite, REPORTER, ADMIN, START),
+  );
+  expect((await t.create()).status).toBe(403);
+  expect(
+    t.sqlite.query("SELECT id FROM security_submissions").all(),
+  ).toHaveLength(0);
+  expect(
+    t.sqlite
+      .query("SELECT submission_id FROM security_submission_events")
+      .all(),
+  ).toHaveLength(0);
+});
+
+test("a banned reporter can reconcile a report GitHub already received", async () => {
+  const t = setup();
+  const draft = await t.ready();
+  t.github.faults.create = "timeout-after-create";
+  const sent = await t.send(draft.id, draft.revision);
+  expect(sent.status).toBe(202);
+  seedParticipationBan(t.sqlite, REPORTER, ADMIN, START);
+  const reconciled = await t.reconcile(
+    draft.id,
+    sent.body.submission!.revision,
+  );
+  expect(reconciled.status).toBe(200);
+  expect(reconciled.body.submission?.state).toBe("receipt-verified");
+  expect(t.github.counts.posts).toBe(1);
+  expect(t.cases()).toHaveLength(1);
 });

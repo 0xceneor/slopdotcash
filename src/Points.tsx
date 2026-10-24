@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 import { identityPublicOrigin } from "../workers/identity/contracts";
+import { AccountAppeals } from "./AccountAppeals";
 import { EarningsPage } from "./Earnings";
 import { Link } from "./Link";
 import { browserDeployment } from "./lib/browser-deployment";
@@ -884,6 +885,7 @@ export function LoginPage() {
   );
 }
 export function AccountPage() {
+  const accountSession = useProjectSession();
   const { me, session } = useContext(Context);
   const [closedNotice, setClosedNotice] = useState("");
   useEffect(() => {
@@ -899,6 +901,9 @@ export function AccountPage() {
         <a href="/earnings">Payouts</a>
         <a href="/inbox">Inbox</a>
         {me ? <a href="#sessions">Sessions</a> : null}
+        {accountSession.status === "signed-in" ? (
+          <a href="#appeals">Appeals</a>
+        ) : null}
         <a href="#recovery">{me ? "Recovery and closure" : "Recovery"}</a>
       </nav>
       <div id="profile">
@@ -916,6 +921,7 @@ export function AccountPage() {
         <EarningsPage walletsOnly key={me?.actor.id ?? "signed-out"} />
       )}
       {me ? <AccountSessions /> : null}
+      {accountSession.status === "signed-in" ? <AccountAppeals /> : null}
       <section id="recovery">
         <h2>{me ? "Recovery and closure" : "Recovery"}</h2>
         {closedNotice ? <p role="status">{closedNotice}</p> : null}

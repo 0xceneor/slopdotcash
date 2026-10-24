@@ -1,5 +1,9 @@
 import type { D1TransactionalDatabase as D1Database, D1Result } from "../d1";
 import { notifyWalletChanged } from "../notifications/events";
+import {
+  hasParticipationBan,
+  PARTICIPATION_BAN_QUERY,
+} from "../projects/account-bans";
 import type {
   AttachTraceInput,
   AuditInput,
@@ -273,6 +277,10 @@ export class CloudflareTracePersistence implements TracePersistence {
     private readonly bucket: R2Bucket,
   ) {}
 
+  hasParticipationBan(githubId: string): Promise<boolean> {
+    return hasParticipationBan(this.db, githubId);
+  }
+
   async createRun(input: CreateRunInput): Promise<PersistenceResult<TraceRun>> {
     const existing = await this.db
       .prepare(
@@ -293,7 +301,7 @@ export class CloudflareTracePersistence implements TracePersistence {
             repository, project_policy_revision, provider, model, client,
             client_version, state, trace_sha256, created_at, finalized_at,
             create_idempotency_key
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_trace', NULL, ?, NULL, ?)`,
+          ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'awaiting_trace', NULL, ?, NULL, ? WHERE NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
         )
         .bind(
           input.id,
@@ -309,6 +317,7 @@ export class CloudflareTracePersistence implements TracePersistence {
           input.clientVersion,
           input.createdAt,
           input.idempotencyKey,
+          input.githubId,
         )
         .run();
     } catch {
@@ -323,7 +332,7 @@ export class CloudflareTracePersistence implements TracePersistence {
       return { status: "existing", value: mapRun(raced) };
     }
     const created = await this.getRun(input.id);
-    if (created === null) throw new Error("Created trace run is unavailable");
+    if (created === null) return { status: "conflict" };
     return { status: "created", value: created };
   }
 
@@ -597,7 +606,7 @@ export class CloudflareTracePersistence implements TracePersistence {
             github_object_id, github_url, head_sha, created_at, idempotency_key
           ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             FROM trace_runs
-           WHERE id = ? AND github_user_id = ? AND state != 'finalized'`,
+           WHERE id = ? AND github_user_id = ? AND state != 'finalized' AND NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
         )
         .bind(
           event.id,
@@ -612,6 +621,7 @@ export class CloudflareTracePersistence implements TracePersistence {
           event.createdAt,
           event.idempotencyKey,
           event.runId,
+          event.githubId,
           event.githubId,
         )
         .run();

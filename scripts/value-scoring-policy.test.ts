@@ -26,6 +26,7 @@ import { VALUE_RUBRIC_VERSION } from "../src/lib/value-assessment";
 import { parseGenerationArguments } from "./generate-leaderboard";
 import {
   fetchValueHistoryPage,
+  loadParticipationBans,
   ValueFeedUnavailableError,
 } from "./value-ingestion";
 
@@ -244,7 +245,10 @@ const valueReviews = [
   review(2, 8, alice as GitHubActor, "APPROVED", "2026-10-19T07:00:00.000Z"),
 ];
 
-function snapshot(policy: ValueScoringPolicy | null = POLICY) {
+function snapshot(
+  policy: ValueScoringPolicy | null = POLICY,
+  participationBans?: ReadonlyMap<string, string>,
+) {
   return createLeaderboardSnapshot(
     input({
       mergedPullRequestOutcomes: [legacy, valued, pending],
@@ -254,6 +258,7 @@ function snapshot(policy: ValueScoringPolicy | null = POLICY) {
         reviewed(pending, []),
       ],
       valuePolicy: policy ?? undefined,
+      participationBans,
       valueDecisions: new Map<string, unknown>([
         [
           valued.id,
@@ -774,4 +779,49 @@ test("excluding an old joint review does not shrink the pull request size", () =
       .filter((event) => event.category === "substantive-review")
       .map((event) => [event.actor.id, event.scoreThirds]),
   ).toEqual([[carol?.id, 3]]);
+});
+
+test("published account bans remove new merge and review credit but retain earlier work", async () => {
+  const bannedAt = "2026-10-19T04:00:00.000Z";
+  const bans = await loadParticipationBans(
+    {
+      get: async <T>(path: string) =>
+        ({
+          id: path === "/user/11" ? 11 : 12,
+          node_id: path === "/user/11" ? "U_alice" : "U_bob",
+        }) as T,
+    },
+    (async () =>
+      Response.json({
+        schemaVersion: "slop-account-bans:v1",
+        bans: [
+          { githubId: "11", bannedAt },
+          { githubId: "12", bannedAt },
+        ],
+      })) as unknown as typeof fetch,
+  );
+  const before = snapshot().ledger;
+  const after = snapshot(POLICY, bans).ledger;
+  const blocked = before.filter(
+    (event) => bans.has(event.actor.id) && event.occurredAt >= bannedAt,
+  );
+  expect(
+    blocked.some((event) => event.category === "merged-pull-request"),
+  ).toBe(true);
+  expect(blocked.some((event) => event.category === "substantive-review")).toBe(
+    true,
+  );
+  expect(after).toEqual(before.filter((event) => !blocked.includes(event)));
+  expect(
+    after.some(
+      (event) => event.actor.id === "U_alice" && event.occurredAt < bannedAt,
+    ),
+  ).toBe(true);
+  await expect(
+    loadParticipationBans(
+      { get: async () => null },
+      (async () =>
+        new Response(null, { status: 503 })) as unknown as typeof fetch,
+    ),
+  ).rejects.toBeInstanceOf(ValueFeedUnavailableError);
 });

@@ -6,7 +6,8 @@
  * the installation reads write access and the exact content has a clean scan.
  */
 import { expect, test } from "bun:test";
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { hasParticipationBan } from "../backend/projects/account-bans";
 import { CloudflareProjectPersistence } from "../backend/projects/cloudflare-persistence";
 import type { RepositoryControl } from "../backend/projects/contracts";
 import {
@@ -16,6 +17,16 @@ import {
 } from "../backend/projects/handler";
 import type { ScanRequest } from "../backend/projects/setup";
 import { TokenMetadataError } from "../backend/projects/token-metadata";
+import { seedParticipationBan } from "../backend/security/participation-ban.fixture";
+import { signApiToken } from "../backend/trace/auth";
+import {
+  CloudflareTracePersistence,
+  type R2Bucket,
+} from "../backend/trace/cloudflare-persistence";
+import {
+  handleTraceApi,
+  type TraceApiDependencies,
+} from "../backend/trace/handler";
 import { vettedContentSha256 } from "../backend/vetting/persistence";
 import type { RepositoryAccess } from "../src/lib/project-contracts";
 import { classifyRevisionChanges } from "../src/lib/project-revision-changes";
@@ -132,7 +143,7 @@ function registry() {
     call("POST", "projects", actor, {
       manifest: applicationManifest(id, repository),
     });
-  return { persistence, sqlite, state, call, create, deps };
+  return { db, persistence, sqlite, state, call, create, deps };
 }
 
 type Setup = {
@@ -685,4 +696,362 @@ test("the scan digest ignores presentation, listing and money but binds skill in
     financial: ["reward"],
     restricted: ["status"],
   });
+});
+
+test("an explicit moderator ban blocks new contribution intake without blaming the original applicant", async () => {
+  const t = registry();
+  t.deps.moderatorGithubIds = new Set([ADMIN]);
+  t.deps.github.fetch = async (url) =>
+    Response.json(
+      String(url).endsWith("/second")
+        ? { id: 900000004, login: "second", type: "User" }
+        : { id: Number(OTHER), login: "other", type: "User" },
+    );
+  expect(
+    (await t.create("responsibility", "example/responsibility")).status,
+  ).toBe(201);
+  const project = await t.persistence.getProject("responsibility");
+  if (!project) throw new Error("Project missing");
+  await t.persistence.appendEnforcement(
+    {
+      id: "enf_responsibility_scan",
+      projectId: project.id,
+      sequence: 1,
+      action: "ban",
+      stateAfter: "banned",
+      appealAfter: "none",
+      reason: "Synthetic confirmed malicious scan",
+      evidenceReference: "private-case-fixture",
+      repositoryGithubId: "987654321",
+      repositoryKeys: ["example/responsibility"],
+      actor: null,
+      actorRole: "vetting-service",
+      decisionSource: "standing-rule",
+      systemIssuer: {
+        kind: "vetting-service",
+        keySha256: "a".repeat(64),
+        assessmentId: "vet_fixture",
+        policyVersion: "fixture",
+        rule: "confirmed-malicious",
+      },
+      beforeRevision: project.revision,
+      beforeManifestSha256: project.manifestSha256,
+      afterRevision: null,
+      afterManifestSha256: null,
+      result: "revision_pending",
+      createdAt: NOW,
+    },
+    null,
+    [],
+  );
+  const secret = "synthetic-ban-workflow-secret-01234567890123456789";
+  const token = await signApiToken(
+    {
+      iss: "slop.cash",
+      aud: "private-trace-api",
+      sub: `github:${OTHER}`,
+      githubId: OTHER,
+      githubLogin: "other",
+      roles: ["contributor"],
+      iat: Math.floor(Date.parse(NOW) / 1000),
+      exp: Math.floor(Date.parse(NOW) / 1000) + 300,
+      jti: "ban-workflow-token-0123456789",
+    },
+    secret,
+  );
+  let run = 0;
+  const trace: TraceApiDependencies = {
+    persistence: new CloudflareTracePersistence(t.db, {} as R2Bucket),
+    authSecret: secret,
+    operatorGithubIds: new Set(),
+    now: () => new Date(NOW),
+    randomId: () => `ban-workflow-run-${++run}`,
+    verifyIdentityAssertion: async () => null,
+    privateIntakeStatus: async () => ({ status: "unavailable" }),
+  };
+  const newRun = () =>
+    handleTraceApi(
+      new Request("http://localhost/api/v1/runs", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "idempotency-key": `ban-workflow-create-${run}-0123456789`,
+        },
+        body: JSON.stringify({
+          clientRunId: "client_ban_workflow",
+          projectId: "other-project",
+          repository: "example/other-project",
+          projectPolicyRevision: "a".repeat(40),
+          provider: "openai",
+          model: "gpt-5",
+          client: "codex",
+          clientVersion: "1.0.0",
+        }),
+      }),
+      trace,
+    );
+  expect((await newRun()).status).toBe(201);
+  const decision = {
+    action: "ban",
+    reason: "Evidence identifies the selected account, not the applicant",
+    evidenceReference: "private-case-fixture",
+    expectedRevision: project.revision,
+    expectedSequence: 2,
+  };
+  const empty = await t.call(
+    "POST",
+    "admin/projects/responsibility/enforcement-preview",
+    ADMIN,
+    decision,
+  );
+  expect(empty.status).toBe(200);
+  expect(
+    (empty.body.preview as { maintainerBans: unknown[] }).maintainerBans,
+  ).toEqual([]);
+  const preview = await t.call(
+    "POST",
+    "admin/projects/responsibility/enforcement-preview",
+    ADMIN,
+    {
+      ...decision,
+      responsibleAccounts: [
+        { githubLogin: "other" },
+        { githubLogin: "second" },
+      ],
+    },
+  );
+  expect(preview.status).toBe(200);
+  const selected = (preview.body.preview as { maintainerBans: unknown[] })
+    .maintainerBans;
+  expect(selected).toEqual([
+    { githubId: OTHER, githubLogin: "other" },
+    { githubId: "900000004", githubLogin: "second" },
+  ]);
+  // The ban lands after intake checks the account but before it writes the run.
+  const readBan = trace.persistence.hasParticipationBan.bind(trace.persistence);
+  let pendingBan = true;
+  trace.persistence.hasParticipationBan = async (githubId) => {
+    const banned = await readBan(githubId);
+    if (pendingBan) {
+      pendingBan = false;
+      expect(
+        (
+          await t.call(
+            "POST",
+            "admin/projects/responsibility/enforcement",
+            ADMIN,
+            {
+              ...decision,
+              responsibleAccounts: selected,
+            },
+          )
+        ).status,
+      ).toBe(200);
+    }
+    return banned;
+  };
+  const refused = await newRun();
+  expect(refused.status).toBe(403);
+  expect((await refused.json()).error).toBe("participation_banned");
+  expect((await newRun()).status).toBe(403);
+  expect(
+    (
+      await t.create(
+        "unrelated-applicant",
+        "example/unrelated-applicant",
+        OWNER,
+      )
+    ).status,
+  ).toBe(201);
+  expect(
+    (await t.create("banned-actor", "example/banned-actor", OTHER)).status,
+  ).toBe(403);
+  // A ban on one project grants no appeal authority on an unrelated project.
+  expect(
+    (
+      await t.call("POST", "project-appeals", OTHER, {
+        projectId: "unrelated-applicant",
+        reason: "Try to act on a project that did not ban this account",
+        evidenceReference: "private-account-appeal-fixture",
+      })
+    ).status,
+  ).toBe(403);
+  expect((await t.call("GET", "project-account-bans", "")).body).toEqual({
+    schemaVersion: "slop-account-bans:v1",
+    bans: [OTHER, "900000004"].map((githubId) => ({ githubId, bannedAt: NOW })),
+  });
+  const listedAppeals = await t.call("GET", "project-appeals", OTHER);
+  expect(listedAppeals.status).toBe(200);
+  expect(listedAppeals.body).toEqual({
+    appeals: [{ projectId: "responsibility", state: "banned", appeal: "none" }],
+  });
+  expect((await t.call("GET", "project-appeals", OWNER)).body).toEqual({
+    appeals: [],
+  });
+  expect((await t.call("GET", "project-appeals", "")).status).toBe(401);
+  const appeal = await t.call("POST", "project-appeals", OTHER, {
+    projectId: "responsibility",
+    reason: "The evidence does not establish my responsibility",
+    evidenceReference: "private-account-appeal-fixture",
+  });
+  expect(appeal.status).toBe(200);
+  expect(appeal.body.record).toMatchObject({
+    actorRole: "banned-account",
+    decisionSource: "account-request",
+    action: "request_reinstatement",
+    stateAfter: "banned",
+    afterRevision: null,
+  });
+  // Each banned account retains its own appeal and evidence.
+  expect((await t.call("GET", "project-appeals", "900000004")).body).toEqual({
+    appeals: [{ projectId: "responsibility", state: "banned", appeal: "none" }],
+  });
+  const secondAppeal = await t.call("POST", "project-appeals", "900000004", {
+    projectId: "responsibility",
+    reason: "Review the evidence for my account separately",
+    evidenceReference: "private-second-account-appeal-fixture",
+  });
+  expect(secondAppeal.status).toBe(200);
+  expect((await t.call("GET", "project-appeals", "900000004")).body).toEqual({
+    appeals: [
+      { projectId: "responsibility", state: "banned", appeal: "requested" },
+    ],
+  });
+  expect(
+    (
+      await t.call("POST", "project-appeals", OTHER, {
+        projectId: "responsibility",
+        reason: "Duplicate appeal",
+        evidenceReference: "private-account-appeal-fixture",
+      })
+    ).status,
+  ).toBe(409);
+  // Filing an appeal grants no new participation or project authority.
+  expect((await newRun()).status).toBe(403);
+  const restore = {
+    action: "reinstate_accounts",
+    reason: "Evidence clears this account only",
+    evidenceReference: "private-account-review-fixture",
+    expectedRevision: (await t.persistence.getProject(project.id))?.revision,
+    expectedSequence: 5,
+    responsibleAccounts: [{ githubId: OTHER, githubLogin: "other" }],
+  };
+  expect(
+    (
+      await t.call(
+        "POST",
+        "admin/projects/responsibility/enforcement",
+        ADMIN,
+        restore,
+      )
+    ).status,
+  ).toBe(403);
+  t.deps.moderatorGithubIds = new Set([ADMIN, OWNER]);
+  t.deps.adminGithubIds = new Set([ADMIN, OWNER]);
+  const restored = await t.call(
+    "POST",
+    "admin/projects/responsibility/enforcement",
+    OWNER,
+    restore,
+  );
+  expect(restored.status).toBe(200);
+  expect(restored.body.record).toMatchObject({
+    action: "reinstate_accounts",
+    stateAfter: "banned",
+    afterRevision: null,
+  });
+  expect((await newRun()).status).toBe(201);
+  expect(await hasParticipationBan(t.db, "900000004")).toBe(true);
+  expect((await t.call("GET", "project-account-bans", "")).body).toEqual({
+    schemaVersion: "slop-account-bans:v1",
+    bans: [{ githubId: "900000004", bannedAt: NOW }],
+  });
+
+  expect((await t.call("GET", "project-appeals", OTHER)).body).toEqual({
+    appeals: [],
+  });
+  expect(
+    (
+      await t.call(
+        "POST",
+        "admin/projects/responsibility/enforcement",
+        OWNER,
+        restore,
+      )
+    ).status,
+  ).toBe(409);
+  expect(
+    (await t.persistence.listEnforcements()).at(-1)?.accountReinstatements,
+  ).toEqual([
+    {
+      githubId: OTHER,
+      githubLogin: "other",
+      banEnforcementId: (await t.persistence.listEnforcements())[1].id,
+    },
+  ]);
+});
+
+test("account-reinstatement upgrade preserves prior releases and separates future project decisions", async () => {
+  const names = readdirSync(new URL("../migrations/", import.meta.url))
+    .filter((name) => name.endsWith(".sql"))
+    .sort();
+  const { db, sqlite } = sqliteD1(names.filter((name) => name < "0070"));
+  try {
+    const moderator = { githubId: ADMIN, githubLogin: "admin" };
+    for (const id of [OWNER, OTHER])
+      seedParticipationBan(
+        sqlite,
+        { githubId: id, githubLogin: "fixture" },
+        moderator,
+        NOW,
+      );
+    const reinstate = (id: string) =>
+      sqlite
+        .query(`
+      INSERT INTO project_enforcements
+      SELECT 'enf_release_' || ?, project_id, 3, 'reinstate', 'clear', 'granted',
+        reason, evidence_reference, repository_github_id, repository_keys,
+        '700000001', 'independent', NULL, 'project-moderator', 'admin-panel',
+        before_revision, before_manifest_sha256, NULL, NULL, 'no_revision_needed', created_at
+      FROM project_enforcements WHERE id = ?
+    `)
+        .run(id, `enf_malicious-${id}_2`);
+    reinstate(OWNER);
+    const rows = sqlite
+      .query("SELECT rowid,* FROM project_enforcements ORDER BY rowid")
+      .all();
+    const triggers = sqlite
+      .query(
+        "SELECT name,sql FROM sqlite_master WHERE type='trigger' ORDER BY name",
+      )
+      .all() as { name: string; sql: string }[];
+    for (const name of names.filter((name) => name >= "0070"))
+      sqlite.exec(
+        readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8"),
+      );
+    expect(
+      sqlite
+        .query("SELECT rowid,* FROM project_enforcements ORDER BY rowid")
+        .all(),
+    ).toEqual(rows);
+    expect(sqlite.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    for (const trigger of triggers)
+      expect(
+        sqlite
+          .query("SELECT name,sql FROM sqlite_master WHERE name=?")
+          .get(trigger.name),
+      ).toEqual(trigger);
+    expect(await hasParticipationBan(db, OWNER)).toBe(false);
+    expect(await hasParticipationBan(db, OTHER)).toBe(true);
+    reinstate(OTHER);
+    expect(await hasParticipationBan(db, OTHER)).toBe(true);
+    expect(
+      sqlite
+        .query("SELECT github_id FROM project_account_reinstatements")
+        .all(),
+    ).toEqual([{ github_id: OWNER }]);
+  } finally {
+    sqlite.close();
+  }
 });

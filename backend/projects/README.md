@@ -48,6 +48,7 @@ points and profiles still validate.
 | `GET /api/v1/project-setup` | session | The account's projects and its pending stored applications |
 | `POST /api/v1/project-setup/:id/check` | session | Runs every setup check, queues a needed scan, activates a project that passes (optional `requestScan` after an incomplete scan) |
 | `GET /api/v1/project-revisions` | public, edge cached | Full revision history with SHA-256 digests |
+| `GET /api/v1/project-account-bans` | public, edge cached | GitHub ID and earliest start time of each active account ban, for the score generator; no reason, evidence, project or login |
 | `GET /api/v1/project-github/owned-repositories` | session | The signed-in maintainer's public repositories |
 | `GET /api/v1/project-github/repositories/:owner/:name` | session | Public repository facts for `/projects/new` |
 | `GET /api/v1/project-revisions/:id/:revision` | public, immutable | One revision's exact stored `manifestText` and digest, for generated-skill installers |
@@ -284,7 +285,10 @@ rate limit, and caches each answer for five minutes. The browser never calls
   `evidenceReference`). The record names the role `project-steward` or
   `project-applicant` and the source `owner-request`
   (`0027_project_enforcement_owner_appeals.sql`). A moderator may also file
-  it at `/admin`. Only a moderator decides it.
+  it at `/admin`. An account named in the current project ban can use the same
+  route even if it is no longer the owner and did not list the project. Its
+  record uses `banned-account` and `account-request`. Filing does not lift a
+  restriction or grant project access. Only a moderator decides the appeal.
 - Reinstatement needs an open reinstatement request and a moderator who did
   not place the restriction. Both preview and confirmation require a clean
   scan of the current restricted revision, requested after the latest restriction,
@@ -300,6 +304,45 @@ rate limit, and caches each answer for five minutes. The browser never calls
   paused, `retired` revision of the restriction is still pending. It appends a paused `community` revision only if
   the project was listed when the restriction began; it never restores
   featuring, activation or money. A denial keeps the restriction.
+- A signed confirmed malicious Ban waits for a moderator decision (PRD
+  sections 2 and 8). `/admin` lists the project first with "Moderator
+  decision needed", with or without an owner appeal. The moderator either
+  reinstates the project through the appeal path above, or chooses "Ban
+  project and maintainer". That decision is a moderator `ban` record. In the
+  same D1 batch it stores only the accounts that the moderator selected from
+  the evidence in `project_maintainer_bans`. The API resolves each selected
+  GitHub login to an immutable account ID; confirmation checks the previewed
+  ID again. An empty selection bans only the project. Current stewardship
+  and the original application do not select accounts automatically
+  (`0066_project_maintainer_bans.sql`), and it closes an open appeal as
+  denied. A moderator who placed the restriction cannot decide an open appeal
+  this way. A plain denial is refused with `malicious_decision_required`
+  until the decision is made. While the account ban holds, a banned
+  maintainer cannot create a project, publish a stored application or publish
+  an owner revision, as the actor or as the named steward
+  (`maintainer_banned`). The steward, applicant, and explicitly banned accounts
+  can appeal, including after ownership changes. A project reinstatement no
+  longer lifts account bans. An independent moderator uses `reinstate_accounts`
+  to select accounts cleared by the evidence. The decision leaves the project
+  restriction and other accounts unchanged. Each release references its exact
+  ban in `project_account_reinstatements`; the existing enforcement journal
+  records its reason and evidence. Migration 0072 preserves releases already
+  made under the former project-wide rule. Signed-in accounts can use
+  `/account#appeals` without Points membership. `GET /api/v1/project-appeals`
+  lists only the caller's active account bans and appeal state; it omits
+  moderation reasons, evidence and other accounts. The form uses the existing
+  authenticated appeal route and retains its status after reload.
+  The ban does not erase an approved funded award. The trace API refuses new
+  contribution runs and progress events. Bounty approval refuses new
+  reservations for a banned researcher, including concurrent bans. Private
+  intake refuses new submissions and sends, but keeps reconciliation of a
+  report already received by GitHub. Banned accounts cannot file new project
+  flags, including during a concurrent ban. They can read and withdraw
+  existing flags. The score generator reads
+  `GET /api/v1/project-account-bans` and gives a banned account no
+  contribution or review credit for events at or after its ban start
+  (`scripts/value-ingestion.ts`, `addScore` in `src/lib/leaderboard.ts`).
+  Earlier credit stays. A feed outage keeps the last published snapshot.
 - Two standing rules act without a moderator (PRD section 8; see
   `backend/vetting/README.md`). The second distinct active contributor flag
   appends a `quarantine` record whose issuer is `contributor-flags`, and a

@@ -31,6 +31,10 @@ const MODERATOR_TOKEN = process.env.SLOP_E2E_MODERATOR_TOKEN ?? "";
 const VETTING_PUBLIC_KEY = process.env.SLOP_E2E_VETTING_PUBLIC_KEY ?? "";
 const VETTING_PRIVATE_KEY = process.env.SLOP_E2E_VETTING_PRIVATE_KEY ?? "";
 const GITHUB_FIXTURE = process.env.SLOP_E2E_GITHUB_API_ORIGIN ?? "";
+/** One maintainer session per viewport, which a moderator bans. */
+const MAINTAINER_TOKENS = JSON.parse(
+  process.env.SLOP_E2E_MAINTAINER_TOKENS ?? "{}",
+) as Record<string, string>;
 /** A contributor session from the security roles, used as a flagger. */
 const SECURITY_ACCOUNT = {
   id: "900000011",
@@ -1088,6 +1092,233 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   await applicantContext.close();
 });
 
+test("a moderator decides a confirmed malicious result and bans the project and its maintainer @registry", async ({
+  browser,
+  request,
+}) => {
+  const suffix = test.info().project.name.replace(/-chromium$/u, "");
+  const login = `e2e-maintainer-${suffix}`;
+  const token = MAINTAINER_TOKENS[`maintainer-${suffix}`] ?? "";
+  const words = suffix.replaceAll("-", " ");
+  const project = {
+    id: `malice-${suffix}`,
+    repository: `${login}/malice-${suffix}`,
+    name: `Malice ${words}`,
+  };
+  const next = {
+    id: `malice-next-${suffix}`,
+    repository: `${login}/malice-next-${suffix}`,
+    name: `Malice next ${words}`,
+  };
+  const evidence = `https://github.com/${project.repository}/security/advisories/GHSA-e2e`;
+
+  // The maintainer lists the project; setup queues its first scan.
+  const maintainerContext = await browser.newContext(walkthroughOptions());
+  const maintainer = await maintainerContext.newPage();
+  const maintainerErrors = observe(maintainer);
+  await signIn(maintainer, token);
+  await setSlopbot(`${project.repository}/installed`);
+  await draftApplication(maintainer, project);
+  await maintainer
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(
+    maintainer.getByRole("heading", { name: "Project created" }),
+  ).toBeVisible();
+
+  // A signed confirmed malicious result bans the project at once.
+  await postVettingResult(request, project.id, project.repository, "malicious");
+  expect((await request.get(`/api/v1/projects/${project.id}`)).status()).toBe(
+    410,
+  );
+  expect(maintainerErrors).toEqual([]);
+  await maintainerContext.close();
+
+  // Without an appeal, the moderator queue lists the result for a decision.
+  const moderatorContext = await browser.newContext(walkthroughOptions());
+  const moderator = await moderatorContext.newPage();
+  const moderatorErrors = observe(moderator);
+  await signIn(moderator, MODERATOR_TOKEN);
+  await moderator.goto("/admin", { waitUntil: "networkidle" });
+  const summary = moderator.locator(".admin-project-summary", {
+    has: moderator.getByRole("heading", { name: project.name, exact: true }),
+  });
+  await expect(summary).toContainText(
+    "Moderator decision needed: confirmed malicious result",
+  );
+  await expectAccessible(moderator);
+  await moderator.screenshot({
+    path: test.info().outputPath("malicious-decision-queue.png"),
+    fullPage: true,
+  });
+  await summary.getByRole("button", { name: `Open ${project.name}` }).click();
+  const panel = moderator
+    .locator(".admin-card", {
+      has: moderator.getByText(project.id, { exact: true }),
+    })
+    .getByRole("region", { name: "Enforcement", exact: true });
+  await expect(panel).toContainText("Moderator decision needed");
+  await expect(panel).toContainText("Banned");
+  await expect(panel.getByLabel("Action")).toHaveValue("ban");
+  await expect(panel.getByLabel("Action").locator("option:checked")).toHaveText(
+    "Ban project and maintainer",
+  );
+  await panel
+    .getByLabel("Reason (private audit record)")
+    .fill("Reviewed the signed finding: the install script steals tokens");
+  await panel.getByLabel("Evidence reference (link or case id)").fill(evidence);
+  await panel.getByLabel("Responsible GitHub accounts").fill(login);
+  await panel.getByRole("button", { name: "Preview action" }).click();
+  const preview = panel.getByRole("group", {
+    name: "Preview: check it, then confirm",
+  });
+  await expect(preview).toContainText("Banned → Banned");
+  await expect(preview).toContainText(`Maintainer accounts banned@${login}`);
+  await expectAccessible(moderator);
+  await moderator.screenshot({
+    path: test.info().outputPath("malicious-decision-preview.png"),
+    fullPage: true,
+  });
+  await preview
+    .getByRole("button", { name: "Confirm: Ban project and maintainer" })
+    .click();
+  await expect(moderator.getByRole("status").first()).toContainText(
+    "Ban project and maintainer recorded",
+  );
+  await expect(panel).not.toContainText("Moderator decision needed");
+  await expect(panel).toContainText(`Banned maintainers@${login}`);
+  await panel.getByText(/Enforcement history/u).click();
+  await expect(panel.locator("li")).toHaveCount(2);
+  await expect(panel.locator("li").nth(1)).toContainText(
+    "Ban project and maintainer by @e2e-moderator (project-moderator, admin-panel)",
+  );
+  await expectAccessible(moderator);
+  await moderator.evaluate(() => {
+    document.documentElement.style.zoom = "2";
+  });
+  await expectAccessible(moderator);
+  await moderator.screenshot({
+    path: test.info().outputPath("malicious-decision-zoom200.png"),
+    fullPage: true,
+  });
+  expect(moderatorErrors).toEqual([]);
+  await moderatorContext.close();
+
+  // The decision stays a ban on every public route.
+  expect((await request.get(`/api/v1/projects/${project.id}`)).status()).toBe(
+    410,
+  );
+  expect((await request.get(`/projects/${project.id}/SKILL.md`)).status()).toBe(
+    410,
+  );
+
+  // The banned maintainer returns in a new session and cannot list another
+  // project.
+  const returningContext = await browser.newContext(walkthroughOptions());
+  const returning = await returningContext.newPage();
+  const returningErrors = observe(returning);
+  await signIn(returning, token);
+  await setSlopbot(`${next.repository}/installed`);
+  await draftApplication(returning, next);
+  await returning
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(returning.getByRole("alert").first()).toContainText(
+    "A moderator banned this maintainer",
+  );
+  expect(await listedProject(returning, next.id)).toBeUndefined();
+  expect(returningErrors).toEqual([
+    "Failed to load resource: the server responded with a status of 403 (Forbidden)",
+  ]);
+  returningErrors.length = 0;
+  await expectAccessible(returning);
+  await returning.screenshot({
+    path: test.info().outputPath("banned-maintainer-refused.png"),
+    fullPage: true,
+  });
+
+  // The maintainer's inbox has the automatic ban and the moderator decision,
+  // without the private reason or evidence reference.
+  await returning.goto("/inbox", { waitUntil: "networkidle" });
+  await expect(
+    returning.locator(".inbox-item", {
+      hasText: `The ${project.id} project is banned.`,
+    }),
+  ).toHaveCount(2);
+  await expect(returning.locator("main")).not.toContainText("steals tokens");
+  await expect(returning.locator("main")).not.toContainText(evidence);
+  expect(returningErrors).toEqual([]);
+  await returning.goto("/account", { waitUntil: "networkidle" });
+  const appealForm = returning.getByRole("form", {
+    name: `Account appeal for ${project.id}`,
+  });
+  await appealForm
+    .getByLabel("Reason for appeal")
+    .fill("The account is not responsible for this code");
+  await appealForm.getByLabel("Evidence reference").fill(evidence);
+  await appealForm.getByRole("button", { name: "Send account appeal" }).click();
+  await expect(appealForm.getByRole("status")).toContainText("Appeal recorded");
+  await returning.reload({ waitUntil: "networkidle" });
+  await expect(appealForm.getByRole("status")).toContainText("Appeal recorded");
+  await expectAccessible(returning);
+  await returning.screenshot({
+    path: test.info().outputPath("account-appeal-submitted.png"),
+    fullPage: true,
+  });
+  expect(returningErrors).toEqual([]);
+  await returningContext.close();
+
+  const independentContext = await browser.newContext(walkthroughOptions());
+  const independent = await independentContext.newPage();
+  const independentErrors = observe(independent);
+  await signIn(independent, ADMIN_TOKEN);
+  await independent.goto("/admin", { waitUntil: "networkidle" });
+  await independent
+    .getByRole("button", { name: `Open ${project.name}`, exact: true })
+    .click();
+  const accountPanel = independent
+    .locator(".admin-card", {
+      has: independent.getByText(project.id, { exact: true }),
+    })
+    .getByRole("region", { name: "Enforcement", exact: true });
+  await accountPanel.getByLabel("Action").selectOption("reinstate_accounts");
+  await accountPanel.getByLabel("GitHub accounts to reinstate").fill(login);
+  await accountPanel
+    .getByLabel("Reason (private audit record)")
+    .fill("The evidence clears this account; the project stays banned");
+  await accountPanel
+    .getByLabel("Evidence reference (link or case id)")
+    .fill(evidence);
+  await accountPanel.getByRole("button", { name: "Preview action" }).click();
+  const accountPreview = accountPanel.getByRole("group", {
+    name: "Preview: check it, then confirm",
+  });
+  await expect(accountPreview).toContainText(`Accounts reinstated@${login}`);
+  await expect(accountPreview).toContainText("Banned → Banned");
+  await expectAccessible(independent);
+  await independent.screenshot({
+    path: test.info().outputPath("account-reinstatement-preview.png"),
+    fullPage: true,
+  });
+  await accountPreview
+    .getByRole("button", { name: "Confirm: Reinstate selected accounts" })
+    .click();
+  await expect(independent.getByRole("status").first()).toContainText(
+    "Reinstate selected accounts recorded",
+  );
+  await expect(accountPanel).not.toContainText(`Banned maintainers@${login}`);
+  expect((await request.get(`/api/v1/projects/${project.id}`)).status()).toBe(
+    410,
+  );
+  await expectAccessible(independent);
+  await independent.screenshot({
+    path: test.info().outputPath("account-reinstated-project-banned.png"),
+    fullPage: true,
+  });
+  expect(independentErrors).toEqual([]);
+  await independentContext.close();
+});
+
 test("an owner installs Slopbot before creation and resumes setup; a failed scan and lost access each show the next action @registry", async ({
   browser,
   request,
@@ -1395,8 +1626,7 @@ test("an unavailable registry shows an error, never an empty list @registry", as
     route.fulfill({ status: 503, json: { error: "unavailable" } }),
   );
   await page.goto("/", { waitUntil: "networkidle" });
-  // This build has no synced snapshot to publish as the last good registry,
-  // so the failure is an alert with its status and a retry, never a list.
+  // The failure is an alert with its status and a retry, never a list.
   const alert = page.getByRole("alert");
   await expect(alert).toContainText("503");
   await expect(alert.getByRole("button")).toBeVisible();

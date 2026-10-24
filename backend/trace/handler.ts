@@ -173,6 +173,18 @@ function idempotencyKey(request: Request): string {
   return value;
 }
 
+async function assertParticipationAllowed(
+  actor: AuthenticatedActor,
+  deps: TraceApiDependencies,
+): Promise<void> {
+  if (await deps.persistence.hasParticipationBan(actor.githubId))
+    fail(
+      403,
+      "participation_banned",
+      "This account cannot start new Slop contributions. Funded awards and appeals remain available.",
+    );
+}
+
 function assertWriter(actor: AuthenticatedActor): void {
   if (
     !actor.roles.includes("contributor") &&
@@ -813,6 +825,7 @@ async function createRun(
   deps: TraceApiDependencies,
 ): Promise<Response> {
   assertWriter(actor);
+  await assertParticipationAllowed(actor, deps);
   const body = await readJsonObject(request);
   const now = deps.now().toISOString();
   const result = await deps.persistence.createRun({
@@ -835,6 +848,7 @@ async function createRun(
     createdAt: now,
   });
   if (result.status === "conflict") {
+    await assertParticipationAllowed(actor, deps);
     fail(409, "idempotency_conflict", "Idempotency key was reused");
   }
   return json(result.status === "created" ? 201 : 200, {
@@ -1092,6 +1106,7 @@ async function appendEvent(
   runId: string,
 ): Promise<Response> {
   assertWriter(actor);
+  await assertParticipationAllowed(actor, deps);
   const run = await ensureOwner(deps.persistence, actor, runId);
   if (run.state === "finalized") fail(409, "run_finalized", "Run is finalized");
   const body = await readJsonObject(request);
@@ -1130,6 +1145,7 @@ async function appendEvent(
     createdAt: createdAt.toISOString(),
   });
   if (result.status === "conflict") {
+    await assertParticipationAllowed(actor, deps);
     fail(409, "idempotency_conflict", "Idempotency key was reused");
   }
   return json(result.status === "created" ? 201 : 200, {

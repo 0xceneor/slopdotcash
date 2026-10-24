@@ -18,6 +18,7 @@ import {
   CloudflareProjectPersistence,
   type ProjectD1Database,
 } from "../projects/cloudflare-persistence";
+import { seedParticipationBan } from "../security/participation-ban.fixture";
 import { handlePaymentsApi } from "./handler";
 import {
   coordinateMonthlyPayments,
@@ -201,6 +202,174 @@ async function rejects(promise: Promise<unknown>, code: string) {
 }
 
 describe("monthly coordinator", () => {
+  for (const action of ["allocation", "setting", "finalize"] as const) {
+    for (const racing of [false, true]) {
+      test(`a ${racing ? "concurrent" : "current"} owner ban refuses monthly ${action}`, async () => {
+        clock = beforeCutoff;
+        const ban = () =>
+          seedParticipationBan(
+            sqlite,
+            actor,
+            { githubId: "404", githubLogin: "moderator" },
+            beforeCutoff.toISOString(),
+          );
+        const table =
+          action === "allocation"
+            ? "monthly_allocation_changes"
+            : action === "setting"
+              ? "monthly_payment_settings"
+              : "monthly_payment_runs";
+        const original = db.prepare.bind(db);
+        if (racing) {
+          db.prepare = (sql) => {
+            if (sql.startsWith(`INSERT INTO ${table}(`)) {
+              ban();
+              db.prepare = original;
+            }
+            return original(sql);
+          };
+        } else ban();
+        const service = owner();
+        await rejects(
+          action === "allocation"
+            ? service.changeAllocation(project.id, "2026-11", actor, {
+                githubUserId: B,
+                grossBase: "300",
+                expectedSequence: 0,
+              })
+            : action === "setting"
+              ? service.setAutomatic(project.id, actor, false)
+              : service.finalize(project.id, "2026-11", actor, 0),
+          "account_banned",
+        );
+        db.prepare = original;
+        expect(count(table)).toBe(0);
+        expect(count("monthly_payment_obligations")).toBe(0);
+        expect(
+          (await service.view(project.id, "2026-11", actor)).projectId,
+        ).toBe(project.id);
+      });
+    }
+  }
+  test("a ban after freeze excludes only the unfunded award and preserves the snapshot", async () => {
+    await coordinate(afterCutoff);
+    const before = sqlite
+      .query("SELECT snapshot, snapshot_sha256 FROM monthly_payment_runs")
+      .get();
+    seedParticipationBan(
+      sqlite,
+      { githubId: A, githubLogin: "first" },
+      actor,
+      afterCutoff.toISOString(),
+    );
+    vault("400");
+    const result = await coordinate(afterCutoff);
+    expect(result.created).toEqual([`${project.id}/2026-11`]);
+    expect(
+      sqlite
+        .query("SELECT github_user_id FROM monthly_payment_obligations")
+        .all(),
+    ).toEqual([{ github_user_id: B }]);
+    expect(
+      sqlite
+        .query("SELECT snapshot, snapshot_sha256 FROM monthly_payment_runs")
+        .get(),
+    ).toEqual(before);
+    expect(
+      sqlite
+        .query("SELECT github_user_id FROM monthly_payment_exclusions")
+        .all(),
+    ).toEqual([{ github_user_id: A }]);
+    await coordinate(afterCutoff);
+    expect(count("monthly_payment_obligations")).toBe(1);
+    const view = await owner().view(project.id, "2026-11", actor);
+    expect(view.run?.totalGrossBase).toBe("400");
+    await rejects(
+      owner().commitment(project.id, "2026-11", actor, {
+        network: "base-sepolia",
+        manifestSha256: project.manifestSha256,
+        snapshotSha256: view.run?.snapshotSha256 ?? "",
+        githubUserId: A,
+      }),
+      "award_excluded",
+    );
+    const eligible = await owner().commitment(project.id, "2026-11", actor, {
+      network: "base-sepolia",
+      manifestSha256: project.manifestSha256,
+      snapshotSha256: view.run?.snapshotSha256 ?? "",
+      githubUserId: B,
+    });
+    expect(eligible.award.gross).toBe("400");
+    expect(
+      view.run?.awards.find((award) => award.githubUserId === A),
+    ).toMatchObject({
+      state: "excluded",
+      grossBase: "0",
+      feeBase: "0",
+      netBase: "0",
+    });
+  });
+
+  test("a ban that races monthly funding makes the coordinator retry before creating awards", async () => {
+    await coordinate(afterCutoff);
+    vault("1000");
+    const batch = db.batch.bind(db);
+    let pending = true;
+    db.batch = async (statements) => {
+      if (pending) {
+        pending = false;
+        seedParticipationBan(
+          sqlite,
+          { githubId: A, githubLogin: "first" },
+          actor,
+          afterCutoff.toISOString(),
+        );
+      }
+      return batch(statements);
+    };
+    expect((await coordinate(afterCutoff)).created).toEqual([]);
+    expect(count("monthly_payment_obligations")).toBe(0);
+    expect(count("monthly_payment_exclusions")).toBe(0);
+    expect((await coordinate(afterCutoff)).created).toEqual([
+      `${project.id}/2026-11`,
+    ]);
+    expect(
+      sqlite
+        .query("SELECT github_user_id FROM monthly_payment_obligations")
+        .all(),
+    ).toEqual([{ github_user_id: B }]);
+  });
+
+  test("a later ban preserves monthly awards that are already funded", async () => {
+    vault("1000");
+    await coordinate(afterCutoff);
+    seedParticipationBan(
+      sqlite,
+      { githubId: A, githubLogin: "first" },
+      actor,
+      afterCutoff.toISOString(),
+    );
+    await coordinate(afterCutoff);
+    expect(count("monthly_payment_obligations")).toBe(2);
+    seedParticipationBan(
+      sqlite,
+      actor,
+      { githubId: "404", githubLogin: "moderator" },
+      afterCutoff.toISOString(),
+    );
+    const view = await owner().view(project.id, "2026-11", actor);
+    const plan = await owner().commitment(project.id, "2026-11", actor, {
+      network: deployment.network,
+      manifestSha256: project.manifestSha256,
+      snapshotSha256: view.run?.snapshotSha256 ?? "",
+      githubUserId: A,
+    });
+    expect(plan.award.gross).toBe("600");
+    expect(plan.award.sourceDigest).toBe(
+      escrowAwardOrigin(project.id, "2026-11", A),
+    );
+  });
+
   test("freezes the current private allocations once at the cutoff and creates each obligation once when funded", async () => {
     clock = beforeCutoff;
     const changed = await owner().changeAllocation(

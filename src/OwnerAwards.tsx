@@ -36,6 +36,7 @@ const STATE_TEXT: Record<
   string
 > = {
   underfunded: "Waiting for free vault funds",
+  excluded: "Excluded from payment: account banned",
   "awaiting-reservation": "Ready for your reservation",
   reserved: "Reserved; pays when the contributor's wallet is ready",
   paid: "Paid",
@@ -354,7 +355,7 @@ export default function OwnerAwards({
                 </time>
                 .{" "}
                 {view.run.funded
-                  ? "Each award is reserved once from your vault."
+                  ? "Funding is recorded for eligible awards. Excluded entries receive no payment."
                   : "Awards wait until the vault's free balance covers them."}
               </p>
               {view.run.awards.length === 0 ? (

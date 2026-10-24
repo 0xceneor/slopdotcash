@@ -23,6 +23,10 @@ import type {
   D1TransactionalDatabase,
 } from "../d1";
 import { notifySecurityCase } from "../notifications/events";
+import {
+  hasParticipationBan,
+  PARTICIPATION_BAN_QUERY,
+} from "../projects/account-bans";
 import { cachedPublicResponse, type EdgeCache } from "../projects/edge-cache";
 import { readJsonObject } from "../trace/validation";
 import type { AdvisoryReader, GithubPrivateReport } from "./advisories";
@@ -1787,6 +1791,7 @@ type Change = {
    * matches but this condition fails, the request returns `unmet`.
    */
   requireSql?: string;
+  requireValues?: unknown[];
   unmet?: { code: string; message: string };
   /** The change proposes a related-party award for independent review. */
   relatedReview?: boolean;
@@ -1972,7 +1977,7 @@ async function planChange(
         role: "security-maintainer",
         reason: textField(body, "reason", 8, 2000),
         evidenceReference: null,
-        ...(await planAward(deps, row, body, now)),
+        ...(await planAward(deps, row, actor, body, now)),
       };
     }
     case "remediation": {
@@ -2188,6 +2193,7 @@ async function planChange(
         row,
         row.award_gross_minor ?? (frozenTerms(row) as FrozenTerms).grossMinor,
         at,
+        actor,
       );
       return {
         kind: action,
@@ -2497,6 +2503,7 @@ async function planDecision(
       related_party_review: "not-applicable",
       award_state: "pending",
     },
+    actor,
     award,
     deps.now(),
   );
@@ -2536,6 +2543,7 @@ async function reporterIsRelated(
 async function planAward(
   deps: SecurityApiDependencies,
   row: CaseRow,
+  actor: Actor,
   body: Record<string, unknown>,
   now: Date,
 ): Promise<Omit<Change, "kind" | "role" | "reason" | "evidenceReference">> {
@@ -2606,6 +2614,7 @@ async function planAward(
     };
   }
   if (await reporterIsRelated(deps, row)) {
+    await assertNewAwardParticipation(deps, row, actor);
     await assertRootCauseFree(
       deps,
       row.project_id,
@@ -2622,6 +2631,12 @@ async function planAward(
         payment_deadline: paymentDeadline,
       },
       relatedReview: true,
+      requireSql: `NOT EXISTS (${PARTICIPATION_BAN_QUERY}) AND NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
+      requireValues: [row.reporter_github_id, actor.githubId],
+      unmet: {
+        code: "participation_banned",
+        message: "The award participants can no longer start a new Slop award.",
+      },
     };
   }
   const reservation = await awardReservation(
@@ -2629,6 +2644,7 @@ async function planAward(
     row,
     grossMinor,
     now.toISOString(),
+    actor,
   );
   return {
     detail,
@@ -2669,6 +2685,22 @@ async function assertRootCauseFree(
     );
 }
 
+async function assertNewAwardParticipation(
+  deps: SecurityApiDependencies,
+  row: CaseRow,
+  actor: Actor,
+): Promise<void> {
+  if (
+    (await hasParticipationBan(deps.db, row.reporter_github_id)) ||
+    (await hasParticipationBan(deps.db, actor.githubId))
+  )
+    fail(
+      403,
+      "participation_banned",
+      "A banned account cannot approve or receive a new Slop award. Funded awards and appeals remain available.",
+    );
+}
+
 /**
  * Reserves the approved gross amount for the case's root cause in the same
  * batch as the revision-checked case update (PRD section 10, Capacity: only
@@ -2681,7 +2713,9 @@ async function awardReservation(
   row: CaseRow,
   grossMinor: string,
   at: string,
+  actor: Actor,
 ): Promise<Required<Pick<Change, "before" | "set" | "requireSql" | "unmet">>> {
+  await assertNewAwardParticipation(deps, row, actor);
   const terms = frozenTerms(row);
   const rootCauseKey = row.root_cause_key;
   if (terms === null || rootCauseKey === null)
@@ -2720,7 +2754,7 @@ async function awardReservation(
     before: [
       deps.db
         .prepare(
-          `INSERT INTO security_award_reservations (case_id, project_id, root_cause_key, policy_revision, gross_minor, currency, reserved_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT revision FROM security_cases WHERE id = ?) = ? AND (${OUTSTANDING_RESERVATIONS}) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND ${snapshotGuards.map((guard) => guard.sql).join(" AND ")} AND NOT EXISTS (${ROOT_CAUSE_PENDING_REVIEW})`,
+          `INSERT INTO security_award_reservations (case_id, project_id, root_cause_key, policy_revision, gross_minor, currency, reserved_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE (SELECT revision FROM security_cases WHERE id = ?) = ? AND (${OUTSTANDING_RESERVATIONS}) + CAST(? AS INTEGER) <= CAST(? AS INTEGER) AND ${snapshotGuards.map((guard) => guard.sql).join(" AND ")} AND NOT EXISTS (${ROOT_CAUSE_PENDING_REVIEW}) AND NOT EXISTS (${PARTICIPATION_BAN_QUERY}) AND NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
         )
         .bind(
           row.id,
@@ -2741,6 +2775,8 @@ async function awardReservation(
           row.project_id,
           row.id,
           rootCauseKey,
+          row.reporter_github_id,
+          actor.githubId,
         ),
     ],
     set: {
@@ -2753,7 +2789,7 @@ async function awardReservation(
     unmet: {
       code: "insufficient_funds",
       message:
-        "The bounty vault's unreserved finalized balance no longer covers this award",
+        "The award can no longer be reserved. Check the available funds and the recipient’s participation status.",
     },
   };
 }
@@ -2907,6 +2943,7 @@ async function actOnCase(
       at,
       row.id,
       row.revision,
+      ...(change.requireValues ?? []),
     );
   let results: D1Result[];
   try {

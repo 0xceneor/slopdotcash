@@ -24,6 +24,10 @@ import { fail } from "../api-error";
 import type { D1QueryStatement as D1Statement } from "../d1";
 import { notifySecurityReportReceived } from "../notifications/events";
 import {
+  hasParticipationBan,
+  PARTICIPATION_BAN_QUERY,
+} from "../projects/account-bans";
+import {
   type AdvisoryFacts,
   type FailureCode,
   markerLine,
@@ -249,7 +253,7 @@ function transitionStatements(
           .map((column) => `${column} = ?, `)
           .join(
             "",
-          )}revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ? AND state = ?`,
+          )}revision = revision + 1, updated_at = ? WHERE id = ? AND revision = ? AND state = ?${next.kind === "send" ? ` AND NOT EXISTS (${PARTICIPATION_BAN_QUERY})` : ""}`,
       )
       .bind(
         next.state,
@@ -258,6 +262,7 @@ function transitionStatements(
         row.id,
         row.revision,
         row.state,
+        ...(next.kind === "send" ? [row.reporter_github_id] : []),
       ),
     deps.db
       .prepare(
@@ -412,12 +417,25 @@ async function requireGrant(
   return grant;
 }
 
+async function requireNewParticipation(
+  deps: SecurityApiDependencies,
+  githubId: string,
+): Promise<void> {
+  if (await hasParticipationBan(deps.db, githubId))
+    fail(
+      403,
+      "participation_banned",
+      "This account cannot start new Slop work. Existing cases, funded awards and appeals remain available.",
+    );
+}
+
 async function createSubmission(
   request: Request,
   deps: SecurityApiDependencies,
   intake: IntakeConfig,
 ): Promise<Response> {
   const actor = await requireActor(request, deps);
+  await requireNewParticipation(deps, actor.githubId);
   const body = await readBody(request);
   exactKeys(body, ["projectId", "idempotencyKey", "origin"], ["advisory"]);
   const projectId = stringField(body, "projectId", PROJECT_ID);
@@ -505,7 +523,7 @@ async function createSubmission(
     await deps.db.batch([
       deps.db
         .prepare(
-          `INSERT INTO security_submissions (${COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 0, NULL, ?, NULL, NULL, NULL, NULL, 1, ?, ?)`,
+          `INSERT INTO security_submissions (${COLUMNS}) SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'draft', 0, NULL, ?, NULL, NULL, NULL, NULL, 1, ?, ? WHERE NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
         )
         .bind(
           id,
@@ -519,16 +537,18 @@ async function createSubmission(
           advisory,
           at,
           at,
+          actor.githubId,
         ),
       deps.db
         .prepare(
-          "INSERT INTO security_submission_events (submission_id, revision, kind, detail, actor_github_id, at) VALUES (?, 1, 'create', ?, ?, ?)",
+          "INSERT INTO security_submission_events (submission_id, revision, kind, detail, actor_github_id, at) SELECT ?, 1, 'create', ?, ?, ? WHERE EXISTS (SELECT 1 FROM security_submissions WHERE id = ?)",
         )
         .bind(
           id,
           JSON.stringify(advisory === null ? { origin } : { origin, advisory }),
           actor.githubId,
           at,
+          id,
         ),
     ]);
   } catch (error) {
@@ -536,7 +556,11 @@ async function createSubmission(
       throw error;
     fail(409, "idempotency_conflict", "That request key was already used");
   }
-  const row = (await loadSubmission(deps, id)) as SubmissionRow;
+  const row = await loadSubmission(deps, id);
+  if (row === null) {
+    await requireNewParticipation(deps, actor.githubId);
+    fail(409, "submission_changed", "Start the submission again");
+  }
   const flow = await authorize(row);
   return grantResponse(201, row, { authorizeUrl: flow.authorizeUrl }, [
     flow.cookie,
@@ -853,6 +877,7 @@ async function sendSubmission(
   id: string,
 ): Promise<Response> {
   const actor = await requireActor(request, deps);
+  await requireNewParticipation(deps, actor.githubId);
   const loaded = await ownSubmission(deps, id, actor);
   const body = await readBody(request);
   exactKeys(body, ["expectedRevision", "report"]);
@@ -922,8 +947,10 @@ async function sendSubmission(
       "Another submission for this program is being sent",
     );
   }
-  if (sending === null)
+  if (sending === null) {
+    await requireNewParticipation(deps, actor.githubId);
     fail(409, "stale_revision", "The submission changed since you loaded it");
+  }
   const result = await intake.advisories.createReport(
     grant,
     sending.repository,

@@ -47,7 +47,11 @@ import {
   purgeProjectCache,
 } from "./edge-cache";
 import {
+  accountAppealState,
+  activeAccountBans,
   activeRestrictions,
+  awaitsMaliciousDecision,
+  bannedMaintainerIds,
   ENFORCEMENT_ACTIONS,
   enforcedManifest,
   enforcementRevisionReason,
@@ -915,11 +919,10 @@ async function createProject(
     ),
   );
   assertNewProjectManifest(manifest);
-  assertRepositoryUnrestricted(
-    manifest,
-    await deps.persistence.listEnforcements(),
-  );
   const actor = actorOf(session);
+  const enforcements = await deps.persistence.listEnforcements();
+  assertMaintainerNotBanned(manifest, actor, enforcements);
+  assertRepositoryUnrestricted(manifest, enforcements);
   const referrer = await resolveReferrer(body.referrer, manifest, actor, deps);
   assertRegistryWith(await deps.persistence.listProjects(), manifest, {
     replaces: false,
@@ -1009,10 +1012,9 @@ async function publishOwnerRevision(
   if (current === null) fail(404, "not_found", "Project not found");
   if (current.revision !== expectedRevision)
     fail(409, "stale_revision", "The project changed since you loaded it");
-  const restriction = publicRestrictionOf(
-    current,
-    await deps.persistence.listEnforcements(),
-  );
+  const enforcements = await deps.persistence.listEnforcements();
+  assertMaintainerNotBanned(current.manifest, actor, enforcements);
+  const restriction = publicRestrictionOf(current, enforcements);
   if (restriction.state !== "clear")
     fail(
       409,
@@ -1212,10 +1214,9 @@ async function publishPendingApplication(
     });
   canonicalManifest(application.manifest);
   assertNewProjectManifest(application.manifest, { storedApplication: true });
-  assertRepositoryUnrestricted(
-    application.manifest,
-    await deps.persistence.listEnforcements(),
-  );
+  const enforcements = await deps.persistence.listEnforcements();
+  assertMaintainerNotBanned(application.manifest, actor, enforcements);
+  assertRepositoryUnrestricted(application.manifest, enforcements);
   assertRegistryWith(
     await deps.persistence.listProjects(),
     application.manifest,
@@ -1501,6 +1502,28 @@ function assertRepositoryUnrestricted(
     );
 }
 
+/**
+ * Refuses project setup and owner changes by a maintainer that a moderator
+ * banned after a confirmed malicious result (PRD sections 2 and 8), whether
+ * the account acts itself or is named as the steward.
+ */
+function assertMaintainerNotBanned(
+  manifest: ProjectDefinition,
+  actor: GithubActor,
+  enforcements: ProjectEnforcement[],
+): void {
+  const banned = bannedMaintainerIds(enforcements);
+  if (
+    banned.has(actor.githubId) ||
+    banned.has(String(manifest.steward.github.actorId))
+  )
+    fail(
+      403,
+      "maintainer_banned",
+      "A moderator banned this maintainer after a confirmed malicious scan result. The account cannot start new Slop participation. The banned account, project steward or original applicant may appeal the project decision.",
+    );
+}
+
 function adminEnforcement(
   project: ProjectRecord,
   restriction: ProjectRestriction,
@@ -1517,6 +1540,8 @@ function adminEnforcement(
     revisionPending:
       restriction.state !== "clear" && !enforcedManifest(project.manifest),
     moderation,
+    decisionRequired: awaitsMaliciousDecision(restriction),
+    bannedMaintainers: restriction.bannedMaintainers,
     records: restriction.records,
   };
 }
@@ -1573,17 +1598,57 @@ async function enforceProject(
   const session = await requireModerator(request, deps);
   if (!PROJECT_ID.test(projectId)) fail(404, "not_found", "Project not found");
   const body = await readJsonObject(request);
-  exactKeys(body, [
-    "action",
-    "reason",
-    "evidenceReference",
-    "expectedRevision",
-    "expectedSequence",
-  ]);
+  exactKeys(
+    body,
+    [
+      "action",
+      "reason",
+      "evidenceReference",
+      "expectedRevision",
+      "expectedSequence",
+    ],
+    ["responsibleAccounts"],
+  );
   if (!ENFORCEMENT_ACTIONS.includes(body.action as EnforcementAction))
     fail(400, "invalid_request", "Invalid enforcement action");
+  const responsibleAccounts: GithubActor[] = [];
+  if (body.responsibleAccounts !== undefined) {
+    if (!Array.isArray(body.responsibleAccounts))
+      fail(400, "invalid_request", "Select the responsible accounts.");
+    for (const selected of body.responsibleAccounts) {
+      if (
+        !selected ||
+        typeof selected !== "object" ||
+        typeof selected.githubLogin !== "string"
+      )
+        fail(400, "invalid_request", "Enter a GitHub account name.");
+      const account = await lookupGitHubActor(
+        deps.github.fetch,
+        deps.github.token,
+        selected.githubLogin,
+        deps.github.apiOrigin,
+      );
+      if (
+        account === null ||
+        (selected.githubId !== undefined &&
+          selected.githubId !== account.githubId)
+      )
+        fail(
+          409,
+          "account_changed",
+          "The selected GitHub account changed. Preview the decision again.",
+        );
+      if (
+        !responsibleAccounts.some(
+          (entry) => entry.githubId === account.githubId,
+        )
+      )
+        responsibleAccounts.push(account);
+    }
+  }
   return await recordEnforcement(deps, {
     projectId,
+    responsibleAccounts,
     action: body.action as EnforcementAction,
     ...enforcementText(body),
     expectedRevision: positiveInteger(
@@ -1602,10 +1667,33 @@ async function enforceProject(
 }
 
 /**
- * ELG-02 appeal path: the project steward named in the manifest, or the
- * account that listed the project, records a reinstatement
- * request. A moderator who did not place the restriction still decides it.
+ * Owners, original applicants and accounts named in the current project ban
+ * can request reinstatement. A moderator who did not place the restriction
+ * still decides it. Filing does not grant project authority.
  */
+async function listAccountAppeals(
+  request: Request,
+  deps: ProjectApiDependencies,
+): Promise<Response> {
+  const session = await requireSession(request, deps);
+  const records = await deps.persistence.listEnforcements();
+  const projectIds = new Set(
+    activeAccountBans(records)
+      .filter(({ account }) => account.githubId === session.githubId)
+      .map(({ record }) => record.projectId),
+  );
+  return json(200, {
+    appeals: [...projectIds].map((projectId) => {
+      const restriction = projectRestriction(projectId, records);
+      return {
+        projectId,
+        state: restriction.state,
+        appeal: accountAppealState(restriction, session.githubId),
+      };
+    }),
+  });
+}
+
 async function requestReinstatement(
   request: Request,
   deps: ProjectApiDependencies,
@@ -1631,10 +1719,20 @@ async function requestReinstatement(
       // the project through self-service setup.
       const creator = await deps.persistence.projectCreator(project.id);
       if (creator?.githubId === session.githubId) return "project-applicant";
+      const restriction = projectRestriction(
+        project.id,
+        await deps.persistence.listEnforcements(),
+      );
+      if (
+        restriction.bannedMaintainers.some(
+          (account) => account.githubId === session.githubId,
+        )
+      )
+        return "banned-account";
       return fail(
         403,
         "forbidden",
-        "Only the project steward or the account that listed the project can request reinstatement",
+        "Only the project steward, the account that listed the project, or an account banned by this project decision can appeal",
       );
     },
     decisionSource: "owner-request",
@@ -1646,6 +1744,7 @@ async function recordEnforcement(
   deps: ProjectApiDependencies,
   input: {
     projectId: string;
+    responsibleAccounts?: GithubActor[];
     action: EnforcementAction;
     reason: string;
     evidenceReference: string;
@@ -1728,6 +1827,45 @@ async function recordEnforcement(
       maliciousAssessmentIds: vetting.reviewedMaliciousAssessmentIds ?? [],
     };
   }
+  const selectedAccounts = input.responsibleAccounts ?? [];
+  const accountReinstatements: NonNullable<
+    ProjectEnforcement["accountReinstatements"]
+  > = [];
+  if (action === "reinstate_accounts") {
+    if (selectedAccounts.length === 0)
+      fail(400, "invalid_request", "Select the accounts to reinstate.");
+    const currentBans = activeAccountBans(restriction.records);
+    for (const selected of selectedAccounts) {
+      const bans = currentBans.filter(
+        ({ account }) => account.githubId === selected.githubId,
+      );
+      if (bans.length === 0)
+        fail(
+          409,
+          "account_not_banned",
+          "The selected account has no active ban from this project.",
+        );
+      if (bans.some(({ record }) => record.actor?.githubId === actor.githubId))
+        fail(
+          403,
+          "independent_review_required",
+          "A moderator who did not ban this account must decide its appeal.",
+        );
+      for (const { record } of bans)
+        accountReinstatements.push({
+          ...selected,
+          banEnforcementId: record.id,
+        });
+    }
+  }
+  const maintainerBans =
+    action === "reinstate_accounts" ? [] : selectedAccounts;
+  if (maintainerBans.length > 0 && !plan.bansMaintainer)
+    fail(
+      400,
+      "invalid_request",
+      "Account bans require a moderator decision on a confirmed malicious result.",
+    );
   const recordId = `enf_${deps.randomId().replaceAll("-", "")}`;
   const at = deps.now().toISOString();
   const revisionText =
@@ -1754,7 +1892,8 @@ async function recordEnforcement(
     ],
     actor,
     actorRole,
-    decisionSource: input.decisionSource,
+    decisionSource:
+      actorRole === "banned-account" ? "account-request" : input.decisionSource,
     beforeRevision: project.revision,
     beforeManifestSha256: project.manifestSha256,
     afterRevision: revisionText === null ? null : project.revision + 1,
@@ -1766,6 +1905,8 @@ async function recordEnforcement(
           ? "revision_pending"
           : "no_revision_needed",
     ...(vettingReview ? { vettingReview } : {}),
+    ...(maintainerBans.length > 0 ? { maintainerBans } : {}),
+    ...(accountReinstatements.length > 0 ? { accountReinstatements } : {}),
     createdAt: at,
   };
   const preview: EnforcementPreview = {
@@ -1779,6 +1920,8 @@ async function recordEnforcement(
     appealAfter: record.appealAfter,
     result: record.result,
     pendingReason: plan.pendingReason,
+    maintainerBans,
+    accountReinstatements,
     revision: {
       before: project.revision,
       after: record.afterRevision,
@@ -1840,6 +1983,43 @@ async function listPublicProjects(
     // Restricted projects stay in the list for history; every reader must
     // treat them as paused and retired, even before the revision lands.
     restrictions: activePublicRestrictions(projects, records),
+  });
+}
+
+/**
+ * Public credit input for the score generator (PRD section 8). A banned
+ * account earns no new contribution or review credit from its earliest
+ * active ban. Only immutable GitHub IDs and start times are published; the
+ * reason, evidence, project and login stay private. A released ban leaves
+ * the list.
+ */
+async function listPublicAccountBans(
+  deps: ProjectApiDependencies,
+): Promise<Response> {
+  const since = new Map<string, string>();
+  for (const { account, record } of activeAccountBans(
+    await deps.persistence.listEnforcements(),
+  )) {
+    const current = since.get(account.githubId);
+    if (
+      current === undefined ||
+      Date.parse(record.createdAt) < Date.parse(current)
+    )
+      since.set(account.githubId, record.createdAt);
+  }
+  return publicJson({
+    schemaVersion: "slop-account-bans:v1",
+    bans: [...since]
+      .map(([githubId, bannedAt]) => ({ githubId, bannedAt }))
+      .sort(
+        (left, right) =>
+          left.githubId.length - right.githubId.length ||
+          (left.githubId < right.githubId
+            ? -1
+            : left.githubId > right.githubId
+              ? 1
+              : 0),
+      ),
   });
 }
 
@@ -1988,6 +2168,7 @@ function isProjectRoute(parts: string[]): boolean {
     parts[0] === "project-setup" ||
     parts[0] === "project-applications" ||
     parts[0] === "project-appeals" ||
+    (parts[0] === "project-account-bans" && parts.length === 1) ||
     (parts[0] === "admin" && parts[1] === "projects")
   );
 }
@@ -2048,6 +2229,14 @@ export async function handleProjectApi(
           deps.waitUntil,
           await deps.persistence.enforcementGeneration(),
         );
+      case "GET project-account-bans":
+        return await cachedPublicResponse(
+          deps.cache,
+          request,
+          () => listPublicAccountBans(deps),
+          deps.waitUntil,
+          await deps.persistence.enforcementGeneration(),
+        );
       case "GET projects/:id":
         return await readPublicProject(deps, parts[1]);
       case "GET project-github/owned-repositories":
@@ -2082,6 +2271,8 @@ export async function handleProjectApi(
         return await enforceProject(request, deps, parts[2], "apply");
       case "POST project-appeals":
         return await requestReinstatement(request, deps);
+      case "GET project-appeals":
+        return await listAccountAppeals(request, deps);
     }
     if (isProjectRoute(parts)) return json(404, { error: "not_found" });
     return null;

@@ -1911,6 +1911,16 @@ try {
           });
         // Account-only panels use explicit fixture data; payment routes below
         // still execute their real handlers against SQLite and Anvil.
+        if (url.pathname === "/api/v1/project-session")
+          return Response.json({
+            session: {
+              githubId: "456",
+              githubLogin: "browser-fixture",
+              admin: false,
+            },
+          });
+        if (url.pathname === "/api/v1/project-appeals")
+          return Response.json({ appeals: [] });
         if (url.pathname === "/api/v1/points/sessions")
           return Response.json({
             sessions: [

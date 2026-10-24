@@ -33,6 +33,7 @@ export interface AccountPayment extends PaymentAsset {
  * the finalized chain projection.
  */
 export type MonthlyAwardState =
+  | "excluded"
   | "underfunded"
   | "awaiting-reservation"
   | "reserved"

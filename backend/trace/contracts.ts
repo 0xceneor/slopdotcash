@@ -179,6 +179,7 @@ export type PersistenceResult<T> =
   | { status: "conflict" };
 
 export interface TracePersistence {
+  hasParticipationBan(githubId: string): Promise<boolean>;
   createRun(input: CreateRunInput): Promise<PersistenceResult<TraceRun>>;
   getRun(runId: string): Promise<TraceRun | null>;
   reserveTraceWrite(

@@ -44,6 +44,10 @@ import { assertProjectDefinition } from "../../src/lib/project-schema.mjs";
 import type { ProjectDefinition } from "../../src/lib/projects.mjs";
 import type { D1TransactionalDatabase as D1Database } from "../d1";
 import { notifyMonthlyUnderfunded } from "../notifications/events";
+import {
+  hasParticipationBan,
+  PARTICIPATION_BAN_QUERY,
+} from "../projects/account-bans";
 
 export class MonthlyPaymentError extends Error {
   constructor(
@@ -254,7 +258,7 @@ async function loadRun(
 
 export type { MonthlyAwardState };
 
-/** An award's state comes from the finalized chain projection, never from this record. */
+/** Chain evidence sets reserved/paid; the recorded ban decision sets excluded. */
 async function awardStates(
   db: D1Database,
   run: StoredRun,
@@ -265,6 +269,13 @@ async function awardStates(
     )
     .bind(run.network, run.vault, JSON.stringify(run.snapshot.awards))
     .first<{ items: string }>();
+  const exclusions = await db
+    .prepare(
+      "SELECT json_group_array(source_digest) items FROM monthly_payment_exclusions WHERE network=? AND vault=?",
+    )
+    .bind(run.network, run.vault)
+    .first<{ items: string }>();
+  const excluded = new Set<string>(JSON.parse(exclusions?.items ?? "[]"));
   const chain = new Map(
     (
       JSON.parse(row?.items ?? "[]") as {
@@ -277,7 +288,11 @@ async function awardStates(
     run.snapshot.awards.map((award) => [
       award.githubUserId,
       chain.get(award.sourceDigest) ??
-        (run.obligationsCreatedAt ? "awaiting-reservation" : "underfunded"),
+        (excluded.has(award.sourceDigest)
+          ? "excluded"
+          : run.obligationsCreatedAt
+            ? "awaiting-reservation"
+            : "underfunded"),
     ]),
   );
 }
@@ -310,6 +325,7 @@ export async function freezeMonthlyPeriod(
     now: Date;
   },
 ): Promise<"frozen" | "already-frozen"> {
+  if (input.actorId) await assertMonthlyParticipation(db, input.actorId);
   const { project, deployment } = input;
   const period = assertPeriod(input.period);
   if (input.now.getTime() < periodEnd(period).getTime())
@@ -380,7 +396,7 @@ export async function freezeMonthlyPeriod(
   });
   const inserted = await db
     .prepare(
-      "INSERT INTO monthly_payment_runs(project_id,period,trigger,actor_id,allocation_sequence,snapshot,snapshot_sha256,network,vault,total_gross_base,frozen_at,obligations_created_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,NULL WHERE (SELECT COALESCE(MAX(sequence),0) FROM monthly_allocation_changes WHERE project_id=? AND period=?)=? ON CONFLICT(project_id,period) DO NOTHING",
+      `INSERT INTO monthly_payment_runs(project_id,period,trigger,actor_id,allocation_sequence,snapshot,snapshot_sha256,network,vault,total_gross_base,frozen_at,obligations_created_at) SELECT ?,?,?,?,?,?,?,?,?,?,?,NULL WHERE (SELECT COALESCE(MAX(sequence),0) FROM monthly_allocation_changes WHERE project_id=? AND period=?)=? AND NOT EXISTS (${PARTICIPATION_BAN_QUERY}) ON CONFLICT(project_id,period) DO NOTHING`,
     )
     .bind(
       project.id,
@@ -397,9 +413,11 @@ export async function freezeMonthlyPeriod(
       project.id,
       period,
       sequence,
+      input.actorId,
     )
     .run();
   if (inserted.meta?.changes === 1) return "frozen";
+  if (input.actorId) await assertMonthlyParticipation(db, input.actorId);
   if (await loadRun(db, project.id, period)) return "already-frozen";
   throw new MonthlyPaymentError(
     409,
@@ -443,6 +461,33 @@ export async function createMonthlyObligations(
       ) as string[]
     ).values(),
   );
+  const currentBan = `SELECT enforcementId FROM (${PARTICIPATION_BAN_QUERY.replace(
+    "b.github_id = ?",
+    "b.github_id = json_extract(decision.value,'$.githubUserId')",
+  )})`;
+  // Capture every active decision in one query, then compare at the write.
+  const decisions = JSON.parse(
+    (
+      await db
+        .prepare(
+          `SELECT json_group_array(json_object('githubUserId',json_extract(decision.value,'$.githubUserId'),'sourceDigest',json_extract(decision.value,'$.sourceDigest'),'enforcementId',(${currentBan}))) items FROM json_each(?) decision`,
+        )
+        .bind(JSON.stringify(run.snapshot.awards))
+        .first<{ items: string }>()
+    )?.items ?? "[]",
+  ) as {
+    githubUserId: string;
+    sourceDigest: string;
+    enforcementId: string | null;
+  }[];
+  const excluded = decisions.filter(
+    (entry) =>
+      entry.enforcementId !== null && !reserved.has(entry.sourceDigest),
+  );
+  const excludedDigests = new Set(excluded.map((entry) => entry.sourceDigest));
+  const eligibleAwards = run.snapshot.awards.filter(
+    (award) => !excludedDigests.has(award.sourceDigest),
+  );
   const outstanding = JSON.parse(
     (
       await db
@@ -454,7 +499,7 @@ export async function createMonthlyObligations(
     )?.items ?? "[]",
   ) as { grossBase: string; sourceDigest: string }[];
   let needed = 0n;
-  for (const award of [...run.snapshot.awards, ...outstanding])
+  for (const award of [...eligibleAwards, ...outstanding])
     if (!reserved.has(award.sourceDigest)) needed += BigInt(award.grossBase);
   let fundingSnapshot: {
     asset: string;
@@ -499,7 +544,7 @@ export async function createMonthlyObligations(
   await db.batch([
     db
       .prepare(
-        "UPDATE monthly_payment_runs SET obligations_created_at=? WHERE project_id=? AND period=? AND obligations_created_at IS NULL AND (SELECT COUNT(*) FROM monthly_payment_obligations WHERE network=? AND vault=?)=? AND (SELECT COUNT(*) FROM payment_obligations WHERE network=? AND vault=?)=? AND (? IS NULL OR EXISTS(SELECT 1 FROM vault_snapshots WHERE project_id=? AND network=? AND vault=? AND asset_address=? AND free_balance=? AND observed_at=?))",
+        `UPDATE monthly_payment_runs SET obligations_created_at=? WHERE project_id=? AND period=? AND obligations_created_at IS NULL AND (SELECT COUNT(*) FROM monthly_payment_obligations WHERE network=? AND vault=?)=? AND (SELECT COUNT(*) FROM payment_obligations WHERE network=? AND vault=?)=? AND (? IS NULL OR EXISTS(SELECT 1 FROM vault_snapshots WHERE project_id=? AND network=? AND vault=? AND asset_address=? AND free_balance=? AND observed_at=?)) AND NOT EXISTS(SELECT 1 FROM json_each(?) decision WHERE (${currentBan}) IS NOT json_extract(decision.value,'$.enforcementId'))`,
       )
       .bind(
         createdAt,
@@ -518,10 +563,16 @@ export async function createMonthlyObligations(
         fundingSnapshot?.asset ?? null,
         fundingSnapshot?.free ?? null,
         fundingSnapshot?.observedAt ?? null,
+        JSON.stringify(decisions),
       ),
     db
       .prepare(
-        "INSERT INTO monthly_payment_obligations(project_id,period,github_user_id,github_login,gross_base,fee_base,source_digest,network,vault,created_at) SELECT r.project_id,r.period,json_extract(a.value,'$.githubUserId'),json_extract(a.value,'$.login'),json_extract(a.value,'$.grossBase'),json_extract(a.value,'$.feeBase'),json_extract(a.value,'$.sourceDigest'),r.network,r.vault,r.obligations_created_at FROM monthly_payment_runs r, json_each(r.snapshot,'$.awards') a WHERE r.project_id=? AND r.period=? AND r.obligations_created_at=? ON CONFLICT DO NOTHING",
+        "INSERT INTO monthly_payment_exclusions(project_id,period,github_user_id,network,vault,source_digest,enforcement_id,created_at) SELECT r.project_id,r.period,json_extract(a.value,'$.githubUserId'),r.network,r.vault,json_extract(a.value,'$.sourceDigest'),json_extract(a.value,'$.enforcementId'),r.obligations_created_at FROM monthly_payment_runs r,json_each(?) a WHERE r.project_id=? AND r.period=? AND r.obligations_created_at=? AND NOT EXISTS(SELECT 1 FROM monthly_payment_obligations m WHERE m.project_id=r.project_id AND m.period=r.period AND m.github_user_id=json_extract(a.value,'$.githubUserId')) ON CONFLICT DO NOTHING",
+      )
+      .bind(JSON.stringify(excluded), projectId, period, createdAt),
+    db
+      .prepare(
+        "INSERT INTO monthly_payment_obligations(project_id,period,github_user_id,github_login,gross_base,fee_base,source_digest,network,vault,created_at) SELECT r.project_id,r.period,json_extract(a.value,'$.githubUserId'),json_extract(a.value,'$.login'),json_extract(a.value,'$.grossBase'),json_extract(a.value,'$.feeBase'),json_extract(a.value,'$.sourceDigest'),r.network,r.vault,r.obligations_created_at FROM monthly_payment_runs r, json_each(r.snapshot,'$.awards') a WHERE r.project_id=? AND r.period=? AND r.obligations_created_at=? AND NOT EXISTS(SELECT 1 FROM monthly_payment_exclusions x WHERE x.project_id=r.project_id AND x.period=r.period AND x.github_user_id=json_extract(a.value,'$.githubUserId')) ON CONFLICT DO NOTHING",
       )
       .bind(projectId, period, createdAt),
   ]);
@@ -699,6 +750,15 @@ export interface MonthlyCommitmentPlan {
 }
 
 /** The owner's private monthly controls behind the Pages session. */
+async function assertMonthlyParticipation(db: D1Database, githubId: string) {
+  if (await hasParticipationBan(db, githubId))
+    throw new MonthlyPaymentError(
+      403,
+      "account_banned",
+      "This account cannot change or finalize new monthly awards while banned.",
+    );
+}
+
 export function monthlyOwnerService(deps: {
   db: D1Database;
   getProject(id: string): Promise<ProjectRecord | null>;
@@ -773,16 +833,30 @@ export function monthlyOwnerService(deps: {
         trigger: run.trigger,
         frozenAt: run.frozenAt,
         snapshotSha256: run.snapshotSha256,
-        totalGrossBase: run.snapshot.totalGrossBase,
+        totalGrossBase: run.snapshot.awards
+          .reduce(
+            (total, award) =>
+              total +
+              (states.get(award.githubUserId) === "excluded"
+                ? 0n
+                : BigInt(award.grossBase)),
+            0n,
+          )
+          .toString(),
         network: run.network,
         vault: run.vault,
         funded: run.obligationsCreatedAt !== null,
         awards: run.snapshot.awards.map((award) => ({
           githubUserId: award.githubUserId,
           login: award.login,
-          grossBase: award.grossBase,
-          feeBase: award.feeBase,
-          netBase: award.netBase,
+          grossBase:
+            states.get(award.githubUserId) === "excluded"
+              ? "0"
+              : award.grossBase,
+          feeBase:
+            states.get(award.githubUserId) === "excluded" ? "0" : award.feeBase,
+          netBase:
+            states.get(award.githubUserId) === "excluded" ? "0" : award.netBase,
           state: states.get(award.githubUserId) ?? "underfunded",
         })),
       };
@@ -826,6 +900,7 @@ export function monthlyOwnerService(deps: {
       },
     ) {
       const project = await authorized(projectId, actor);
+      await assertMonthlyParticipation(deps.db, actor.githubId);
       assertPeriod(period);
       if (await loadRun(deps.db, project.id, period))
         throw new MonthlyPaymentError(
@@ -882,10 +957,11 @@ export function monthlyOwnerService(deps: {
           );
         throw error;
       }
+      let changed: number | undefined;
       try {
-        await deps.db
+        const inserted = await deps.db
           .prepare(
-            "INSERT INTO monthly_allocation_changes(project_id,period,sequence,github_user_id,gross_base,actor_id,created_at) VALUES(?,?,?,?,?,?,?)",
+            `INSERT INTO monthly_allocation_changes(project_id,period,sequence,github_user_id,gross_base,actor_id,created_at) SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
           )
           .bind(
             project.id,
@@ -895,10 +971,20 @@ export function monthlyOwnerService(deps: {
             change.grossBase,
             actor.githubId,
             deps.now().toISOString(),
+            actor.githubId,
           )
           .run();
+        changed = inserted.meta?.changes;
       } catch {
         // A concurrent change took this sequence, or the month was frozen.
+        throw new MonthlyPaymentError(
+          409,
+          "allocations_changed",
+          "The allocations changed. Reload them before saving.",
+        );
+      }
+      if (changed !== 1) {
+        await assertMonthlyParticipation(deps.db, actor.githubId);
         throw new MonthlyPaymentError(
           409,
           "allocations_changed",
@@ -909,10 +995,12 @@ export function monthlyOwnerService(deps: {
     },
     async setAutomatic(projectId: string, actor: GithubActor, on: boolean) {
       const project = await authorized(projectId, actor);
+      await assertMonthlyParticipation(deps.db, actor.githubId);
+      let changed: number | undefined;
       try {
-        await deps.db
+        const inserted = await deps.db
           .prepare(
-            "INSERT INTO monthly_payment_settings(project_id,sequence,automatic,actor_id,created_at) SELECT ?,COALESCE(MAX(sequence),0)+1,?,?,? FROM monthly_payment_settings WHERE project_id=?",
+            `INSERT INTO monthly_payment_settings(project_id,sequence,automatic,actor_id,created_at) SELECT ?,COALESCE(MAX(sequence),0)+1,?,?,? FROM monthly_payment_settings WHERE project_id=? HAVING NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
           )
           .bind(
             project.id,
@@ -920,9 +1008,19 @@ export function monthlyOwnerService(deps: {
             actor.githubId,
             deps.now().toISOString(),
             project.id,
+            actor.githubId,
           )
           .run();
+        changed = inserted.meta?.changes;
       } catch {
+        throw new MonthlyPaymentError(
+          409,
+          "setting_changed",
+          "The setting changed at the same time. Retry.",
+        );
+      }
+      if (changed !== 1) {
+        await assertMonthlyParticipation(deps.db, actor.githubId);
         throw new MonthlyPaymentError(
           409,
           "setting_changed",
@@ -1022,6 +1120,20 @@ export function monthlyOwnerService(deps: {
           source_digest: string;
           chain_state: string | null;
         }>();
+      if (
+        !obligation &&
+        (await deps.db
+          .prepare(
+            "SELECT 1 FROM monthly_payment_exclusions WHERE project_id=? AND period=? AND github_user_id=?",
+          )
+          .bind(project.id, period, expected.githubUserId)
+          .first())
+      )
+        throw new MonthlyPaymentError(
+          403,
+          "award_excluded",
+          "This account was banned before the award was funded.",
+        );
       if (!obligation)
         throw new MonthlyPaymentError(
           409,

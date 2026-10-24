@@ -9,6 +9,7 @@ import { readdirSync } from "node:fs";
 import { CloudflareProjectPersistence } from "../backend/projects/cloudflare-persistence";
 import { handleProjectApi } from "../backend/projects/handler";
 import { flaggerAuthority } from "../backend/projects/setup";
+import { seedParticipationBan } from "../backend/security/participation-ban.fixture";
 import { githubFlaggerStanding } from "../backend/vetting/flagger-standing";
 import {
   handleProjectFlagsApi,
@@ -124,6 +125,7 @@ let sqlite: ReturnType<typeof sqliteD1>["sqlite"];
 let projects: CloudflareProjectPersistence;
 let vetting: CloudflareVettingPersistence;
 let flags: ProjectFlagStore;
+let beforeFlagBatch: (() => void) | null = null;
 let keys: Awaited<ReturnType<typeof vettingKeyPair>>;
 let livePin: VettingPin;
 let clock: Date;
@@ -138,7 +140,16 @@ beforeEach(async () => {
   );
   sqlite = database.sqlite;
   projects = new CloudflareProjectPersistence(database.db);
-  flags = new ProjectFlagStore(database.db);
+  beforeFlagBatch = null;
+  flags = new ProjectFlagStore({
+    prepare: (sql) => database.db.prepare(sql),
+    batch: async (statements) => {
+      const hook = beforeFlagBatch;
+      beforeFlagBatch = null;
+      hook?.();
+      return database.db.batch(statements);
+    },
+  });
   clock = NOW;
   githubUp = true;
   installation = "installed";
@@ -884,4 +895,45 @@ describe("two-contributor flags", () => {
         ),
     ).toThrow("a flag pause needs two distinct active contributor flags");
   });
+});
+
+test("a banned account cannot add a flag but can withdraw its earlier flag", async () => {
+  await activeProject();
+  expect((await flag("alice")).status).toBe(201);
+  seedParticipationBan(sqlite, ALICE, ADMIN, clock.toISOString());
+  expect(
+    (
+      await flagApi(
+        sessionRequest("GET", "project-flags/open-registry", "alice"),
+      )
+    ).status,
+  ).toBe(200);
+  expect(
+    (
+      await flagApi(
+        sessionRequest(
+          "POST",
+          "project-flags/open-registry/withdraw",
+          "alice",
+          {},
+        ),
+      )
+    ).status,
+  ).toBe(200);
+  const refused = await flag("alice");
+  expect(refused.status).toBe(403);
+  expect((await refused.json()).error).toBe("participation_banned");
+  expect(await flags.activeFlags(clock)).toHaveLength(0);
+});
+
+test("a concurrent account ban cannot supply the flag that pauses another project", async () => {
+  await activeProject();
+  expect((await flag("alice")).status).toBe(201);
+  beforeFlagBatch = () =>
+    seedParticipationBan(sqlite, BOB, ADMIN, clock.toISOString());
+  expect((await flag("bob")).status).toBe(403);
+  expect(
+    (await flags.activeFlags(clock)).map((entry) => entry.reporter.githubId),
+  ).toEqual([ALICE.githubId]);
+  expect((await publicProject()).status).toBe(200);
 });

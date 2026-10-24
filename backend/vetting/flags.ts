@@ -22,6 +22,10 @@ import type { SetupAuthority } from "../../src/lib/project-contracts";
 import { type ApiError, fail } from "../api-error";
 import { notifyProjectEnforcement } from "../notifications/events";
 import {
+  hasParticipationBan,
+  PARTICIPATION_BAN_QUERY,
+} from "../projects/account-bans";
+import {
   type CloudflareProjectPersistence,
   ENFORCEMENT_COLUMNS,
   type ProjectD1Database,
@@ -129,6 +133,15 @@ export type FiledFlag = {
 export class ProjectFlagStore {
   constructor(private readonly db: ProjectD1Database) {}
 
+  async assertCanFile(githubId: string): Promise<void> {
+    if (await hasParticipationBan(this.db, githubId))
+      fail(
+        403,
+        "participation_banned",
+        "This account cannot file new Slop flags. You can still read or withdraw an existing flag.",
+      );
+  }
+
   async get(id: string): Promise<ProjectFlag | null> {
     const row = await this.db
       .prepare(`SELECT ${COLUMNS} FROM project_flags WHERE id = ?`)
@@ -189,6 +202,7 @@ export class ProjectFlagStore {
     moderatorGithubIds: readonly string[];
     at: string;
   }): Promise<FiledFlag | "conflict"> {
+    await this.assertCanFile(input.reporter.githubId);
     const statements = [
       this.db
         .prepare(
@@ -205,7 +219,7 @@ export class ProjectFlagStore {
              created_at
            )
            SELECT ?, id, ?, ?, revision, manifest_sha256, ?, ?, ?, ?
-             FROM projects WHERE id = ?`,
+             FROM projects WHERE id = ? AND NOT EXISTS (${PARTICIPATION_BAN_QUERY})`,
         )
         .bind(
           input.flagId,
@@ -216,6 +230,7 @@ export class ProjectFlagStore {
           input.evidenceUrl,
           input.at,
           input.project.id,
+          input.reporter.githubId,
         ),
       this.db
         .prepare(
@@ -243,6 +258,7 @@ export class ProjectFlagStore {
                   )
              FROM projects p
             WHERE p.id = ?8
+              AND EXISTS (SELECT 1 FROM project_flags WHERE id = ?9)
               AND (SELECT COUNT(DISTINCT reporter_github_id) FROM project_flags
                     WHERE project_id = p.id AND state = 'active') >= ?7
               AND COALESCE((
@@ -259,6 +275,7 @@ export class ProjectFlagStore {
           input.at,
           FLAG_PAUSE_THRESHOLD,
           input.project.id,
+          input.flagId,
         ),
       // One notice per moderator for this pause; no-op when no pause landed.
       this.db
@@ -282,7 +299,10 @@ export class ProjectFlagStore {
     ];
     try {
       const results = await this.db.batch(statements);
-      if (results[1]?.meta?.changes !== 1) return "conflict";
+      if (results[1]?.meta?.changes !== 1) {
+        await this.assertCanFile(input.reporter.githubId);
+        return "conflict";
+      }
     } catch (error) {
       if (
         error instanceof Error &&
@@ -517,6 +537,7 @@ async function file(
   projectId: string,
 ): Promise<Response> {
   const actor = await requireActor(request, deps);
+  await deps.flags.assertCanFile(actor.githubId);
   const body = await readJsonObject(request);
   const keys = Object.keys(body);
   if (

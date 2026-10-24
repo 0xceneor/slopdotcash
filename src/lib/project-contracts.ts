@@ -77,11 +77,13 @@ export type EnforcementAction =
   | "ban"
   | "request_reinstatement"
   | "reinstate"
+  | "reinstate_accounts"
   | "deny_reinstatement";
 export type EnforcementActorRole =
   | "project-moderator"
   | "project-steward"
   | "project-applicant"
+  | "banned-account"
   | "vetting-service"
   | "contributor-flags";
 export type RestrictionState = "clear" | "quarantined" | "banned";
@@ -120,9 +122,13 @@ export type ProjectEnforcement = {
         threshold: number;
         flagIds: string[];
       };
-  /** A steward or applicant may only file a reinstatement request (ELG-02). */
+  /** Owners and banned accounts may only file a reinstatement request. */
   actorRole: EnforcementActorRole;
-  decisionSource: "admin-panel" | "owner-request" | "standing-rule";
+  decisionSource:
+    | "admin-panel"
+    | "owner-request"
+    | "account-request"
+    | "standing-rule";
   beforeRevision: number;
   beforeManifestSha256: string;
   afterRevision: number | null;
@@ -130,6 +136,12 @@ export type ProjectEnforcement = {
   result: EnforcementResult;
   /** Exact scan and malicious findings covered by this independent decision. */
   vettingReview?: { assessmentId: string; maliciousAssessmentIds: string[] };
+  /**
+   * Maintainer accounts a moderator banned with the project when deciding a
+   * confirmed malicious result (PRD section 8). Only that decision has them.
+   */
+  maintainerBans?: GithubActor[];
+  accountReinstatements?: (GithubActor & { banEnforcementId: string })[];
   createdAt: string;
 };
 
@@ -152,6 +164,13 @@ export interface ProjectEnforcementState {
   /** The restriction holds but its paused, retired revision has not landed. */
   revisionPending: boolean;
   moderation: "unconfigured" | "moderator" | "not-moderator";
+  /**
+   * A confirmed malicious scan result banned the project and no moderator
+   * has decided it yet: ban the project and its maintainer, or reinstate.
+   */
+  decisionRequired: boolean;
+  /** Maintainer accounts banned with the restriction in force. */
+  bannedMaintainers: GithubActor[];
   records: ProjectEnforcement[];
 }
 
@@ -167,6 +186,9 @@ export interface EnforcementPreview {
   appealAfter: ProjectEnforcementState["appeal"];
   result: EnforcementResult;
   pendingReason: string | null;
+  /** Maintainer accounts the action bans with the project. */
+  maintainerBans: GithubActor[];
+  accountReinstatements?: (GithubActor & { banEnforcementId: string })[];
   revision: {
     before: number;
     after: number | null;

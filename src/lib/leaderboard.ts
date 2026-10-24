@@ -1706,11 +1706,20 @@ function publishedPenalties(
 function addScore(
   entries: Map<string, MutableLeaderboardEntry>,
   ledger: ScoreEvent[],
+  participationBans: ReadonlyMap<string, string>,
   event: ScoreEvent,
 ): boolean {
   if (isBotActor(event.actor)) {
     return false;
   }
+  // PRD section 8: a banned account receives no new contribution or review
+  // credit from its ban onward. Earlier credit stays.
+  const bannedAt = participationBans.get(event.actor.id);
+  if (
+    bannedAt !== undefined &&
+    parseIsoTime(event.occurredAt) >= parseIsoTime(bannedAt)
+  )
+    return false;
   const entry = actorEntry(entries, event.actor);
   const projectId = REGISTERED_REPOSITORIES.find(
     (repository) => repository.id === event.repository,
@@ -2791,6 +2800,7 @@ function createSnapshotWithReviewCutoff(
   input: LeaderboardInput,
   reviewCutoff: string,
 ): LeaderboardSnapshot {
+  const participationBans = input.participationBans ?? new Map();
   if (
     input.jointValueDecisions !== undefined &&
     input.valueDecisions === undefined
@@ -3402,7 +3412,7 @@ function createSnapshotWithReviewCutoff(
       if (ratification && scoreThirds === 0) continue;
       const contributionBonus =
         isAuthor && contributionRun?.traceUpload ? 1_500 : 0;
-      const scored = addScore(entries, ledger, {
+      const scored = addScore(entries, ledger, participationBans, {
         id: isAuthor
           ? `${pullRequest.id}:merged`
           : `${pullRequest.id}:merged:${actor.id}`,
@@ -3582,7 +3592,7 @@ function createSnapshotWithReviewCutoff(
       );
       for (const [index, actor] of actors.entries()) {
         const thirds = shares[index] as number;
-        addScore(entries, ledger, {
+        addScore(entries, ledger, participationBans, {
           id: `${completion.pull.node_id}:joint:${unit.workUnitId}:merged:${actor.id}`,
           actor,
           category: "merged-pull-request",
@@ -3730,7 +3740,7 @@ function createSnapshotWithReviewCutoff(
       }
       evaluatedReviewReservations.add(reservationKey);
     }
-    if (addScore(entries, ledger, event) && source) {
+    if (addScore(entries, ledger, participationBans, event) && source) {
       recordScoredSources([source]);
     }
   }
@@ -3908,7 +3918,7 @@ function createSnapshotWithReviewCutoff(
         exclude(candidate.reviewId, "review-credit-zero-share");
         continue;
       }
-      addScore(entries, ledger, {
+      addScore(entries, ledger, participationBans, {
         id: `${pullRequest.id}:value-review:${candidate.reviewId}`,
         actor: candidate.actor,
         category: "substantive-review",
@@ -3960,7 +3970,7 @@ function createSnapshotWithReviewCutoff(
         !explicitPrizeAcceptance &&
         hasMaterialTestChange(detailedPullRequest.files)
       ) {
-        const scored = addScore(entries, ledger, {
+        const scored = addScore(entries, ledger, participationBans, {
           id: `${detailedPullRequest.id}:tests`,
           actor: detailedPullRequest.author,
           category: "material-test-change",
@@ -4001,7 +4011,7 @@ function createSnapshotWithReviewCutoff(
         attributableEvidenceSources.map((source) => [source.id, source]),
       );
       for (const finding of evidence.findings) {
-        const scored = addScore(entries, ledger, {
+        const scored = addScore(entries, ledger, participationBans, {
           id: `${pullRequest.id}:evidence:${finding.category}`,
           actor: detailedPullRequest.author,
           category: "evidence",
@@ -4094,7 +4104,7 @@ function createSnapshotWithReviewCutoff(
       }[record.reviewLoad];
       awardedReviewers.add(source.author.id);
       if (
-        addScore(entries, ledger, {
+        addScore(entries, ledger, participationBans, {
           id: `${pullRequest.id}:automated-review:${source.id}`,
           actor: source.author,
           category: "substantive-review",
@@ -4144,7 +4154,7 @@ function createSnapshotWithReviewCutoff(
             )?.run
           : null;
       awardedReviewers.add(review.author.id);
-      const scored = addScore(entries, ledger, {
+      const scored = addScore(entries, ledger, participationBans, {
         id: `${pullRequest.id}:reviewer:${review.author.id}`,
         actor: review.author,
         category: "substantive-review",
@@ -4306,7 +4316,7 @@ function createSnapshotWithReviewCutoff(
       !hasEvaluatedReviewReservation(ratification.source.author.id) &&
       !awardedReviewers.has(ratification.source.author.id)
     ) {
-      addScore(entries, ledger, {
+      addScore(entries, ledger, participationBans, {
         id: `${pullRequest.id}:ratifier:${ratification.source.id}`,
         actor: ratification.source.author,
         category: "substantive-review",
@@ -4370,7 +4380,7 @@ function createSnapshotWithReviewCutoff(
           `Qualifying resolved issue ${issue.id} is missing its closed timestamp`,
         );
       }
-      const scored = addScore(entries, ledger, {
+      const scored = addScore(entries, ledger, participationBans, {
         id: `${issue.id}:resolved-by:${contributor.id}`,
         actor: contributor.author,
         category: "resolved-issue",
@@ -4463,7 +4473,7 @@ function createSnapshotWithReviewCutoff(
     // survives only when its attribution is independently present and replay
     // checked in the current snapshot.
     delete retained.evidenceBonusBasisPoints;
-    if (addScore(entries, ledger, retained)) {
+    if (addScore(entries, ledger, participationBans, retained)) {
       currentLedgerIds.add(retained.id);
       currentScoreSources.add(`${retained.repository}\0${retained.source.id}`);
       const candidates = (input.retainedReviewAttributions ?? []).filter(

@@ -212,8 +212,11 @@ If the manifest is not already paused and retired, the record says `revision_pen
 an admin must append that canonical revision before reinstatement. No GitHub actor
 or revision author is invented for the service.
 
-A clean scan alone does not clear a confirmed malicious finding. An owner or
-moderator files an appeal. An independent human moderator may decide it only after
+A clean scan alone does not clear a confirmed malicious finding. A moderator
+decides every confirmed malicious Ban, with or without an appeal: ban the
+project and the responsible accounts selected from the evidence, or reinstate
+it (see `backend/projects/README.md`).
+An owner or moderator files an appeal to start reinstatement. An independent human moderator may decide it only after
 a fresh complete scan of the restricted revision. Migration 0031 stores the exact
 clean scan and reviewed malicious assessment IDs with that append-only decision.
 Every later malicious assessment remains a new ban; no old decision covers it.

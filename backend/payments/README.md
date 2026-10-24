@@ -275,6 +275,10 @@ sections 6 and 7). Migration `0062` adds its private records.
    allocations cannot change after the cutoff. Either path writes the single
    `monthly_payment_runs` row of that month; a frozen month accepts no
    further change.
+   A banned account cannot change allocations or automatic-payment settings,
+   or finalize a month. Each write checks the account ban again to refuse a
+   concurrent ban. Reading awards and preparing an existing funded obligation
+   remain available, subject to the existing authority and project checks.
 4. **Obligations.** The coordinator creates one `monthly_payment_obligations`
    row per positive award once, only when the vault's finalized free balance
    (a `vault_snapshots` row newer than 30 minutes) covers the month together
@@ -282,7 +286,13 @@ sections 6 and 7). Migration `0062` adds its private records.
    An underfunded month waits for a deposit and creates nothing. The steward
    gets one Inbox payout exception for that month (key
    `monthly-underfunded:PROJECT:YYYY-MM`), however often the coordinator
-   retries.
+   retries. Before it creates new obligations, the coordinator excludes accounts
+   with an active moderator ban. It records the exact ban in
+   `monthly_payment_exclusions` and keeps the original frozen snapshot. Excluded
+   amounts do not delay other recipients or become their extra awards. A ban
+   during the write forces a retry. Previously funded obligations remain valid.
+   The owner sees excluded entries with zero payable amounts; they cannot obtain
+   a reservation plan for those entries.
 5. **Reservation and payment.** The coordinator does not yet submit the D13
    bounded monthly commitment (`commitMonthly` on EVM, `commit_monthly` and
    `commit_monthly_award` on Solana; see the contract READMEs), because that

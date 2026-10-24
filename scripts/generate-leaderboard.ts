@@ -1,6 +1,7 @@
 import { GitHubClient } from "../workers/slopbot/github";
 import {
   fetchProjectPenalties,
+  loadParticipationBans,
   loadValueInputs,
   VALUE_FEED_UNAVAILABLE_EXIT_CODE,
   ValueFeedUnavailableError,
@@ -4072,6 +4073,12 @@ export async function generateLeaderboardFromGitHub(
       )),
     );
   }
+  const participationBans = await loadParticipationBans({
+    get: <T>(path: string) => {
+      valueRestRequests += 1;
+      return github.get<T>(path);
+    },
+  });
   // A debit applies only to a closed, unmerged pull request in this census,
   // so only projects with such a pull request read the penalty feed.
   const penalties: NonNullable<LeaderboardInput["penalties"]>[number][] = [];
@@ -4148,6 +4155,7 @@ export async function generateLeaderboardFromGitHub(
     retainedReviewEvents: options.retainedReviewEvents,
     retainedReviewAttributions: options.retainedReviewAttributions,
     verifyRunReceipt: verifyRunReceiptSignature,
+    participationBans,
   });
   return snapshot;
 }
