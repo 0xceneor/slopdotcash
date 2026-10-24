@@ -61,6 +61,9 @@ async function fixtures(page: Page) {
   await page.route("**/api/v1/points/**", (route) =>
     route.fulfill({ json: null }),
   );
+  await page.route("**/api/v1/project-session", (route) =>
+    route.fulfill({ json: { session: null } }),
+  );
   await page.route("**/api/v1/slopbot/summary", (route) =>
     route.fulfill({ json: { repositories: [] } }),
   );
