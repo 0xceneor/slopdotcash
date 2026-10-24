@@ -610,6 +610,14 @@ test("private security bounty programs keep cases restricted from intake to awar
     });
     const page = await context.newPage();
     const errors = observe(page);
+    // The earlier terms visit cached readiness at the edge. Changing the
+    // GitHub fixture and advancing the browser clock do not expire that cache.
+    // Use this scenario's own cache key; keep the real Pages readiness check.
+    await page.route("**/api/v1/security-programs/*/intake", (route) => {
+      const url = new URL(route.request().url());
+      url.searchParams.set("scenario", "intake-readiness");
+      return route.continue({ url: url.href });
+    });
     await page.clock.install();
     // The page checks readiness on open; no click is needed.
     await page.goto(`/projects/${a.id}/security`, { waitUntil: "networkidle" });
