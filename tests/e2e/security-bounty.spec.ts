@@ -1780,7 +1780,7 @@ test("automatic private intake files as the reporter and verifies receipt @regis
       receivedAtSource: "github-verified",
       view: "reporter",
       // The automatic analysis never shows in fields the reporter sees.
-      nextAction: "Triage new private report",
+      nextStep: "Waiting for the project owner's response.",
     });
     // The maintainer's case needs no link check, only triage.
     const maintainer = await api(
@@ -1792,7 +1792,7 @@ test("automatic private intake files as the reporter and verifies receipt @regis
     expect(maintainer.body.case).toMatchObject({
       submissionState: "verified",
       receivedAtSource: "github-verified",
-      nextAction: "Triage new private report",
+      nextStep: "Waiting for the project owner's response.",
     });
     expect(
       (maintainer.body.case as { allowedActions: string[] }).allowedActions,
