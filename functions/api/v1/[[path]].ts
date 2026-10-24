@@ -44,15 +44,15 @@ import {
 } from "../../../backend/projects/setup";
 import { assetTemplateSource } from "../../../backend/projects/skill-publication";
 import { rpcTokenMetadataReader } from "../../../backend/projects/token-metadata";
-import {
-  githubAdvisoryClient,
-  githubInstallationCheck,
-} from "../../../backend/security/github-advisories";
 import { githubAdvisoryReader } from "../../../backend/security/advisories";
 import {
   analysisProfileFromEnv,
   providerSecurityAnalyzer,
 } from "../../../backend/security/analysis";
+import {
+  githubAdvisoryClient,
+  githubInstallationCheck,
+} from "../../../backend/security/github-advisories";
 import { handleSecurityApi } from "../../../backend/security/handler";
 import {
   githubIntakeOAuth,
