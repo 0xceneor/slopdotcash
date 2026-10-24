@@ -3033,7 +3033,7 @@ function AppContent({ route }: { route: Route }) {
   else if (route.kind === "security-program") {
     const project = findProject(route.projectId ?? "");
     content = project ? (
-      <SecurityProgramPage project={project} />
+      <SecurityProgramPage key={project.id} project={project} />
     ) : (
       <NotFound title="Project not found" />
     );
