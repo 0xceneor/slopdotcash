@@ -5,7 +5,10 @@ import { fileURLToPath } from "node:url";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 import { encodeFunctionData, parseAbi } from "viem";
-import { EVM_ESCROW_EVENT_TOPICS } from "../../contracts/evm/adapter";
+import {
+  EVM_ESCROW_EVENT_TOPICS,
+  evmVaultKey,
+} from "../../contracts/evm/adapter";
 import type { EscrowDeployment } from "../../src/lib/escrow-policy.mjs";
 import { formatAssetAmount } from "../../src/lib/project-schema.mjs";
 import { PROJECTS } from "../../src/lib/projects.mjs";
@@ -41,8 +44,8 @@ async function rpc(method: string, params: unknown[]) {
 }
 const abi = parseAbi([
   "function mint(address,uint256)",
-  "function create(bytes32,address,address,address)",
-  "function vaults(bytes32,address) view returns (address)",
+  "function create(bytes32,address,uint8)",
+  "function vaults(bytes32) view returns (address)",
   "function balanceOf(address) view returns (uint256)",
 ]);
 
@@ -108,13 +111,13 @@ test.beforeAll(async () => {
   const projectDigest = `0x${"a".repeat(64)}` as `0x${string}`;
   const createHashId = await rpc("eth_sendTransaction", [
     {
-      from: registrar,
+      from: owner,
       to: factory,
       gas: "0x7a1200",
       data: encodeFunctionData({
         abi,
         functionName: "create",
-        args: [projectDigest, token, owner, owner],
+        args: [projectDigest, token, 0],
       }),
     },
   ]);
@@ -130,7 +133,13 @@ test.beforeAll(async () => {
       data: encodeFunctionData({
         abi,
         functionName: "vaults",
-        args: [projectDigest, token],
+        args: [
+          evmVaultKey({
+            owner,
+            projectId: projectDigest,
+            asset: token,
+          }) as `0x${string}`,
+        ],
       }),
     },
     "latest",

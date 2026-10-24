@@ -22,7 +22,10 @@ import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { privateKeyToAccount } from "viem/accounts";
 import type { D1TransactionalDatabase as D1Database } from "../../backend/d1";
-import type { evmBindingTypedData } from "../../contracts/evm/adapter";
+import {
+  type evmBindingTypedData,
+  evmVaultKey,
+} from "../../contracts/evm/adapter";
 import { onRequest } from "../../functions/api/v1/[[path]]";
 import {
   payoutReadiness,
@@ -116,12 +119,17 @@ function deploy(contract: string, args: string[] = []) {
     ),
   ) as { deployedTo: string; transactionHash: string };
 }
-async function send(to: string, signature: string, args: string[]) {
+async function send(
+  to: string,
+  signature: string,
+  args: string[],
+  from = registrar,
+) {
   const data = execFileSync("cast", ["calldata", signature, ...args], {
     encoding: "utf8",
   }).trim();
   const hash = (await rpc("eth_sendTransaction", [
-    { from: registrar, to, data, gas: "0x7a1200" },
+    { from, to, data, gas: "0x7a1200" },
   ])) as string;
   await rpc("anvil_mine", ["0x1"]);
   const receipt = (await rpc("eth_getTransactionReceipt", [hash])) as {
@@ -200,16 +208,26 @@ try {
     attester,
     delay,
   ]).deployedTo;
+  // Vault creation is permissionless; the sender (the owner) owns the vault.
   const createTx = await send(
     factory,
-    "create(bytes32,address,address,address)",
-    [projectKey, asset, owner, owner],
+    "create(bytes32,address,uint8)",
+    [projectKey, asset, "0"],
+    owner,
   );
   const vault = `0x${(
     (await rpc("eth_call", [
       {
         to: factory,
-        data: `0x4627e7c0${projectKey.slice(2)}${asset.slice(2).toLowerCase().padStart(64, "0")}`,
+        data: execFileSync(
+          "cast",
+          [
+            "calldata",
+            "vaults(bytes32)",
+            evmVaultKey({ owner, projectId: projectKey, asset }),
+          ],
+          { encoding: "utf8" },
+        ).trim(),
       },
       "latest",
     ])) as string

@@ -13,7 +13,18 @@ interface IERC20 {
 uint64 constant MIN_BINDING_DELAY = 1 hours;
 uint64 constant MAX_BINDING_DELAY = 30 days;
 
-/// @notice Version 4, immutable single-project, single-asset escrow for any standard ERC-20.
+/// @dev A monthly allocation for calendar UTC month M can be committed from MONTHLY_CUTOFF_DELAY after M ends
+/// until MONTHLY_CUTOFF_DELAY after the next month ends (owner decision D1: 00:00 UTC on the 4th).
+uint64 constant MONTHLY_CUTOFF_DELAY = 72 hours;
+
+/// @notice What a vault holds funds for. One owner can hold one vault per project, token and purpose, so
+/// ordinary awards and private bounties never share a balance (owner decision D13).
+enum Purpose {
+    Ordinary,
+    Bounty
+}
+
+/// @notice Version 5, immutable single-project, single-asset, single-purpose escrow for any standard ERC-20.
 /// @dev A binding needs the identity authority's transaction and the destination wallet's EIP-712 signature,
 /// so the authority alone cannot point funds at a wallet it does not hold; it cannot change amounts. The
 /// authority is read from the factory, which replaces it only through a public 7-day timelock. A new binding waits
@@ -28,8 +39,10 @@ uint64 constant MAX_BINDING_DELAY = 30 days;
 /// a stolen key the owner cancels every attacker binding, however many cancels it had spent before, and those
 /// cancels do not count. Fees accrue in the vault and are pulled separately, so a blocked fee recipient cannot
 /// stop payouts or refunds.
-/// Anyone may deposit; deposits join one free balance that only the owner commits or refunds to its refund
-/// destination. The payout fee and the unused-fund withdrawal fee are both 2% (floor(gross / 50)), so awarding
+/// Anyone may deposit; deposits join one free balance that only the owner commits or refunds to itself. An
+/// ordinary vault also accepts one monthly allocation per calendar month from anyone, when the owner has
+/// turned it on, the identity authority signed it, and its total is within the owner's monthly cap.
+/// The payout fee and the unused-fund withdrawal fee are both 2% (floor(gross / 50)), so awarding
 /// free funds to oneself costs the same as withdrawing them (#907); each fee rounds down once per award or
 /// withdrawal. Tokens must have exact transfers: a fee-on-transfer deposit or payout reverts. Decimals are stored for display only; amounts are
 /// token base units. No upgrade or reserve rescue exists.
@@ -41,6 +54,13 @@ contract ProjectEscrow {
         bytes32 sourceDigest;
         uint64 committedAt;
         bool paid;
+    }
+
+    /// @notice One award of a monthly allocation, in the order the allocation root was built.
+    struct MonthlyAward {
+        uint64 actorId;
+        uint128 gross;
+        bytes32 sourceDigest;
     }
 
     /// @dev The latest authority binding for an actor. It is pending until activatesAt and is the only
@@ -64,6 +84,7 @@ contract ProjectEscrow {
     bytes32 private constant BINDING_TYPEHASH = keccak256(
         "DestinationBinding(uint64 actorId,address destination,uint64 expectedVersion,bytes32 claimDigest,uint64 expiresAt)"
     );
+    bytes32 private constant MONTHLY_TYPEHASH = keccak256("MonthlyAllocation(uint32 period,bytes32 allocationRoot)");
     /// @dev Upper bound on s for a canonical secp256k1 signature (EIP-2).
     bytes32 private constant MAX_S = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
@@ -72,7 +93,7 @@ contract ProjectEscrow {
     uint8 public immutable decimals;
     bytes32 public immutable projectId;
     address public immutable owner;
-    address public immutable refundDestination;
+    Purpose public immutable purpose;
     address public immutable feeRecipient;
     /// @notice The factory that created this vault and holds the identity authority in force.
     EscrowFactory public immutable factory;
@@ -86,7 +107,10 @@ contract ProjectEscrow {
     uint128 public totalGrossWithdrawn;
     uint128 public totalWithdrawalFees;
     uint128 public accruedFees;
-    uint128 public totalServiceFees;
+    /// @notice The most a monthly allocation may commit in gross, and whether anyone may submit one. Only
+    /// the owner sets them; the owner turns monthly commitments off at any time.
+    uint128 public monthlyCap;
+    bool public monthlyEnabled;
     mapping(bytes32 => Award) public awards;
     mapping(bytes32 => bool) public consumedSources;
     mapping(uint64 => Binding) public bindings;
@@ -95,7 +119,8 @@ contract ProjectEscrow {
     mapping(uint64 => uint64) public lastCommittedAt;
     /// @notice Cancels recorded for an actor since the actor's last payment.
     mapping(uint64 => uint8) public cancelCount;
-    mapping(bytes32 => bool) public chargedInvoices;
+    /// @notice The allocation root committed for a period (YYYYMM); zero before its one commitment.
+    mapping(uint32 => bytes32) public monthlyRoots;
     bool private entered;
 
     error Unauthorized();
@@ -105,7 +130,12 @@ contract ProjectEscrow {
     error InvalidBinding();
     error TransferFailed();
     error ReentrantCall();
-    error DuplicateInvoice();
+    error WrongPurpose();
+    error MonthlyDisabled();
+    error MonthlyWindowClosed();
+    error MonthlyAlreadyCommitted();
+    error MonthlyCapExceeded();
+    error InvalidAttestation();
     error AwardPending();
     error CancelLimit();
     error InvalidWalletSignature();
@@ -127,7 +157,8 @@ contract ProjectEscrow {
         uint128 fee
     );
     event UnusedWithdrawn(address indexed destination, uint128 gross, uint128 net, uint128 fee);
-    event ServiceCharged(bytes32 indexed invoiceDigest, uint128 amount);
+    event MonthlyCommitmentSet(uint128 cap, bool enabled);
+    event MonthlyCommitted(uint32 indexed period, bytes32 allocationRoot, uint128 gross, uint256 awards);
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert Unauthorized();
@@ -146,7 +177,7 @@ contract ProjectEscrow {
         bytes32 projectId_,
         IERC20 token_,
         address owner_,
-        address refundDestination_,
+        Purpose purpose_,
         address feeRecipient_,
         uint64 bindingDelay_
     ) {
@@ -155,15 +186,15 @@ contract ProjectEscrow {
         // Free funds are refunded only to the owner, whoever deposited them.
         if (
             projectId_ == bytes32(0) || address(token_).code.length == 0 || owner_ == address(0)
-                || owner_ == address(this) || refundDestination_ != owner_ || feeRecipient_ == address(0)
-                || identityAuthority_ == address(0) || owner_ == identityAuthority_ || feeRecipient_ == address(this)
-                || bindingDelay_ < MIN_BINDING_DELAY || bindingDelay_ > MAX_BINDING_DELAY
+                || owner_ == address(this) || feeRecipient_ == address(0) || identityAuthority_ == address(0)
+                || owner_ == identityAuthority_ || feeRecipient_ == address(this) || bindingDelay_ < MIN_BINDING_DELAY
+                || bindingDelay_ > MAX_BINDING_DELAY
         ) revert InvalidInput();
         projectId = projectId_;
         token = token_;
         decimals = readDecimals(token_);
         owner = owner_;
-        refundDestination = refundDestination_;
+        purpose = purpose_;
         feeRecipient = feeRecipient_;
         factory = factory_;
         bindingDelay = bindingDelay_;
@@ -177,7 +208,7 @@ contract ProjectEscrow {
     /// @notice EIP-712 domain: the chain and this vault, so a wallet signature cannot be replayed elsewhere.
     function domainSeparator() public view returns (bytes32) {
         return keccak256(
-            abi.encode(DOMAIN_TYPEHASH, keccak256("SlopProjectEscrow"), keccak256("4"), block.chainid, address(this))
+            abi.encode(DOMAIN_TYPEHASH, keccak256("SlopProjectEscrow"), keccak256("5"), block.chainid, address(this))
         );
     }
 
@@ -199,16 +230,74 @@ contract ProjectEscrow {
         );
     }
 
+    /// @notice The digest the identity authority signs to attest one month's allocation for this vault. The
+    /// domain binds the chain and this vault.
+    function monthlyDigest(uint32 period, bytes32 allocationRoot_) public view returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(
+                "\x19\x01", domainSeparator(), keccak256(abi.encode(MONTHLY_TYPEHASH, period, allocationRoot_))
+            )
+        );
+    }
+
+    /// @notice The allocation root: a Merkle tree over the awards in order. A leaf is
+    /// keccak256(0x00, actorId, gross, sourceDigest) and a node is keccak256(0x01, left, right), packed; an odd
+    /// last node moves up unchanged. The 0x00 and 0x01 prefixes keep a node from passing as a leaf.
+    function allocationRoot(MonthlyAward[] calldata entries) public pure returns (bytes32) {
+        uint256 count = entries.length;
+        if (count == 0) revert InvalidInput();
+        bytes32[] memory level = new bytes32[](count);
+        for (uint256 i; i < count; ++i) {
+            level[i] =
+                keccak256(abi.encodePacked(uint8(0), entries[i].actorId, entries[i].gross, entries[i].sourceDigest));
+        }
+        while (count > 1) {
+            uint256 next = (count + 1) / 2;
+            for (uint256 i; i < next; ++i) {
+                uint256 left = 2 * i;
+                level[i] = left + 1 < count
+                    ? keccak256(abi.encodePacked(uint8(1), level[left], level[left + 1]))
+                    : level[left];
+            }
+            count = next;
+        }
+        return level[0];
+    }
+
+    /// @notice When a period's allocation may be committed: from MONTHLY_CUTOFF_DELAY after the month ends
+    /// until MONTHLY_CUTOFF_DELAY after the next month ends. The period is YYYYMM in UTC, year 2000 to 9999.
+    /// Only one period is open at a time, so a stolen authority key can commit at most one cap per month.
+    function monthlyWindow(uint32 period) public pure returns (uint64 opensAt, uint64 closesAt) {
+        uint256 year = period / 100;
+        uint256 month = period % 100;
+        if (year < 2000 || year > 9999 || month == 0 || month > 12) revert InvalidInput();
+        (uint256 nextYear, uint256 nextMonth) = month == 12 ? (year + 1, uint256(1)) : (year, month + 1);
+        (uint256 afterYear, uint256 afterMonth) =
+            nextMonth == 12 ? (nextYear + 1, uint256(1)) : (nextYear, nextMonth + 1);
+        opensAt = uint64(monthStart(nextYear, nextMonth)) + MONTHLY_CUTOFF_DELAY;
+        closesAt = uint64(monthStart(afterYear, afterMonth)) + MONTHLY_CUTOFF_DELAY;
+    }
+
+    /// @dev Unix time of 00:00 UTC on the first day of a month (proleptic Gregorian, days from civil).
+    function monthStart(uint256 year, uint256 month) private pure returns (uint256) {
+        uint256 y = month <= 2 ? year - 1 : year;
+        uint256 era = y / 400;
+        uint256 yearOfEra = y - era * 400;
+        uint256 dayOfYear = (153 * (month > 2 ? month - 3 : month + 9) + 2) / 5;
+        uint256 dayOfEra = yearOfEra * 365 + yearOfEra / 4 - yearOfEra / 100 + dayOfYear;
+        return (era * 146097 + dayOfEra - 719468) * 1 days;
+    }
+
     /// @dev Externally owned accounts only: a 65-byte canonical secp256k1 signature that recovers to the
-    /// destination. A contract wallet cannot produce one and so cannot be bound in this version.
-    function walletSigned(bytes32 digest, address destination, bytes calldata signature) private pure returns (bool) {
+    /// expected signer. A contract wallet cannot produce one, so it cannot be bound or attest in this version.
+    function signedBy(bytes32 digest, address expected, bytes calldata signature) private pure returns (bool) {
         if (signature.length != 65) return false;
         bytes32 r = bytes32(signature[0:32]);
         bytes32 s = bytes32(signature[32:64]);
         uint8 v = uint8(signature[64]);
         if (s > MAX_S || (v != 27 && v != 28)) return false;
         address signer = ecrecover(digest, v, r, s);
-        return signer != address(0) && signer == destination;
+        return signer != address(0) && signer == expected;
     }
 
     /// @notice The only valid award ID for a source. Binding the chain and vault stops another vault from
@@ -238,7 +327,6 @@ contract ProjectEscrow {
             uint128 payoutFees,
             uint128 grossWithdrawn,
             uint128 withdrawalFees,
-            uint128 serviceFees,
             uint128 free,
             uint128 principalReserved,
             uint128 feesReserved,
@@ -252,7 +340,6 @@ contract ProjectEscrow {
             totalPayoutFees,
             totalGrossWithdrawn,
             totalWithdrawalFees,
-            totalServiceFees,
             freeBalance,
             reservedPrincipal,
             reservedFees,
@@ -262,7 +349,7 @@ contract ProjectEscrow {
     }
 
     /// @notice Anyone may deposit. The amount joins the free balance, which only the owner can commit to awards
-    /// or refund to its refund destination; a depositor gets no refund right. Direct transfers are not credited.
+    /// or refund to itself; a depositor gets no refund right. Direct transfers are not credited.
     function deposit(uint128 amount) external nonReentrant {
         if (amount == 0) revert InvalidInput();
         uint256 beforeBalance = token.balanceOf(address(this));
@@ -275,14 +362,53 @@ contract ProjectEscrow {
 
     /// @param sourceDigest Unique per award origin (project/cycle/actor/allocation), not a whole-cycle digest.
     function commitAward(bytes32 id, uint64 actorId, uint128 gross, bytes32 sourceDigest) external onlyOwner {
+        if (purpose != Purpose.Ordinary) revert WrongPurpose();
         commit(id, actorId, gross, sourceDigest, payoutFee(gross));
     }
 
-    /// @notice Owner-approved private bounty: exactly 75% to the researcher and 25% to Slop.
-    /// The source must be a random opaque commitment, never a digest of a private report.
+    /// @notice Owner-approved private bounty: exactly 75% to the researcher and 25% to Slop. Only a bounty
+    /// vault takes it. The source must be a random opaque commitment, never a digest of a private report.
     function commitBountyAward(bytes32 id, uint64 actorId, uint128 gross, bytes32 sourceDigest) external onlyOwner {
+        if (purpose != Purpose.Bounty) revert WrongPurpose();
         if (gross % 4 != 0) revert InvalidInput();
         commit(id, actorId, gross, sourceDigest, gross / 4);
+    }
+
+    /// @notice The owner sets the monthly cap and turns monthly commitments on or off. While they are off,
+    /// nobody can commit a monthly allocation; awards already committed stay committed.
+    function setMonthlyCommitment(uint128 cap, bool enabled) external onlyOwner {
+        if (purpose != Purpose.Ordinary) revert WrongPurpose();
+        if (enabled && cap == 0) revert InvalidInput();
+        monthlyCap = cap;
+        monthlyEnabled = enabled;
+        emit MonthlyCommitmentSet(cap, enabled);
+    }
+
+    /// @notice Anyone may commit one period's allocation inside its window, once per period, while the owner
+    /// has monthly commitments on. The identity authority must have signed monthlyDigest(period, root) for
+    /// exactly these awards, and their gross total must be within monthlyCap and the free balance. Each award
+    /// takes the ordinary payout fee and pays through the ordinary binding and delay rules.
+    function commitMonthly(uint32 period, MonthlyAward[] calldata entries, bytes calldata attestation) external {
+        if (purpose != Purpose.Ordinary) revert WrongPurpose();
+        if (!monthlyEnabled) revert MonthlyDisabled();
+        (uint64 opensAt, uint64 closesAt) = monthlyWindow(period);
+        if (block.timestamp < opensAt || block.timestamp >= closesAt) revert MonthlyWindowClosed();
+        if (monthlyRoots[period] != bytes32(0)) revert MonthlyAlreadyCommitted();
+        bytes32 root = allocationRoot(entries);
+        if (!signedBy(monthlyDigest(period, root), factory.identityAuthority(), attestation)) {
+            revert InvalidAttestation();
+        }
+        uint256 total;
+        for (uint256 i; i < entries.length; ++i) {
+            total += entries[i].gross;
+        }
+        if (total > monthlyCap) revert MonthlyCapExceeded();
+        monthlyRoots[period] = root;
+        for (uint256 i; i < entries.length; ++i) {
+            MonthlyAward calldata entry = entries[i];
+            commit(awardId(entry.sourceDigest), entry.actorId, entry.gross, entry.sourceDigest, payoutFee(entry.gross));
+        }
+        emit MonthlyCommitted(period, root, uint128(total), entries.length);
     }
 
     function commit(bytes32 id, uint64 actorId, uint128 gross, bytes32 sourceDigest, uint128 fee) private {
@@ -318,7 +444,7 @@ contract ProjectEscrow {
             actorId == 0 || destination == address(0) || destination == address(this) || claimDigest == bytes32(0)
                 || expiresAt < block.timestamp || bindings[actorId].version != expectedVersion
         ) revert InvalidBinding();
-        if (!walletSigned(
+        if (!signedBy(
                 bindingDigest(actorId, destination, expectedVersion, claimDigest, expiresAt),
                 destination,
                 walletSignature
@@ -387,7 +513,7 @@ contract ProjectEscrow {
         emit Paid(id, award.actorId, destination, version, award.gross, net, award.fee);
     }
 
-    /// @notice Refunds free funds to the refund destination less withdrawalFee(gross), 2% rounded down. A
+    /// @notice Refunds free funds to the owner less withdrawalFee(gross), 2% rounded down. A
     /// withdrawal under 50 base units pays no fee; splitting saves under one base unit per transaction.
     function withdrawUnused(uint128 gross) external onlyOwner nonReentrant {
         if (gross == 0) revert InvalidInput();
@@ -397,21 +523,8 @@ contract ProjectEscrow {
         totalGrossWithdrawn += gross;
         totalWithdrawalFees += fee;
         accruedFees += fee;
-        sendExact(refundDestination, gross - fee);
-        emit UnusedWithdrawn(refundDestination, gross, gross - fee, fee);
-    }
-
-    /// @notice PAY-10: the owner pays one Slopbot invoice from free sponsor funds, exactly once per digest.
-    /// The charge accrues for the fee recipient like other fees; reserved awards are never touched.
-    function chargeService(uint128 amount, bytes32 invoiceDigest) external onlyOwner nonReentrant {
-        if (amount == 0 || invoiceDigest == bytes32(0)) revert InvalidInput();
-        if (chargedInvoices[invoiceDigest]) revert DuplicateInvoice();
-        if (amount > freeBalance) revert InsufficientFreeBalance();
-        chargedInvoices[invoiceDigest] = true;
-        freeBalance -= amount;
-        totalServiceFees += amount;
-        accruedFees += amount;
-        emit ServiceCharged(invoiceDigest, amount);
+        sendExact(owner, gross - fee);
+        emit UnusedWithdrawn(owner, gross, gross - fee, fee);
     }
 
     /// @notice Anyone can move accrued fees to the fee recipient. Only this call depends on that address.
@@ -451,11 +564,13 @@ contract ProjectEscrow {
     }
 }
 
-/// @notice One vault per (project ID, token) in this deployment. The token is a per-vault parameter, so one
-/// factory serves every standard ERC-20 on its chain.
-/// The registrar is a disclosed project-registration trust boundary, not a money authority. It also holds
-/// the only mutable authority: the identity authority every vault reads, replaced through a public 7-day
-/// timelock that the registrar proposes and may cancel, and that the current authority cannot block.
+/// @notice Anyone creates a vault for itself: the caller is the owner, and there is one vault per (owner,
+/// project ID, token, purpose) in this deployment. The token is a per-vault parameter, so one factory serves
+/// every standard ERC-20 on its chain. A vault proves only who created it; the project registry decides
+/// which owner's vault a project uses.
+/// The registrar is not a money authority and creates no vaults. It holds the only mutable authority: the
+/// identity authority every vault reads, replaced through a public 7-day timelock that the registrar
+/// proposes and may cancel, and that the current authority cannot block.
 /// The registrar, fee recipient and identity authority are explicit constructor parameters.
 contract EscrowFactory {
     uint64 public constant AUTHORITY_ROTATION_DELAY = 7 days;
@@ -465,7 +580,8 @@ contract EscrowFactory {
     address public identityAuthority;
     address public pendingIdentityAuthority;
     uint64 public identityAuthorityEffectiveAt;
-    mapping(bytes32 => mapping(address => address)) public vaults;
+    /// @notice The vault for vaultKey(owner, projectId, token, purpose), or zero.
+    mapping(bytes32 => address) public vaults;
 
     error RotationPending();
     error NoRotationPending();
@@ -477,7 +593,7 @@ contract EscrowFactory {
         address indexed token,
         address indexed vault,
         address owner,
-        address refundDestination,
+        Purpose purpose,
         uint8 decimals
     );
     event IdentityAuthorityRotationProposed(address indexed current, address indexed proposed, uint64 effectiveAt);
@@ -501,23 +617,20 @@ contract EscrowFactory {
         bindingDelay = bindingDelay_;
     }
 
-    /// @notice The CREATE2 salt of the vault for a project and token.
-    function vaultSalt(bytes32 projectId, IERC20 token) public pure returns (bytes32) {
-        return keccak256(abi.encode(projectId, token));
+    /// @notice The mapping key and CREATE2 salt of an owner's vault for a project, token and purpose.
+    function vaultKey(address owner, bytes32 projectId, IERC20 token, Purpose purpose) public pure returns (bytes32) {
+        return keccak256(abi.encode(owner, projectId, token, purpose));
     }
 
-    function create(bytes32 projectId, IERC20 token, address owner, address refundDestination)
-        external
-        onlyRegistrar
-        returns (address vault)
-    {
-        if (vaults[projectId][address(token)] != address(0)) revert DuplicateVault();
-        ProjectEscrow created = new ProjectEscrow{salt: vaultSalt(projectId, token)}(
-            projectId, token, owner, refundDestination, feeRecipient, bindingDelay
-        );
+    /// @notice Permissionless: creates the caller's own vault for a project, token and purpose.
+    function create(bytes32 projectId, IERC20 token, Purpose purpose) external returns (address vault) {
+        bytes32 key = vaultKey(msg.sender, projectId, token, purpose);
+        if (vaults[key] != address(0)) revert DuplicateVault();
+        ProjectEscrow created =
+            new ProjectEscrow{salt: key}(projectId, token, msg.sender, purpose, feeRecipient, bindingDelay);
         vault = address(created);
-        vaults[projectId][address(token)] = vault;
-        emit VaultCreated(projectId, address(token), vault, owner, refundDestination, created.decimals());
+        vaults[key] = vault;
+        emit VaultCreated(projectId, address(token), vault, msg.sender, purpose, created.decimals());
     }
 
     /// @notice Starts the public notice period for a replacement identity authority. One proposal at a time.

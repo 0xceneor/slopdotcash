@@ -99,86 +99,6 @@
       "args": []
     },
     {
-      "name": "charge_service",
-      "discriminator": [244, 35, 209, 10, 213, 122, 56, 146],
-      "accounts": [
-        {
-          "name": "owner",
-          "writable": true,
-          "signer": true,
-          "relations": ["project"]
-        },
-        {
-          "name": "project",
-          "writable": true
-        },
-        {
-          "name": "mint",
-          "relations": ["project"]
-        },
-        {
-          "name": "vault",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [118, 97, 117, 108, 116]
-              },
-              {
-                "kind": "account",
-                "path": "project"
-              }
-            ]
-          }
-        },
-        {
-          "name": "fee_account",
-          "writable": true
-        },
-        {
-          "name": "charge",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [115, 101, 114, 118, 105, 99, 101]
-              },
-              {
-                "kind": "account",
-                "path": "project"
-              },
-              {
-                "kind": "arg",
-                "path": "invoice_digest"
-              }
-            ]
-          }
-        },
-        {
-          "name": "token_program",
-          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": [
-        {
-          "name": "amount",
-          "type": "u64"
-        },
-        {
-          "name": "invoice_digest",
-          "type": {
-            "array": ["u8", 32]
-          }
-        }
-      ]
-    },
-    {
       "name": "commit",
       "discriminator": [223, 140, 142, 165, 229, 208, 156, 74],
       "accounts": [
@@ -278,7 +198,8 @@
     {
       "name": "commit_bounty",
       "docs": [
-        "Bounties reuse ordinary reserves, destination authorization and recovery."
+        "Bounties reuse ordinary reserves, destination authorization and recovery, in a",
+        "bounty-purpose project only."
       ],
       "discriminator": [154, 59, 142, 180, 230, 40, 184, 226],
       "accounts": [
@@ -376,6 +297,200 @@
       ]
     },
     {
+      "name": "commit_monthly",
+      "discriminator": [217, 169, 208, 210, 29, 58, 88, 195],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": ["Anyone; pays the period account's rent."],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "project"
+        },
+        {
+          "name": "month",
+          "docs": ["One per project and period, so a period commits once."],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [109, 111, 110, 116, 104]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              },
+              {
+                "kind": "arg",
+                "path": "period"
+              }
+            ]
+          }
+        },
+        {
+          "name": "instructions",
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "period",
+          "type": "u32"
+        },
+        {
+          "name": "allocation_root",
+          "type": {
+            "array": ["u8", 32]
+          }
+        }
+      ]
+    },
+    {
+      "name": "commit_monthly_award",
+      "discriminator": [98, 176, 71, 100, 186, 51, 43, 100],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": ["Anyone; pays the award accounts' rent."],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "project",
+          "writable": true,
+          "relations": ["month"]
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [118, 97, 117, 108, 116]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              }
+            ]
+          }
+        },
+        {
+          "name": "month",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [109, 111, 110, 116, 104]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              },
+              {
+                "kind": "arg",
+                "path": "period"
+              }
+            ]
+          }
+        },
+        {
+          "name": "origin",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [111, 114, 105, 103, 105, 110]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              },
+              {
+                "kind": "arg",
+                "path": "source_digest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "obligation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [97, 119, 97, 114, 100]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              },
+              {
+                "kind": "arg",
+                "path": "award_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "period",
+          "type": "u32"
+        },
+        {
+          "name": "award_id",
+          "type": {
+            "array": ["u8", 32]
+          }
+        },
+        {
+          "name": "source_digest",
+          "type": {
+            "array": ["u8", 32]
+          }
+        },
+        {
+          "name": "actor_id",
+          "type": "u64"
+        },
+        {
+          "name": "gross",
+          "type": "u64"
+        },
+        {
+          "name": "index",
+          "type": "u32"
+        },
+        {
+          "name": "count",
+          "type": "u32"
+        },
+        {
+          "name": "proof",
+          "type": {
+            "vec": {
+              "array": ["u8", 32]
+            }
+          }
+        }
+      ]
+    },
+    {
       "name": "confirm_authority_rotation",
       "discriminator": [3, 247, 66, 156, 194, 171, 127, 86],
       "accounts": [
@@ -461,23 +576,11 @@
         },
         {
           "name": "project",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [112, 114, 111, 106, 101, 99, 116]
-              },
-              {
-                "kind": "account",
-                "path": "owner"
-              },
-              {
-                "kind": "arg",
-                "path": "project_id"
-              }
-            ]
-          }
+          "docs": [
+            "One project per owner, project ID and purpose, so ordinary awards and private bounties",
+            "never share a vault."
+          ],
+          "writable": true
         },
         {
           "name": "mint",
@@ -550,6 +653,14 @@
         {
           "name": "rotation_delay",
           "type": "i64"
+        },
+        {
+          "name": "purpose",
+          "type": {
+            "defined": {
+              "name": "Purpose"
+            }
+          }
         }
       ]
     },
@@ -594,34 +705,6 @@
         {
           "name": "fee_recipient",
           "type": "pubkey"
-        }
-      ]
-    },
-    {
-      "name": "migrate_project",
-      "discriminator": [1, 96, 78, 101, 244, 33, 203, 108],
-      "accounts": [
-        {
-          "name": "owner",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "project",
-          "docs": [
-            "discriminator and stored owner before it grows the account."
-          ],
-          "writable": true
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": [
-        {
-          "name": "rotation_delay",
-          "type": "i64"
         }
       ]
     },
@@ -745,6 +828,31 @@
         {
           "name": "next",
           "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_monthly_commitment",
+      "discriminator": [204, 64, 188, 96, 90, 158, 14, 235],
+      "accounts": [
+        {
+          "name": "owner",
+          "signer": true,
+          "relations": ["project"]
+        },
+        {
+          "name": "project",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "cap",
+          "type": "u64"
+        },
+        {
+          "name": "enabled",
+          "type": "bool"
         }
       ]
     },
@@ -893,6 +1001,10 @@
       "discriminator": [155, 12, 170, 224, 30, 250, 204, 130]
     },
     {
+      "name": "MonthlyAllocation",
+      "discriminator": [17, 112, 193, 144, 43, 214, 252, 107]
+    },
+    {
       "name": "Obligation",
       "discriminator": [168, 206, 141, 106, 88, 76, 172, 167]
     },
@@ -903,10 +1015,6 @@
     {
       "name": "Project",
       "discriminator": [205, 168, 189, 202, 181, 247, 142, 19]
-    },
-    {
-      "name": "ServiceCharge",
-      "discriminator": [80, 27, 252, 196, 96, 153, 254, 192]
     },
     {
       "name": "WalletBinding",
@@ -951,12 +1059,12 @@
       "discriminator": [111, 141, 26, 45, 161, 35, 100, 57]
     },
     {
-      "name": "ProjectMigrated",
-      "discriminator": [120, 121, 121, 187, 64, 18, 169, 152]
+      "name": "MonthlyCommitmentSet",
+      "discriminator": [112, 110, 71, 120, 110, 200, 48, 232]
     },
     {
-      "name": "ServiceCharged",
-      "discriminator": [177, 27, 12, 242, 174, 79, 142, 142]
+      "name": "MonthlyCommitted",
+      "discriminator": [21, 90, 254, 60, 119, 79, 65, 193]
     },
     {
       "name": "UnusedWithdrawn",
@@ -1080,18 +1188,48 @@
     },
     {
       "code": 6022,
-      "name": "NotLegacyProject",
-      "msg": "Account is not a legacy-size project of this program"
-    },
-    {
-      "code": 6023,
       "name": "ConfigMismatch",
       "msg": "Identity authority or fee recipient differs from the pinned Config"
     },
     {
-      "code": 6024,
+      "code": 6023,
       "name": "NotUpgradeAuthority",
       "msg": "Only the program upgrade authority can initialize the Config"
+    },
+    {
+      "code": 6024,
+      "name": "WrongPurpose",
+      "msg": "This instruction does not apply to the project's purpose"
+    },
+    {
+      "code": 6025,
+      "name": "MonthlyDisabled",
+      "msg": "The owner has turned monthly commitments off"
+    },
+    {
+      "code": 6026,
+      "name": "InvalidPeriod",
+      "msg": "Period must be YYYYMM with year 2000 to 9999"
+    },
+    {
+      "code": 6027,
+      "name": "MonthlyWindowClosed",
+      "msg": "The period's monthly window is not open"
+    },
+    {
+      "code": 6028,
+      "name": "InvalidAttestation",
+      "msg": "The identity authority did not sign this allocation"
+    },
+    {
+      "code": 6029,
+      "name": "InvalidAllocationProof",
+      "msg": "Award is not in the recorded allocation"
+    },
+    {
+      "code": 6030,
+      "name": "MonthlyCapExceeded",
+      "msg": "Monthly awards would exceed the owner's monthly cap"
     }
   ],
   "types": [
@@ -1337,6 +1475,77 @@
       }
     },
     {
+      "name": "MonthlyAllocation",
+      "docs": [
+        "One period's recorded allocation root and the gross committed from it so far."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "project",
+            "type": "pubkey"
+          },
+          {
+            "name": "period",
+            "type": "u32"
+          },
+          {
+            "name": "allocation_root",
+            "type": {
+              "array": ["u8", 32]
+            }
+          },
+          {
+            "name": "committed",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MonthlyCommitmentSet",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "project",
+            "type": "pubkey"
+          },
+          {
+            "name": "cap",
+            "type": "u64"
+          },
+          {
+            "name": "enabled",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MonthlyCommitted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "project",
+            "type": "pubkey"
+          },
+          {
+            "name": "period",
+            "type": "u32"
+          },
+          {
+            "name": "allocation_root",
+            "type": {
+              "array": ["u8", 32]
+            }
+          }
+        ]
+      }
+    },
+    {
       "name": "Obligation",
       "type": {
         "kind": "struct",
@@ -1462,15 +1671,7 @@
             "type": "i64"
           },
           {
-            "name": "service_fees",
-            "type": "u64"
-          },
-          {
             "name": "pending_identity_authority",
-            "docs": [
-              "Fields after this point were added with the authority rotation; `migrate_project` grows",
-              "accounts created without them."
-            ],
             "type": "pubkey"
           },
           {
@@ -1484,66 +1685,43 @@
           {
             "name": "rotation_delay",
             "type": "i64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "ProjectMigrated",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "project",
-            "type": "pubkey"
           },
           {
-            "name": "rotation_delay",
-            "type": "i64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "ServiceCharge",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          {
-            "name": "project",
-            "type": "pubkey"
-          },
-          {
-            "name": "invoice_digest",
+            "name": "purpose",
             "type": {
-              "array": ["u8", 32]
+              "defined": {
+                "name": "Purpose"
+              }
             }
           },
           {
-            "name": "amount",
+            "name": "monthly_cap",
+            "docs": [
+              "The most a period's monthly awards may commit in gross, and whether anyone may record",
+              "and commit them. Only the owner sets them."
+            ],
             "type": "u64"
+          },
+          {
+            "name": "monthly_enabled",
+            "type": "bool"
           }
         ]
       }
     },
     {
-      "name": "ServiceCharged",
+      "name": "Purpose",
+      "docs": [
+        "What a project holds funds for. It is part of the project PDA seeds."
+      ],
       "type": {
-        "kind": "struct",
-        "fields": [
+        "kind": "enum",
+        "variants": [
           {
-            "name": "project",
-            "type": "pubkey"
+            "name": "Ordinary"
           },
           {
-            "name": "invoice_digest",
-            "type": {
-              "array": ["u8", 32]
-            }
-          },
-          {
-            "name": "amount",
-            "type": "u64"
+            "name": "Bounty"
           }
         ]
       }

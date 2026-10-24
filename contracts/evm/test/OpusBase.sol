@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {ProjectEscrow, EscrowFactory, IERC20} from "../src/ProjectEscrow.sol";
+import {ProjectEscrow, EscrowFactory, IERC20, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
 
 struct OpusVmLog {
@@ -51,7 +51,9 @@ abstract contract OpusBase {
     OpusVm internal constant vm = OpusVm(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint64 internal constant DELAY = 48 hours;
     address internal constant OWNER = address(0xA11CE);
-    address internal constant AUTHORITY = address(0xA77E);
+    /// @dev The identity authority signs monthly allocations, so it has a key.
+    uint256 internal constant AUTHORITY_KEY = 0xA77E;
+    address internal AUTHORITY = vm.addr(AUTHORITY_KEY);
     address internal constant FEE = address(0xFEE);
     address internal constant REGISTRAR = address(0x4E6);
     address internal ALICE_WALLET = vm.addr(OpusWallets.ALICE_KEY);
@@ -71,8 +73,8 @@ abstract contract OpusBase {
         usdc = new TestDollar();
         vm.prank(REGISTRAR);
         factory = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, delay);
-        vm.prank(REGISTRAR);
-        escrow = ProjectEscrow(factory.create(keccak256("project"), IERC20(address(usdc)), OWNER, OWNER));
+        vm.prank(OWNER);
+        escrow = ProjectEscrow(factory.create(keccak256("project"), IERC20(address(usdc)), Purpose.Ordinary));
         usdc.mint(OWNER, 1_000_000e6);
         vm.prank(OWNER);
         usdc.approve(address(escrow), type(uint256).max);

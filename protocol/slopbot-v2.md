@@ -104,7 +104,8 @@ Superseded by the canonical PRD section 5: Slopbot is always free and does
 not charge project vaults. The former cost-plus-10% billing no longer applies
 to new reviews; historical charge records stay unchanged. Slop records
 provider cost internally for budgets and queue limits only. Slopbot holds no
-funds and no payment key.
+funds and no payment key. The vault contracts have no service charge: owner
+decision D13 (24 October 2026) removed `chargeService` and `charge_service`.
 
 ## Recognition
 

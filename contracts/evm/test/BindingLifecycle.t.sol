@@ -186,7 +186,7 @@ contract BindingLifecycleTest is OpusBase {
             new EscrowFactory(REGISTRAR, FEE, AUTHORITY, bad[i]);
         }
         vm.expectRevert();
-        new ProjectEscrow(keccak256("p"), IERC20(address(usdc)), OWNER, OWNER, FEE, 1 hours);
+        new ProjectEscrow(keccak256("p"), IERC20(address(usdc)), OWNER, Purpose.Ordinary, FEE, 1 hours);
         deployWithDelay(1 hours);
         ProjectEscrow low = escrow;
         deployWithDelay(30 days);

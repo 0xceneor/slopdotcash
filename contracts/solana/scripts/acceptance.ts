@@ -105,7 +105,13 @@ function escrow(programId: PublicKey) {
     });
   return {
     project: (owner: PublicKey, projectId: Buffer) =>
-      pda(Buffer.from("project"), owner.toBuffer(), projectId),
+      // The last seed is the ordinary purpose; this run uses ordinary awards.
+      pda(
+        Buffer.from("project"),
+        owner.toBuffer(),
+        projectId,
+        Buffer.from([0]),
+      ),
     vault: (project: PublicKey) =>
       pda(Buffer.from("vault"), project.toBuffer()),
     config: () => new PublicKey(solanaConfigAddress(programId.toBase58())),
@@ -169,6 +175,7 @@ function escrow(programId: PublicKey) {
         input.fees.toBuffer(),
         i64(input.bindingDelay),
         i64(input.rotationDelay),
+        Buffer.from([0]),
       ),
     deposit: (input: {
       depositor: PublicKey;
@@ -1183,7 +1190,6 @@ export async function runSolana(
       totalPayoutFees: (amounts.feeA + amounts.feeB).toString(),
       totalGrossWithdrawn: amounts.withdrawGross.toString(),
       totalWithdrawalFees: amounts.withdrawFee.toString(),
-      totalServiceFees: "0",
       freeBalance: "0",
       reservedPrincipal: null,
       reservedFees: null,

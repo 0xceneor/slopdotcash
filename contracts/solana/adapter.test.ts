@@ -26,7 +26,6 @@ interface Counters {
   payoutFees: bigint;
   withdrawnGross: bigint;
   withdrawalFees: bigint;
-  serviceFees: bigint;
 }
 const base: Counters = {
   reserved: 30n,
@@ -35,9 +34,8 @@ const base: Counters = {
   payoutFees: 2n,
   withdrawnGross: 500n,
   withdrawalFees: 10n,
-  serviceFees: 7n,
 };
-/** A Project account in the current 314-byte layout. */
+/** A Project account in the current 316-byte layout. */
 function projectAccount(c: Counters, mint = MINT_BYTES): Uint8Array {
   const data = new Uint8Array(PROJECT_SIZE);
   const view = new DataView(data.buffer);
@@ -55,8 +53,7 @@ function projectAccount(c: Counters, mint = MINT_BYTES): Uint8Array {
   view.setBigUint64(240, c.withdrawalFees, true);
   data[248] = 254;
   view.setBigInt64(249, 3600n, true);
-  view.setBigUint64(257, c.serviceFees, true);
-  view.setBigInt64(306, 604800n, true);
+  view.setBigInt64(298, 604800n, true);
   return data;
 }
 function mintAccount(decimals: number, initialized = 1): Uint8Array {
@@ -128,8 +125,7 @@ describe("readVaultTotals", () => {
       totalPayoutFees: "2",
       totalGrossWithdrawn: "500",
       totalWithdrawalFees: "10",
-      totalServiceFees: "7",
-      freeBalance: (10n ** 19n - 98n - 2n - 500n - 7n - 30n).toString(),
+      freeBalance: (10n ** 19n - 98n - 2n - 500n - 30n).toString(),
       reservedPrincipal: null,
       reservedFees: null,
       accruedFees: null,
@@ -150,13 +146,13 @@ describe("readVaultTotals", () => {
       });
       const totals = await readVaultTotals(config);
       expect(totals.decimals).toBe(decimals);
-      expect(totals.freeBalance).toBe("363");
+      expect(totals.freeBalance).toBe("370");
     }
   });
 
   test("throws when the counters exceed deposits", async () => {
     mockRpc({
-      project: projectAccount({ ...base, deposited: 636n }),
+      project: projectAccount({ ...base, deposited: 629n }),
       mint: mintAccount(6),
     });
     await expect(readVaultTotals(config)).rejects.toThrow(

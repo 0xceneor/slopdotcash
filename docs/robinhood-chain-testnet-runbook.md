@@ -126,15 +126,19 @@ constructor arguments from step 4.
 
 ## 6. Create and exercise one vault (human only)
 
-The registrar creates the vault for a reviewed test project ID and the test
-token:
+The test owner creates its ordinary vault (purpose `0`) for a reviewed test
+project ID and the test token. Vault creation is permissionless and the sender
+is the owner:
 
 ```sh
-cast send "$FACTORY" 'create(bytes32,address,address,address)' \
-  "$PROJECT_ID" 0x7E955252E15c84f5768B83c41a71F9eba181802F "$TEST_OWNER" "$TEST_OWNER" \
-  --rpc-url "$ROBINHOOD_TESTNET_RPC_URL" --account slop-test-registrar
-VAULT=$(cast call "$FACTORY" 'vaults(bytes32,address)(address)' "$PROJECT_ID" \
-  0x7E955252E15c84f5768B83c41a71F9eba181802F --rpc-url "$ROBINHOOD_TESTNET_RPC_URL")
+cast send "$FACTORY" 'create(bytes32,address,uint8)' \
+  "$PROJECT_ID" 0x7E955252E15c84f5768B83c41a71F9eba181802F 0 \
+  --rpc-url "$ROBINHOOD_TESTNET_RPC_URL" --account slop-test-owner
+KEY=$(cast call "$FACTORY" 'vaultKey(address,bytes32,address,uint8)(bytes32)' \
+  "$TEST_OWNER" "$PROJECT_ID" 0x7E955252E15c84f5768B83c41a71F9eba181802F 0 \
+  --rpc-url "$ROBINHOOD_TESTNET_RPC_URL")
+VAULT=$(cast call "$FACTORY" 'vaults(bytes32)(address)' "$KEY" \
+  --rpc-url "$ROBINHOOD_TESTNET_RPC_URL")
 ```
 
 Then run the acceptance scenario with finalized receipts:
@@ -143,11 +147,10 @@ Then run the acceptance scenario with finalized receipts:
    `Deposited` event names that account.
 2. The owner commits one award with `awardId(sourceDigest)`.
 3. The attester binds the contributor wallet with the wallet's EIP-712
-   signature (domain `SlopProjectEscrow`, version `4`).
+   signature (domain `SlopProjectEscrow`, version `5`).
 4. After the binding delay and the award's commit delay, anyone calls `pay`.
 5. The owner withdraws part of the free balance. Check the fee is
-   `floor(gross / 50)` (2%) and only `gross - fee` reaches the refund
-   destination.
+   `floor(gross / 50)` (2%) and only `gross - fee` reaches the owner.
 6. Anyone calls `claimFees`.
 7. Read `totals()` and the adapter's `readVaultTotals` at the finalized block,
    and check the conservation identity.

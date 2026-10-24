@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-import {EscrowFactory, IERC20, ProjectEscrow} from "../src/ProjectEscrow.sol";
+import {EscrowFactory, IERC20, ProjectEscrow, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
 
 interface Vm {
@@ -46,8 +46,8 @@ contract BoundedAttesterTest {
         usdc = new TestDollar();
         vm.prank(REGISTRAR);
         factory = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, DELAY);
-        vm.prank(REGISTRAR);
-        vault = ProjectEscrow(factory.create(PROJECT, IERC20(address(usdc)), OWNER, OWNER));
+        vm.prank(OWNER);
+        vault = ProjectEscrow(factory.create(PROJECT, IERC20(address(usdc)), Purpose.Ordinary));
         usdc.mint(OWNER, 1_000_000e6);
         vm.prank(OWNER);
         usdc.approve(address(vault), type(uint256).max);
@@ -110,8 +110,8 @@ contract BoundedAttesterTest {
     }
 
     function test_signatureCannotReplayOnAnotherVault() public {
-        vm.prank(REGISTRAR);
-        ProjectEscrow other = ProjectEscrow(factory.create(keccak256("other"), IERC20(address(usdc)), OWNER, OWNER));
+        vm.prank(OWNER);
+        ProjectEscrow other = ProjectEscrow(factory.create(keccak256("other"), IERC20(address(usdc)), Purpose.Ordinary));
         uint64 expiresAt = uint64(block.timestamp + 1 hours);
         bytes memory signature = walletSignature(CONTRIBUTOR_KEY, 0, expiresAt, contributor);
         vm.prank(AUTHORITY);
@@ -442,7 +442,7 @@ contract BoundedAttesterTest {
 
     function test_vaultsAreCreatedOnlyByTheFactory() public {
         vm.expectRevert();
-        new ProjectEscrow(PROJECT, IERC20(address(usdc)), OWNER, OWNER, FEE, DELAY);
+        new ProjectEscrow(PROJECT, IERC20(address(usdc)), OWNER, Purpose.Ordinary, FEE, DELAY);
     }
 
     function test_factoryRejectsRegistrarAsAuthority() public {

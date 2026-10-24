@@ -2,10 +2,16 @@
 
 Slop has one funding mode: the project escrow vault. The owner chose this mode
 on 18 October 2026. Each project that adopts escrow has one reviewed escrow
-deployment on its settlement network. The project owner deposits funds into
-that vault, authorizes each gross award, and can withdraw free funds under the
-disclosed withdrawal fee. The contract enforces reserved awards, fees, and
-exact-once payment. Slop holds no balance and cannot move funds.
+deployment on its settlement network. The project owner creates its own vault
+(owner decision D13, 24 October 2026). A vault has one purpose: ordinary awards
+or private bounties, so the two never share a balance. The project owner
+deposits funds into that vault, authorizes each gross award, and can withdraw
+free funds under the disclosed withdrawal fee. In an ordinary vault the owner
+can also turn on a bounded monthly commitment: after the monthly cutoff, anyone
+can commit that month's allocation when the identity attester signed it, within
+the owner's monthly cap and once per month. The owner can turn it off at any
+time. The contract enforces reserved awards, fees, and exact-once payment. It
+has no service charge. Slop holds no balance and cannot move funds.
 
 The escrow rules are in these documents:
 

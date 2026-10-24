@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
-import {EscrowFactory, IERC20, ProjectEscrow} from "../src/ProjectEscrow.sol";
+import {EscrowFactory, IERC20, ProjectEscrow, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
 
 interface Vm {
@@ -27,9 +27,10 @@ contract SonnetParity {
 
     function setUp() public {
         t = new TestDollar();
-        // This contract is the registrar; vaults are created only by the factory.
+        // This contract is the registrar; the owner creates its own vault.
         EscrowFactory f = new EscrowFactory(address(this), feeR, auth, D);
-        e = ProjectEscrow(f.create(bytes32(uint256(1)), IERC20(address(t)), owner, owner));
+        vm.prank(owner);
+        e = ProjectEscrow(f.create(bytes32(uint256(1)), IERC20(address(t)), Purpose.Ordinary));
         t.mint(owner, 1e15);
         vm.prank(owner);
         t.approve(address(e), type(uint256).max);
@@ -59,7 +60,7 @@ contract SonnetParity {
         require(
             e.totalDeposited()
                 == uint256(e.freeBalance()) + e.reservedPrincipal() + e.reservedFees() + e.totalPaid()
-                    + e.totalPayoutFees() + e.totalGrossWithdrawn() + e.totalServiceFees(),
+                    + e.totalPayoutFees() + e.totalGrossWithdrawn(),
             "id1"
         );
         require(
@@ -141,23 +142,6 @@ contract SonnetParity {
         e.claimFees();
         _inv();
         require(t.balanceOf(feeR) == 4, "claimed");
-    }
-
-    function test_chargeServiceInterplay() public {
-        _dep(1000);
-        vm.prank(owner);
-        e.chargeService(100, bytes32(uint256(5)));
-        _inv();
-        _wd(100); // fee 2 on 100
-        _inv();
-        require(e.totalGrossWithdrawn() == 100 && e.totalWithdrawalFees() == 2, "svc");
-        // service charge reduces free; withdrawal cannot exceed free
-        vm.prank(owner);
-        vm.expectRevert();
-        e.withdrawUnused(801);
-        e.claimFees();
-        _inv();
-        require(t.balanceOf(feeR) == 102, "102");
     }
 
     // direct transfer doesn't break accounting identities (2) other than vault >= sum
