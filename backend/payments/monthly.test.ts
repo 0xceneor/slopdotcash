@@ -3,6 +3,7 @@
 import type { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
+import { privateKeyToAccount } from "viem/accounts";
 import { monthlyBasesSql } from "../../scripts/prepare-monthly-rewards";
 import type { PaymentsAccount } from "../../src/lib/payments/contracts";
 import { escrowAwardOrigin } from "../../src/lib/payments/escrow-cycle";
@@ -10,6 +11,8 @@ import { parseMonthlySchedule } from "../../src/lib/payments/monthly-allocation"
 import type { ProjectRecord } from "../../src/lib/project-contracts";
 import { sqliteD1 } from "../../tests/sqlite-d1";
 import { sha256Hex } from "../../workers/identity/crypto";
+import type { JournalStore } from "../../workers/payment-executor/core";
+import { signMonthlyAllocation } from "../../workers/payment-executor/monthly";
 import { runMonthlyCoordinator } from "../../workers/payments/index";
 import {
   CloudflareProjectPersistence,
@@ -21,7 +24,9 @@ import {
   MonthlyPaymentError,
   monthlyOwnerService,
 } from "./monthly";
+import { prepareMonthlyAttestation } from "./monthly-attestation";
 
+const testAttester = privateKeyToAccount(`0x${"01".repeat(32)}`);
 const deployment = {
   network: "base-sepolia",
   vault: "0x1000000000000000000000000000000000000001",
@@ -31,7 +36,7 @@ const deployment = {
   networkDomain: null,
   asset: "0x036cbd53842c5426634e7929541ec2318f3dcf7e",
   owner: "0x2000000000000000000000000000000000000002",
-  identityAuthority: "0x3000000000000000000000000000000000000003",
+  identityAuthority: testAttester.address.toLowerCase(),
   feeRecipient: "0x4000000000000000000000000000000000000004",
   deploymentTransaction: `0x${"ab".repeat(32)}`,
   sourceCommit: "0123456789abcdef0123456789abcdef01234567",
@@ -620,4 +625,223 @@ describe("monthly coordinator", () => {
       } as never),
     ).toBeNull();
   });
+});
+
+describe("monthly attestation input", () => {
+  async function prepare(
+    options: { now?: Date; blocked?: boolean; digest?: string } = {},
+  ) {
+    const row = sqlite
+      .prepare(
+        "SELECT snapshot_sha256 digest FROM monthly_payment_runs WHERE project_id=? AND period=?",
+      )
+      .get(project.id, "2026-11") as { digest: string } | null;
+    if (!schedule) throw new Error("Fixture schedule missing");
+    return prepareMonthlyAttestation(
+      {
+        db,
+        ...projects(),
+        recipientsRestricted: async () => options.blocked ?? false,
+        networks: ["base-sepolia"],
+        schedule,
+        now: options.now ?? afterCutoff,
+      },
+      {
+        projectId: project.id,
+        period: "2026-11",
+        network: "base-sepolia",
+        snapshotSha256: options.digest ?? row?.digest ?? "0".repeat(64),
+      },
+    );
+  }
+  test("uses only the frozen owner-adjusted awards, even after a later funding observation", async () => {
+    clock = beforeCutoff;
+    await owner().changeAllocation(project.id, "2026-11", actor, {
+      githubUserId: B,
+      grossBase: "300",
+      expectedSequence: 0,
+    });
+    vault("2000");
+    await coordinate(afterCutoff);
+    const plan = await prepare();
+    expect(plan.entries.map((e) => [e.githubUserId, e.grossMicro])).toEqual([
+      [A, "600"],
+      [B, "300"],
+    ]);
+    expect(plan.totalGrossBase).toBe("900");
+    vault("5000");
+    expect(await prepare()).toEqual(plan);
+    await rejects(prepare({ digest: "f".repeat(64) }), "snapshot_changed");
+    expect(count("payment_obligations")).toBe(0);
+  });
+  test("refuses the root before the cutoff, after its window, and when the whole month is unfunded", async () => {
+    vault("500");
+    await coordinate(afterCutoff);
+    await rejects(prepare({ now: beforeCutoff }), "monthly_window_closed");
+    await rejects(
+      prepare({ now: new Date("2027-01-04T00:00:00.000Z") }),
+      "monthly_window_closed",
+    );
+    await rejects(prepare(), "award_unfunded");
+    vault("1000");
+    await coordinate(afterCutoff);
+    expect((await prepare()).totalGrossBase).toBe("1000");
+  });
+  test("rechecks restrictions and the owner's opt-out after the month was frozen", async () => {
+    vault("1000");
+    await coordinate(afterCutoff);
+    await rejects(prepare({ blocked: true }), "recipient_restricted");
+    restricted = true;
+    await rejects(prepare(), "project_restricted");
+    restricted = false;
+    sqlite
+      .prepare(
+        "INSERT INTO monthly_payment_settings(project_id,sequence,automatic,actor_id,created_at) VALUES(?,1,0,?,?)",
+      )
+      .run(project.id, OWNER, afterCutoff.toISOString());
+    await rejects(prepare(), "automatic_off");
+    expect(count("monthly_payment_obligations")).toBe(2);
+  });
+  test("rejects a forged frozen payload even when its metadata still names the real project", async () => {
+    vault("1000");
+    await coordinate(afterCutoff);
+    // Simulate storage corruption outside the normal immutable API.
+    const row = sqlite
+      .prepare("SELECT snapshot FROM monthly_payment_runs")
+      .get() as { snapshot: string };
+    const bad = JSON.parse(row.snapshot);
+    bad.awards[0].grossBase = "601";
+    for (const trigger of sqlite
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='monthly_payment_runs'",
+      )
+      .all() as { name: string }[])
+      sqlite.exec(`DROP TRIGGER ${trigger.name}`);
+    sqlite
+      .prepare("UPDATE monthly_payment_runs SET snapshot=?")
+      .run(JSON.stringify(bad));
+    await rejects(prepare(), "snapshot_changed");
+  });
+});
+
+test("monthly signing preserves its first intent through retry and refuses a changed root", async () => {
+  vault("1000");
+  await coordinate(afterCutoff);
+  if (!schedule) throw new Error("Fixture schedule missing");
+  const { digest } = sqlite
+    .prepare("SELECT snapshot_sha256 digest FROM monthly_payment_runs")
+    .get() as { digest: string };
+  const records = new Map<string, unknown>();
+  const journal: JournalStore = {
+    async get<T>(key: string) {
+      return records.get(key) as T | undefined;
+    },
+    async put<T>(key: string, value: T) {
+      records.set(key, structuredClone(value));
+    },
+    async transaction<T>(fn: (store: JournalStore) => Promise<T>) {
+      return fn(journal);
+    },
+  };
+  let signatures = 0;
+  const deps = {
+    db,
+    ...projects(),
+    recipientsRestricted: async () => false,
+    networks: ["base-sepolia"],
+    schedule,
+    now: () => afterCutoff,
+    journal,
+    verifyDeployment: async () => {}, // Chain preflight has independent RPC integration coverage.
+    sign: async (plan: { messageHex: string }) => {
+      signatures++;
+      return (await testAttester.sign({ hash: `0x${plan.messageHex}` })).slice(
+        2,
+      );
+    },
+  };
+  const request = {
+    projectId: project.id,
+    period: "2026-11",
+    network: "base-sepolia" as const,
+    snapshotSha256: digest,
+  };
+  const first = await signMonthlyAllocation(deps, request);
+  expect(await signMonthlyAllocation(deps, request)).toEqual(first);
+  expect(signatures).toBe(1);
+  // A saved intent survives an interrupted signer and cannot be replaced.
+  const [key, value] = [...records.entries()][0] as [
+    string,
+    { messageHex: string },
+  ];
+  records.set(key, { ...value, messageHex: "a".repeat(64) });
+  await expect(signMonthlyAllocation(deps, request)).rejects.toThrow(
+    "already bound",
+  );
+  expect(signatures).toBe(1);
+});
+
+test("monthly signing never publishes when the signer fails or an opt-out arrives during signing", async () => {
+  vault("1000");
+  await coordinate(afterCutoff);
+  if (!schedule) throw new Error("Fixture schedule missing");
+  const { digest } = sqlite
+    .prepare("SELECT snapshot_sha256 digest FROM monthly_payment_runs")
+    .get() as { digest: string };
+  const records = new Map<string, unknown>();
+  const journal: JournalStore = {
+    async get<T>(key: string) {
+      return records.get(key) as T | undefined;
+    },
+    async put<T>(key: string, value: T) {
+      records.set(key, structuredClone(value));
+    },
+    async transaction<T>(fn: (store: JournalStore) => Promise<T>) {
+      return fn(journal);
+    },
+  };
+  const deps = {
+    db,
+    ...projects(),
+    recipientsRestricted: async () => false,
+    networks: ["base-sepolia"],
+    schedule,
+    now: () => afterCutoff,
+    journal,
+    verifyDeployment: async () => {},
+    sign: async () => {
+      throw new Error("signer unavailable");
+    },
+  };
+  const request = {
+    projectId: project.id,
+    period: "2026-11",
+    network: "base-sepolia" as const,
+    snapshotSha256: digest,
+  };
+  await expect(signMonthlyAllocation(deps, request)).rejects.toThrow(
+    "signer unavailable",
+  );
+  expect([...records.values()]).toHaveLength(1);
+  expect([...records.values()][0]).not.toHaveProperty("authorization");
+  await rejects(
+    signMonthlyAllocation(
+      {
+        ...deps,
+        sign: async (plan) => {
+          sqlite
+            .prepare(
+              "INSERT INTO monthly_payment_settings(project_id,sequence,automatic,actor_id,created_at) VALUES(?,1,0,?,?)",
+            )
+            .run(project.id, OWNER, afterCutoff.toISOString());
+          return (
+            await testAttester.sign({ hash: `0x${plan.messageHex}` })
+          ).slice(2);
+        },
+      },
+      request,
+    ),
+    "automatic_off",
+  );
+  expect([...records.values()][0]).not.toHaveProperty("authorization");
 });
