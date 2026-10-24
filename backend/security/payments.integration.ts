@@ -354,7 +354,7 @@ try {
     ),
     new Date().toISOString(),
   );
-  const prepared = await act(finance, caseId, "prepare-payment", {
+  const prepared = await act(technical, caseId, "prepare-payment", {
     network: "base-sepolia",
     confirmation: true,
   });

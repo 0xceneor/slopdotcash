@@ -159,6 +159,17 @@ async function handlePrivateIntake(state, request, response, url) {
     response.end(body === undefined ? "" : JSON.stringify(body));
     return true;
   };
+  const seedReport = /^\/__fixture\/security-advisories\/([^/]+\/[^/]+)$/u.exec(
+    path,
+  );
+  if (request.method === "POST" && seedReport) {
+    const advisory = JSON.parse(await readBody(request));
+    state.advisories.push({
+      repository: seedReport[1].toLowerCase(),
+      advisory,
+    });
+    return send(204);
+  }
   const appControl =
     /^\/__fixture\/intake-app\/([^/]+\/[^/]+)\/(installed|missing)$/u.exec(
       path,
@@ -224,10 +235,14 @@ async function handlePrivateIntake(state, request, response, url) {
       path,
     );
   if (path !== "/user" && !advisoryPath) return false;
-  const user = state.tokens.get(
-    (request.headers.authorization ?? "").replace(/^Bearer /u, ""),
-  );
-  if (user === undefined) return send(401, { message: "Bad credentials" });
+  const token = (request.headers.authorization ?? "").replace(/^Bearer /u, "");
+  const user = state.tokens.get(token);
+  const readOnly =
+    token === E2E_ADVISORY_READ_TOKEN &&
+    request.method === "GET" &&
+    advisoryPath;
+  if (user === undefined && !readOnly)
+    return send(401, { message: "Bad credentials" });
   if (request.method === "GET" && path === "/user") return send(200, user);
   const repository = decodeURIComponent(advisoryPath[1]);
   const own = state.advisories.filter(
