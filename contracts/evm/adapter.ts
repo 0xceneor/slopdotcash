@@ -900,10 +900,21 @@ export function buildCreateVaultCalldata(input: {
   projectId: string;
   asset: string;
   payoutPolicy?: PayoutPolicy;
+  /** Required for ordinary vaults; base units chosen by the owner. */
+  monthlyCap?: string | bigint;
+  /** Defaults on; false records an explicit owner opt-out. */
+  automaticMonthly?: boolean;
 }) {
   if (BigInt(hash(input.projectId)) === 0n || !ADDRESS.test(input.asset))
     throw new Error("Invalid vault input");
-  return `0x${selector("create(bytes32,address,uint8)")}${hash(input.projectId).slice(2)}${addressWord(input.asset).slice(2)}${evmVaultPurpose(input.payoutPolicy).toString(16).padStart(64, "0")}`;
+  if (input.payoutPolicy === "security-bounty") {
+    if (input.monthlyCap !== undefined || input.automaticMonthly !== undefined)
+      throw new Error("Private bounty awards have no automatic monthly policy");
+    return `0x${selector("create(bytes32,address,uint8)")}${hash(input.projectId).slice(2)}${addressWord(input.asset).slice(2)}${evmVaultPurpose(input.payoutPolicy).toString(16).padStart(64, "0")}`;
+  }
+  if (input.monthlyCap === undefined)
+    throw new Error("The owner's monthly cap is required");
+  return `0x${selector("createWithMonthlyCommitment(bytes32,address,uint128,bool)")}${hash(input.projectId).slice(2)}${addressWord(input.asset).slice(2)}${monthlyCommitmentWords(input.monthlyCap, input.automaticMonthly ?? true)}`;
 }
 /** One award of a monthly allocation, in allocation order. */
 export interface MonthlyAllocationEntry {
