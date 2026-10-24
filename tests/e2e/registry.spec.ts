@@ -1309,3 +1309,115 @@ test("repository lookup failures explain the next action and preserve the draft 
   });
   await context.close();
 });
+
+test("two contributors flag through the form, pause the project and notify moderators @registry", async ({
+  browser,
+}) => {
+  const readPrivate = (page: Page, path: string) =>
+    page.evaluate(async (url) => (await fetch(url)).json(), path);
+  const suffix = test.info().project.name.replace(/-chromium$/u, "");
+  const project = {
+    id: `flag-flow-${suffix}`,
+    repository: `example/flag-flow-${suffix}`,
+    name: `Flag flow ${suffix}`,
+  };
+  const firstContext = await browser.newContext(walkthroughOptions());
+  const first = await firstContext.newPage();
+  const firstErrors = observe(first);
+  await signIn(first, APPLICANT_TOKEN);
+  await draftApplication(first, project);
+  await first.getByRole("button", { name: /Submit for review/u }).click();
+  await expect(
+    first.getByRole("status").filter({ hasText: "Application submitted" }),
+  ).toBeVisible();
+
+  const adminContext = await browser.newContext(walkthroughOptions());
+  const admin = await adminContext.newPage();
+  await signIn(admin, ADMIN_TOKEN);
+  await admin.goto("/admin", { waitUntil: "networkidle" });
+  await admin
+    .locator(".admin-card", { hasText: project.repository })
+    .getByRole("button", { name: "Approve as paused project" })
+    .click();
+  await expect
+    .poll(async () => (await listedProject(admin, project.id))?.status)
+    .toBe("paused");
+
+  const firstEvidence =
+    "Synthetic fixture: install.js requests credentials before starting.";
+  await first.goto(`/projects/${project.id}`, { waitUntil: "networkidle" });
+  await first
+    .getByText("Report malicious code in this project", { exact: true })
+    .click();
+  await first.getByRole("textbox", { name: /^Evidence/u }).fill(firstEvidence);
+  await first.getByRole("button", { name: "Flag this project" }).click();
+  await expect(
+    first.getByRole("status").filter({ hasText: "Flag recorded" }),
+  ).toContainText("Your flag counts");
+  const ownPath = `/api/v1/project-flags/${project.id}`;
+  expect(await readPrivate(first, ownPath)).toMatchObject({
+    restriction: "clear",
+    pausedByFlags: false,
+  });
+  await expectAccessible(first);
+  await first.screenshot({
+    path: test.info().outputPath("first-flag.png"),
+    fullPage: true,
+  });
+
+  const secondContext = await browser.newContext(walkthroughOptions());
+  const second = await secondContext.newPage();
+  const secondErrors = observe(second);
+  await signIn(second, OWNER_TOKEN);
+  expect(await readPrivate(second, ownPath)).toMatchObject({
+    flag: null,
+  });
+  await second.goto(`/projects/${project.id}`, { waitUntil: "networkidle" });
+  await second
+    .getByText("Report malicious code in this project", { exact: true })
+    .click();
+  await second
+    .getByRole("combobox", { name: /^Risk/u })
+    .selectOption("unsafe-execution");
+  await second
+    .getByRole("textbox", { name: /^Evidence/u })
+    .fill("Synthetic fixture: setup.sh runs an unverified downloaded script.");
+  await second.getByRole("button", { name: "Flag this project" }).click();
+  await expect(
+    second.getByRole("status").filter({ hasText: "Flag recorded" }),
+  ).toContainText("now paused");
+  await expect(second.locator("main")).not.toContainText(firstEvidence);
+  expect(await readPrivate(second, ownPath)).toMatchObject({
+    restriction: "quarantined",
+    pausedByFlags: true,
+  });
+  expect(
+    (await second.request.get(`/projects/${project.id}/skill.md`)).status(),
+  ).toBe(410);
+  await expectAccessible(second);
+  await second.screenshot({
+    path: test.info().outputPath("second-flag-paused.png"),
+    fullPage: true,
+  });
+
+  await second.getByRole("button", { name: "Withdraw my flag" }).click();
+  await expect(
+    second.getByRole("status").filter({ hasText: "Flag withdrawn" }),
+  ).toBeVisible();
+  expect(await readPrivate(second, ownPath)).toMatchObject({
+    flag: null,
+    restriction: "quarantined",
+  });
+  const inbox = await readPrivate(admin, "/api/v1/notifications");
+  expect(
+    inbox.notifications.filter(
+      (notice: { subject: string; kind: string }) =>
+        notice.subject === project.id && notice.kind === "project_quarantined",
+    ),
+  ).toHaveLength(1);
+  expect(firstErrors).toEqual([]);
+  expect(secondErrors).toEqual([]);
+  await firstContext.close();
+  await secondContext.close();
+  await adminContext.close();
+});
