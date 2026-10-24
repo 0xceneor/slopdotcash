@@ -126,7 +126,7 @@ export async function preflightSolanaDeployment(
   await verifySolanaDeployment(config);
   return config;
 }
-async function read(
+export async function readSolanaAccount(
   config: SolanaEscrowConfig,
   address: string,
   size: number,
@@ -165,7 +165,7 @@ async function authorized(
     authorization = await authorizeRegistry(env, input, "solana");
   if (config.projectId !== authorization.projectId)
     throw new Error("Wrong project authorization");
-  const project = await read(
+  const project = await readSolanaAccount(
     config,
     config.projectPda,
     PROJECT_SIZE,
@@ -189,7 +189,7 @@ async function authorized(
     bytes(config.projectPda),
     solanaDigest(input.obligationId),
   ]);
-  const obligation = await read(
+  const obligation = await readSolanaAccount(
     config,
     awardAddress,
     OBLIGATION_SIZE,
@@ -215,7 +215,7 @@ async function authorized(
     bytes(config.projectPda),
     le(BigInt(input.githubUserId)),
   ]);
-  const binding = await read(
+  const binding = await readSolanaAccount(
     config,
     bindingAddress,
     BINDING_SIZE,
@@ -361,13 +361,13 @@ async function send(
   }
   if (attempt.cosigner)
     return { transactionId: attempt.transactionId, transaction: attempt.raw };
-  return broadcast(ctx, attempt);
+  return broadcastSolanaTransaction(ctx, attempt);
 }
 /** An observed signature is submission evidence, never proof of payment finality. */
-async function observedTransaction(
-  ctx: Context,
-  attempt: Attempt,
-): Promise<boolean> {
+export async function solanaTransactionStatus(
+  ctx: Pick<Context, "config">,
+  attempt: Pick<Attempt, "transactionId">,
+): Promise<{ failed: boolean; finalized: boolean } | null> {
   const response = (await solanaRpc(ctx.config, "getSignatureStatuses", [
     [attempt.transactionId],
     { searchTransactionHistory: true },
@@ -379,7 +379,7 @@ async function observedTransaction(
   )
     throw new Error("Invalid signature status response");
   const status = response.value[0];
-  if (status === null) return false;
+  if (status === null) return null;
   if (
     typeof status !== "object" ||
     Array.isArray(status) ||
@@ -387,13 +387,23 @@ async function observedTransaction(
     !["processed", "confirmed", "finalized"].includes(status.confirmationStatus)
   )
     throw new Error("Invalid signature status response");
-  if (status.err !== null)
-    throw new Error("Existing transaction failed; reconcile before retry");
-  return true;
+  return {
+    failed: status.err !== null,
+    finalized: status.confirmationStatus === "finalized",
+  };
 }
-async function broadcast(
-  ctx: Context,
-  attempt: Attempt,
+async function observedTransaction(
+  ctx: Pick<Context, "config">,
+  attempt: Pick<Attempt, "transactionId">,
+): Promise<boolean> {
+  const status = await solanaTransactionStatus(ctx, attempt);
+  if (status?.failed)
+    throw new Error("Existing transaction failed; reconcile before retry");
+  return status !== null;
+}
+export async function broadcastSolanaTransaction(
+  ctx: Pick<Context, "config">,
+  attempt: Pick<Attempt, "transactionId" | "raw">,
 ): Promise<{ transactionId: string }> {
   if (await observedTransaction(ctx, attempt))
     return { transactionId: attempt.transactionId };
@@ -430,7 +440,7 @@ export async function completeSolanaBinding(
   const attempt = await env.JOURNAL.get<Attempt>(key);
   if (!attempt || attempt.obligationId !== input.obligationId)
     throw new Error("No prepared binding for this attempt");
-  if (!attempt.cosigner) return broadcast(ctx, attempt);
+  if (!attempt.cosigner) return broadcastSolanaTransaction(ctx, attempt);
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(transaction))
     throw new Error("Invalid signed transaction encoding");
   const signed = Uint8Array.from(atob(transaction), (c) => c.charCodeAt(0));
@@ -468,7 +478,7 @@ export async function completeSolanaBinding(
     await store.put(key, next);
     return next;
   });
-  return broadcast(ctx, completed);
+  return broadcastSolanaTransaction(ctx, completed);
 }
 /** Prepares and half-signs a binding; the destination wallet must co-sign the same bytes. */
 export function createSolanaAttester(env: SolanaExecutorEnvironment): {

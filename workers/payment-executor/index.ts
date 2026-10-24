@@ -41,6 +41,7 @@ import {
   createSolanaExecutor,
   preflightSolanaDeployment,
 } from "./solana";
+import { submitSolanaMonthly } from "./solana-monthly";
 
 export { createEvmAttester, createEvmExecutor } from "./core";
 
@@ -107,7 +108,6 @@ export class PaymentSignerJournal {
         if (
           stack !== "test" ||
           this.env.SIGNER_ROLE !== "relayer" ||
-          this.env.CHAIN_FAMILY !== "evm" ||
           this.env.PAYMENT_SCOPE === "security-bounty"
         )
           return new Response("Not found", { status: 404 });
@@ -122,6 +122,33 @@ export class PaymentSignerJournal {
         };
         if (!stackServesNetwork(stack, target.network))
           throw new Error("Wrong signer stack");
+        if (this.env.CHAIN_FAMILY === "solana") {
+          await preflightSolanaDeployment(this.env, target);
+          const encodedSeed = this.env[SIGNER_STACKS[stack].solanaSecret];
+          if (!encodedSeed || !/^[0-9a-f]{64}$/.test(encodedSeed))
+            throw new Error("Signer unavailable");
+          const seed = Uint8Array.from(encodedSeed.match(/../g) ?? [], (byte) =>
+            Number.parseInt(byte, 16),
+          );
+          return Response.json(
+            await submitSolanaMonthly(
+              {
+                PAYMENTS_DB: database,
+                PAYMENT_DEPLOYMENTS: this.env.PAYMENT_DEPLOYMENTS,
+                PAYMENT_RPC_URLS: this.env.PAYMENT_RPC_URLS,
+                JOURNAL: this.state.storage,
+                SOLANA_SIGNER: {
+                  address: solanaBase58(ed25519.getPublicKey(seed)),
+                  async signMessage(message: Uint8Array) {
+                    return ed25519.sign(message, seed);
+                  },
+                },
+              },
+              authorization,
+              new URL(request.url).searchParams.get("admit") !== "false",
+            ),
+          );
+        }
         await preflightEvmDeployment(this.env, target);
         const key = this.env[SIGNER_STACKS[stack].evmSecret];
         if (!key) throw new Error("Signer unavailable");

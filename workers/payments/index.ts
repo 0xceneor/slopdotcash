@@ -323,7 +323,7 @@ export async function runMonthlyCommitments(
   const deployments = registry.deployments;
   const failures: unknown[] = [...registry.failures];
   const rows = await env.PAYMENTS_DB.prepare(
-    "SELECT json_group_array(authorization) items FROM (SELECT a.authorization FROM monthly_payment_authorizations a WHERE a.period=? AND a.network IN (SELECT value FROM json_each(?)) AND EXISTS (SELECT 1 FROM json_each(a.authorization,'$.plan.entries') e WHERE NOT EXISTS (SELECT 1 FROM payment_obligations o WHERE o.network=a.network AND o.vault=json_extract(a.authorization,'$.plan.deployment.vault') AND o.source_digest=replace(json_extract(e.value,'$.sourceDigest'),'0x',''))) ORDER BY a.period,a.project_id LIMIT 50)",
+    "SELECT json_group_array(authorization) items FROM (SELECT a.authorization FROM monthly_payment_authorizations a LEFT JOIN monthly_payment_execution x ON x.project_id=a.project_id AND x.period=a.period AND x.network=a.network WHERE coalesce(x.complete,0)=0 AND (a.period=? OR json_extract(a.authorization,'$.plan.family')='solana') AND a.network IN (SELECT value FROM json_each(?)) ORDER BY coalesce(x.last_attempt,''),a.period,a.project_id LIMIT 50)",
   )
     .bind(activePeriod, env.PAYMENT_NETWORKS)
     .first<{ items: string }>();
@@ -331,19 +331,28 @@ export async function runMonthlyCommitments(
     try {
       const authorization = JSON.parse(encoded) as MonthlyAuthorization;
       const { plan } = authorization;
-      if (
-        !(await automaticMonthlyPayment(
-          env.PAYMENTS_DB,
-          plan.request.projectId,
-        ))
+      await env.PAYMENTS_DB.prepare(
+        "INSERT INTO monthly_payment_execution(project_id,period,network,last_attempt) VALUES(?,?,?,?) ON CONFLICT(project_id,period,network) DO UPDATE SET last_attempt=excluded.last_attempt",
       )
-        continue;
+        .bind(
+          plan.request.projectId,
+          plan.request.period,
+          plan.request.network,
+          now.toISOString(),
+        )
+        .run();
+      const automatic = await automaticMonthlyPayment(
+        env.PAYMENTS_DB,
+        plan.request.projectId,
+      );
       const cutoff = monthlyCutoff(schedule, plan.request.period);
       const closes = monthlyCutoff(
         schedule,
         periodEnd(plan.request.period).toISOString().slice(0, 7),
       );
-      if (!cutoff || !closes || now < cutoff || now >= closes) continue;
+      const admit =
+        automatic && !!cutoff && !!closes && now >= cutoff && now < closes;
+      if (!admit && plan.family !== "solana") continue;
       const matches = deployments.filter(
         (d) =>
           d.projectId === plan.request.projectId &&
@@ -358,17 +367,29 @@ export async function runMonthlyCommitments(
           : env.SOLANA_PAYMENT_EXECUTOR;
       if (!service) throw new Error("Monthly executor unavailable");
       const response = await service.fetch(
-        new Request("https://payments-executor.internal/v1/commit-monthly", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(authorization),
-        }),
+        new Request(
+          `https://payments-executor.internal/v1/commit-monthly?admit=${admit}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(authorization),
+          },
+        ),
       );
       if (!response.ok) throw new Error("Monthly executor rejected commitment");
       const result = (await response.json()) as {
         transactionId?: unknown;
         alreadyCommitted?: unknown;
+        notAdmitted?: unknown;
       };
+      if (
+        !admit &&
+        plan.family === "solana" &&
+        result.notAdmitted === true &&
+        result.transactionId === null &&
+        result.alreadyCommitted === false
+      )
+        continue;
       if (
         !(
           (result.alreadyCommitted === true && result.transactionId === null) ||
@@ -378,6 +399,17 @@ export async function runMonthlyCommitments(
         )
       )
         throw new Error("Monthly executor returned no submission evidence");
+      if (result.alreadyCommitted === true) {
+        await env.PAYMENTS_DB.prepare(
+          "UPDATE monthly_payment_execution SET complete=1 WHERE project_id=? AND period=? AND network=?",
+        )
+          .bind(
+            plan.request.projectId,
+            plan.request.period,
+            plan.request.network,
+          )
+          .run();
+      }
     } catch (error) {
       failures.push(error);
     }

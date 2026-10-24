@@ -1144,3 +1144,108 @@ test("monthly signing never publishes when the signer fails or an opt-out arrive
   );
   expect([...records.values()][0]).not.toHaveProperty("authorization");
 });
+
+test("monthly dispatcher resumes an older Solana reservation after opt-out and retires only finalized completion", async () => {
+  vault("1000");
+  await coordinate(afterCutoff);
+  await owner().setAutomatic(project.id, actor, false);
+  // This is the dispatcher transport boundary. Real signature/admission and
+  // post-opt-out leaf execution are covered by the Solana validator suite.
+  const solana = {
+    ...deployment,
+    network: "solana-devnet",
+    vault: "So11111111111111111111111111111111111111112",
+    programId: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    projectPda: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    networkDomain: "cd".repeat(32),
+    asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    owner: "11111111111111111111111111111111",
+    identityAuthority: "SysvarRent111111111111111111111111111111111",
+    feeRecipient: "SysvarC1ock11111111111111111111111111111111",
+    rotationAuthority: "Vote111111111111111111111111111111111111111",
+    deploymentTransaction: "1".repeat(64),
+    rotationDelaySeconds: "60",
+    factory: null,
+    factoryCodeSha256: null,
+    registrar: null,
+  };
+  const current = sqlite
+    .prepare("SELECT manifest FROM projects WHERE id=?")
+    .get(project.id) as { manifest: string };
+  const manifest = JSON.parse(current.manifest);
+  manifest.escrow.chain = "solana";
+  manifest.escrow.deployments = [solana];
+  const text = JSON.stringify(manifest);
+  const digest = await sha256Hex(text);
+  sqlite
+    .prepare(
+      "INSERT INTO project_revisions(project_id,revision,manifest,manifest_sha256,reason,created_at) VALUES(?,2,?,?,?,?)",
+    )
+    .run(
+      project.id,
+      text,
+      digest,
+      "Solana dispatcher fixture",
+      afterCutoff.toISOString(),
+    );
+  sqlite
+    .prepare(
+      "UPDATE projects SET revision=2,manifest=?,manifest_sha256=? WHERE id=?",
+    )
+    .run(text, digest, project.id);
+  const authorization = {
+    plan: {
+      family: "solana",
+      request: {
+        projectId: project.id,
+        period: "2026-11",
+        network: "solana-devnet",
+      },
+      deployment: solana,
+    },
+  };
+  sqlite
+    .prepare("INSERT INTO monthly_payment_authorizations VALUES(?,?,?,?,?,?)")
+    .run(
+      project.id,
+      "2026-11",
+      "solana-devnet",
+      "a".repeat(64),
+      JSON.stringify(authorization),
+      afterCutoff.toISOString(),
+    );
+  let calls = 0;
+  const dispatcher = {
+    PAYMENTS_DB: db,
+    REGISTRY_DB: db,
+    PAYMENT_NETWORKS: '["solana-devnet"]',
+    PAYMENT_RPC_URLS: "{}",
+    MONTHLY_PAYMENT_SCHEDULE: JSON.stringify(schedule),
+    SOLANA_PAYMENT_EXECUTOR: {
+      async fetch(request: Request) {
+        expect(new URL(request.url).searchParams.get("admit")).toBe("false");
+        expect(await request.json()).toEqual(authorization);
+        calls++;
+        if (calls === 1)
+          return Response.json({
+            transactionId: null,
+            alreadyCommitted: false,
+            notAdmitted: true,
+          });
+        if (calls === 2)
+          return Response.json({
+            transactionId: "accepted-signature",
+            alreadyCommitted: false,
+          });
+        return Response.json({ transactionId: null, alreadyCommitted: true });
+      },
+    },
+  };
+  const nextMonth = new Date("2027-01-05T00:00:00Z");
+  await runMonthlyCommitments(dispatcher, nextMonth);
+  await runMonthlyCommitments(dispatcher, nextMonth);
+  await runMonthlyCommitments(dispatcher, nextMonth);
+  await runMonthlyCommitments(dispatcher, nextMonth);
+  expect(calls).toBe(3);
+  expect(count("payment_obligations")).toBe(0);
+});

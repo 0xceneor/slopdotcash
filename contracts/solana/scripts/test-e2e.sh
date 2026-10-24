@@ -6,7 +6,10 @@ if [[ ! -f .local/payer.json ]]; then
   solana-keygen new --no-bip39-passphrase --silent --outfile .local/payer.json >/dev/null
 fi
 npm ci --ignore-scripts --legacy-peer-deps
-export ANCHOR_PROVIDER_URL=http://127.0.0.1:18899
+rpc_port=${SLOP_TEST_RPC_PORT:-18899}
+faucet_port=$((rpc_port + 41))
+dynamic_ports="$((rpc_port + 2))-$((rpc_port + 31))"
+export ANCHOR_PROVIDER_URL="http://127.0.0.1:$rpc_port"
 export ANCHOR_WALLET="$PWD/.local/payer.json"
 validator_pid=""
 trap 'if [[ -n "$validator_pid" ]]; then kill "$validator_pid" 2>/dev/null || true; fi' EXIT
@@ -14,9 +17,13 @@ trap 'if [[ -n "$validator_pid" ]]; then kill "$validator_pid" 2>/dev/null || tr
 # ProgramData exists and the payer can sign initialize_config, as on mainnet with the owner-controlled upgrade authority retained.
 upgrade_authority=$(solana-keygen pubkey "$ANCHOR_WALLET")
 start_validator() {
-  solana-test-validator --reset --quiet --ledger .local/ledger --rpc-port 18899 --faucet-port 18940 --dynamic-port-range 18901-18930 --upgradeable-program 7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ target/deploy/slop_escrow.so "$upgrade_authority" "$@" >.local/validator.log 2>&1 &
+  solana-test-validator --reset --quiet --ledger .local/ledger --rpc-port "$rpc_port" --faucet-port "$faucet_port" --dynamic-port-range "$dynamic_ports" --upgradeable-program 7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ target/deploy/slop_escrow.so "$upgrade_authority" "$@" >.local/validator.log 2>&1 &
   validator_pid=$!
   for attempt in $(seq 1 40); do
+    if ! kill -0 "$validator_pid" 2>/dev/null; then
+      cat .local/validator.log >&2
+      exit 1
+    fi
     if solana --url "$ANCHOR_PROVIDER_URL" cluster-version >/dev/null 2>&1; then break; fi
     sleep 1
   done
@@ -40,5 +47,6 @@ bun build adapter.ts --target=node --outfile=.local/adapter.mjs
 bun build funding.ts --target=node --outfile=.local/funding.mjs
 bun build commitment.ts --target=node --outfile=.local/commitment.mjs
 bun build ../../workers/payment-executor/solana.ts --target=node --outfile=.local/executor.mjs
+bun build ../../workers/payment-executor/solana-monthly.ts --target=node --outfile=.local/monthly-executor.mjs
 bun build ../../workers/payments/scanner.ts ../../backend/payments/ledger.ts ../../backend/payments/handler.ts ../../backend/payments/vault-snapshots.ts --target=node --outdir=.local --entry-naming='[name].mjs'
 node --test --test-force-exit --test-isolation=none --test-concurrency=1 integration/escrow.e2e.mjs integration/executor.e2e.mjs integration/owner-plan.e2e.mjs

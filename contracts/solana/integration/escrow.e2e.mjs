@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createPrivateKey, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import anchor from "@coral-xyz/anchor";
@@ -31,6 +31,7 @@ import {
   solanaMonthlyMessage,
   solanaPaymentAdapter,
 } from "../.local/adapter.mjs";
+import { submitSolanaMonthly } from "../.local/monthly-executor.mjs";
 import {
   configAddress,
   configFees,
@@ -1982,31 +1983,147 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
   await commit("leaf-b", 999, 1);
   const root = solanaAllocationRoot(entries),
     total = solanaAllocationTotal(entries);
-  await program.methods
-    .commitMonthly(n, [...Buffer.from(root, "hex")], bn(total))
-    .accountsStrict({
-      payer: stranger.publicKey,
-      project,
-      vault,
-      month,
-      instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
-      systemProgram: SystemProgram.programId,
-    })
-    .preInstructions([
-      Ed25519Program.createInstructionWithPrivateKey({
-        privateKey: authority.secretKey,
-        message: solanaMonthlyMessage(
-          program.programId.toBase58(),
-          project.toBase58(),
-          period,
-          root,
-          total,
-          Buffer.from(network).toString("hex"),
-        ),
-      }),
-    ])
-    .signers([stranger])
+  const nodeSigner = (keypair) => {
+    const key = createPrivateKey({
+      key: Buffer.concat([
+        Buffer.from("302e020100300506032b657004220420", "hex"),
+        keypair.secretKey.slice(0, 32),
+      ]),
+      format: "der",
+      type: "pkcs8",
+    });
+    return {
+      address: keypair.publicKey.toBase58(),
+      async signMessage(message) {
+        return new Uint8Array(sign(null, message, key));
+      },
+    };
+  };
+  const signed = solanaMonthlyMessage(
+    program.programId.toBase58(),
+    project.toBase58(),
+    period,
+    root,
+    total,
+    Buffer.from(network).toString("hex"),
+  );
+  const config = {
+    chain: "solana",
+    network: "solana-localnet",
+    projectId: "monthly-release",
+    programId: program.programId.toBase58(),
+    projectPda: project.toBase58(),
+    vault: vault.toBase58(),
+    asset: mint.toBase58(),
+    networkDomain: Buffer.from(network).toString("hex"),
+    owner: payer.publicKey.toBase58(),
+    identityAuthority: authority.publicKey.toBase58(),
+    feeRecipient: feeOwner.publicKey.toBase58(),
+    ...expectedDeployment,
+    bindingDelaySeconds: String(DELAY),
+    rotationDelaySeconds: String(ROTATION_DELAY),
+  };
+  const journal = new Map();
+  const environment = {
+    PAYMENT_DEPLOYMENTS: JSON.stringify([config]),
+    PAYMENT_RPC_URLS: JSON.stringify({
+      "solana-localnet": provider.connection.rpcEndpoint,
+    }),
+    ALLOW_LOCAL_TEST_CHAIN: true,
+    LOCAL_SOLANA_GENESIS: await provider.connection.getGenesisHash(),
+    SOLANA_SIGNER: nodeSigner(stranger),
+    JOURNAL: {
+      async get(key) {
+        return journal.get(key);
+      },
+      async put(key, value) {
+        journal.set(key, value);
+      },
+      async transaction(fn) {
+        return fn(this);
+      },
+    },
+  };
+  const authorization = {
+    plan: {
+      family: "solana",
+      request: {
+        projectId: config.projectId,
+        network: config.network,
+        period,
+        snapshotSha256: "a".repeat(64),
+      },
+      deployment: config,
+      allocationRoot: root,
+      totalGrossBase: total,
+      entries,
+      messageHex: Buffer.from(signed).toString("hex"),
+    },
+    signatureHex: Buffer.from(
+      await nodeSigner(authority).signMessage(signed),
+    ).toString("hex"),
+  };
+  await assert.rejects(
+    submitSolanaMonthly(environment, {
+      ...authorization,
+      signatureHex: "00".repeat(64),
+    }),
+    /Invalid monthly authority/,
+  );
+  assert.equal(journal.size, 0);
+  const notAdmitted = await submitSolanaMonthly(
+    environment,
+    authorization,
+    false,
+  );
+  assert.equal(notAdmitted.notAdmitted, true);
+  assert.equal(journal.size, 0);
+  const originalFetch = globalThis.fetch;
+  let lostReply = false;
+  let submitted;
+  globalThis.fetch = async (input, init) => {
+    const response = await originalFetch(input, init);
+    if (
+      !lostReply &&
+      typeof init?.body === "string" &&
+      JSON.parse(init.body).method === "sendTransaction"
+    ) {
+      lostReply = true;
+      throw new Error("Test: accepted broadcast response lost");
+    }
+    return response;
+  };
+  try {
+    submitted = await submitSolanaMonthly(environment, authorization);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(lostReply, true);
+
+  assert.equal(submitted.alreadyCommitted, false);
+  assert.equal(
+    (await submitSolanaMonthly(environment, authorization)).transactionId,
+    submitted.transactionId,
+  );
+  await provider.connection.confirmTransaction(
+    submitted.transactionId,
+    "finalized",
+  );
+  // Once funded, even opt-out and admission-disabled dispatch must settle valid leaves.
+  const disabled = await program.methods
+    .setMonthlyCommitment(bn(0), false)
+    .accountsStrict({ owner: payer.publicKey, project })
     .rpc();
+  await provider.connection.confirmTransaction(disabled, "finalized");
+  const executeLeaf = async () => {
+    const result = await submitSolanaMonthly(environment, authorization, false);
+    assert.equal(result.alreadyCommitted, false);
+    await provider.connection.confirmTransaction(
+      result.transactionId,
+      "finalized",
+    );
+    return result;
+  };
   const leaf = (index, method) => {
     const entry = entries[index],
       digest = Buffer.from(entry.sourceDigest, "hex"),
@@ -2052,13 +2169,13 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
   await assert.rejects(commit("unrelated", 999, 1), /MonthlyOutstanding/);
   // A leaf that can still commit cannot be released.
   await assert.rejects(leaf(0, "release"), /AwardCommittable/);
-  await leaf(0, "commit");
+  await executeLeaf();
   // A committed leaf has settled: it cannot also be released.
   await assert.rejects(leaf(0, "release"), /already in use/);
   // Leaf B can never commit; anyone returns its reserve to free balance, once.
   await assert.rejects(leaf(1, "commit"), /already in use/);
   const before = await read();
-  await leaf(1, "release");
+  await executeLeaf();
   state = await read();
   assert.equal(
     state.reserved.toNumber(),
@@ -2070,7 +2187,11 @@ test("monthly outstanding blocks direct commits; a consumed leaf releases once a
   assert.equal(recorded.committed.toString(), "50000000");
   await assert.rejects(leaf(1, "release"), /already in use/);
   await assert.rejects(leaf(2, "release"), /AwardCommittable/);
-  await leaf(2, "commit");
+  await executeLeaf();
+  assert.deepEqual(
+    await submitSolanaMonthly(environment, authorization, false),
+    { transactionId: null, alreadyCommitted: true },
+  );
   recorded = await program.account.monthlyAllocation.fetch(month);
   assert.equal(recorded.committed.toString(), total);
   assert.equal(recorded.released.toString(), "20000000");

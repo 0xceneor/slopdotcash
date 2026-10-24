@@ -63,6 +63,24 @@ never signs for a mainnet and a production key never signs while
 `MAINNET_EXECUTION` is off.
 Any other `SIGNER_STACK` value stops the signer.
 
+## Monthly allocation execution
+
+The ordinary attester publishes only the eligible entries of the immutable funded
+monthly snapshot. Its scheduled job prepares and signs the allocation through
+`/v1/monthly-authorization`; it does not execute payments. The public authorization
+endpoint is documented in `backend/payments/README.md`.
+
+`POST /v1/commit-monthly` accepts that authorization on a test relayer. It verifies
+the pinned deployment, allocation root and attestation before admission. EVM
+reserves all entries atomically. Solana submits the root and then one Merkle-proven
+leaf per call. Finalized on-chain counters determine completion. A previously
+consumed source releases only that leaf's duplicate reservation. Valid leaves
+remain funded without an expiry, including after opt-out or authority rotation.
+`?admit=false` resumes admitted Solana allocations without creating a new month;
+an absent month returns `notAdmitted: true`. The scheduler uses this for older
+months and opted-out projects. No response marks an award paid: the finalized
+scanner remains authoritative.
+
 ## Durability and retries
 
 Base nonce allocation, transaction signing, and persistence of signed bytes,

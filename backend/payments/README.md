@@ -304,9 +304,18 @@ sections 6 and 7). Migration `0062` adds its private records.
    calling a signer or RPC. It exposes no private adjustment history.
    Publication is not a reservation or payment. A project-operated or
    permissionless executor must still submit the bounded commitment and
-   reconcile finalized results. Automatic executor submission is not yet
-   wired; the existing per-award path still uses
-   owner-only `commitAward` and waits for the owner on the Awards page. `POST .../monthly/:YYYY-MM/commitment` and
+   reconcile finalized results. The payments scheduler sends published allocations
+   to the configured executor's `/v1/commit-monthly` service. Hosted relayers
+   accept this only on the test stack; production requires a separately operated
+   executor. EVM admission reserves its awards in one transaction. Solana admits
+   the total, then commits or releases one proven leaf per invocation. Only a
+   consumed source or zero actor can release its leaf; valid funded awards never
+   expire. An admitted Solana month continues after opt-out or its admission
+   window closes. `monthly_payment_execution` tracks fair retries and completed
+   execution, not public payment state. Signed transactions are journaled before
+   broadcast and reused after an uncertain response.
+   The owner can still prepare individual awards through the Awards page.
+   `POST .../monthly/:YYYY-MM/commitment` and
    `.../solana-commitment` recheck the steward, repository authority, project
    revision, enforcement state, served network, execution snapshot digest and
    funded obligation, and return an unsigned plan for that award. Each source
