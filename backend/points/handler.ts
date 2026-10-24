@@ -359,9 +359,23 @@ export async function handlePointsApi(
             .prepare("DELETE FROM points_sessions WHERE actor_id=?")
             .bind(member.actor_id),
         ]);
-        if (results.some((r) => !r.success) || results[0].meta?.changes !== 1)
+        if (results.some((r) => !r.success))
           throw new Error("Account closure failed");
-        return json(200, { closed: true, closedAt: now }, sessionCookie("", 0));
+        // A repeated request that raced the first one finds the account
+        // already closed; it reports that closure instead of failing.
+        let closedAt: string | null = now;
+        if (results[0].meta?.changes !== 1)
+          closedAt =
+            (
+              await deps.db
+                .prepare(
+                  "SELECT closed_at FROM points_members WHERE actor_id=?",
+                )
+                .bind(member.actor_id)
+                .first<{ closed_at: string | null }>()
+            )?.closed_at ?? null;
+        if (!closedAt) throw new Error("Account closure failed");
+        return json(200, { closed: true, closedAt }, sessionCookie("", 0));
       }
       if (route === "/signout" && request.method === "POST") {
         await deps.db
