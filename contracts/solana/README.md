@@ -228,23 +228,28 @@ month written as `YYYYMM`. Its window opens 72 hours after the month ends, at
 00:00 UTC on the 4th, and closes when the next month's window opens, so only one
 period is open at a time.
 
-1. Anyone calls `commit_monthly(period, allocation_root)` inside the window,
+1. Anyone calls `commit_monthly(period, allocation_root, total)` inside the window,
    while the switch is on. The instruction just before it in the same
    transaction must be an Ed25519 program check of one signature by the
    project's identity authority over
-   `"slop-monthly-allocation-v1" || program ID || project PDA || period (u32 LE) || allocation root`.
+   `"slop-monthly-allocation-v2" || program ID || project PDA || period (u32 LE) || allocation root || total (u64 LE)`.
    The program reads that instruction from the instructions sysvar and requires
    every offset to point inside it. The `month` PDA
    (`["month", project, period LE]`) records the root once, so each period
-   commits once.
+   commits once. The total must be positive, within the current owner cap, and
+   fully covered by free vault funds. Recording the root reserves that full
+   total before any individual award can be created.
 2. Anyone calls `commit_monthly_award(period, award_id, source_digest,
    actor_id, gross, index, count, proof)` for each award. The program rebuilds
    the root from the leaf and its Merkle proof. A leaf is
    `sha256(0x00 || actor_id LE || gross LE || source_digest)` and a node is
-   `sha256(0x01 || left || right)`; an odd last node moves up unchanged and takes
-   no proof element. This is the EVM tree with sha256. The period's committed
-   gross must stay within the project's current `monthly_cap`, and the switch
-   must be on. The award then commits as an ordinary award with the 2% fee
+   `sha256(0x01 || left hash || left total LE || right hash || right total LE)`.
+   Each proof sibling includes its hash and aggregate gross amount. Node totals
+   add with checked u64 arithmetic; an odd last node moves up unchanged. Both
+   the root hash and total must match the recorded month. Creating an award
+   uses the existing reservation without reserving its gross a second time.
+   Later owner cap changes or opt-out affect new months only. The award then
+   commits as an ordinary award with the 2% fee
    through the same `origin` and `award` PDAs, so a source commits once, by
    hand or monthly.
 

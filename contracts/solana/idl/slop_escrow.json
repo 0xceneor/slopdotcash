@@ -307,7 +307,23 @@
           "signer": true
         },
         {
-          "name": "project"
+          "name": "project",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [118, 97, 117, 108, 116]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              }
+            ]
+          }
         },
         {
           "name": "month",
@@ -349,6 +365,10 @@
           "type": {
             "array": ["u8", 32]
           }
+        },
+        {
+          "name": "total",
+          "type": "u64"
         }
       ]
     },
@@ -484,7 +504,9 @@
           "name": "proof",
           "type": {
             "vec": {
-              "array": ["u8", 32]
+              "defined": {
+                "name": "AllocationNode"
+              }
             }
           }
         }
@@ -1234,6 +1256,27 @@
   ],
   "types": [
     {
+      "name": "AllocationNode",
+      "docs": [
+        "Each sibling authenticates both its digest and aggregate gross amount."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "hash",
+            "type": {
+              "array": ["u8", 32]
+            }
+          },
+          {
+            "name": "total",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "AuthorityRotated",
       "type": {
         "kind": "struct",
@@ -1499,6 +1542,10 @@
           {
             "name": "committed",
             "type": "u64"
+          },
+          {
+            "name": "total",
+            "type": "u64"
           }
         ]
       }
@@ -1541,6 +1588,10 @@
             "type": {
               "array": ["u8", 32]
             }
+          },
+          {
+            "name": "total",
+            "type": "u64"
           }
         ]
       }

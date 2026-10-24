@@ -24,7 +24,7 @@ const MAX_ROTATION_DELAY: i64 = 90 * 86400;
 const MONTHLY_CUTOFF_DELAY: i64 = 72 * 3600;
 /// The identity authority signs this prefix, the program ID, the project, the period (u32 LE,
 /// YYYYMM) and the allocation root.
-pub const MONTHLY_MESSAGE_PREFIX: &[u8] = b"slop-monthly-allocation-v1";
+pub const MONTHLY_MESSAGE_PREFIX: &[u8] = b"slop-monthly-allocation-v2";
 /// The native Ed25519 signature verification program.
 const ED25519_PROGRAM: Pubkey =
     anchor_lang::solana_program::pubkey::pubkey!("Ed25519SigVerify111111111111111111111111111");
@@ -270,7 +270,7 @@ pub mod slop_escrow {
         )
     }
     // The owner sets the monthly cap and turns monthly commitments on or off. While they are
-    // off, no monthly allocation can be recorded and no monthly award can be committed.
+    // off, no new monthly allocation can be recorded. Already reserved awards remain available.
     pub fn set_monthly_commitment(
         ctx: Context<SetMonthlyCommitment>,
         cap: u64,
@@ -291,13 +291,14 @@ pub mod slop_escrow {
     // Anyone records one period's allocation root inside the period's window, once per
     // period, while the owner has monthly commitments on. The instruction just before this
     // one must be an Ed25519 program check of the project's identity authority signature
-    // over monthly_message(program, project, period, root).
+    // over monthly_message(program, project, period, root, total).
     pub fn commit_monthly(
         ctx: Context<CommitMonthly>,
         period: u32,
         allocation_root: [u8; 32],
+        total: u64,
     ) -> Result<()> {
-        let p = &ctx.accounts.project;
+        let p = &mut ctx.accounts.project;
         require!(p.purpose == Purpose::Ordinary, EscrowError::WrongPurpose);
         require!(p.monthly_enabled, EscrowError::MonthlyDisabled);
         let (opens_at, closes_at) = monthly_window(period)?;
@@ -306,23 +307,32 @@ pub mod slop_escrow {
             now >= opens_at && now < closes_at,
             EscrowError::MonthlyWindowClosed
         );
-        let message = monthly_message(ctx.program_id, &p.key(), period, &allocation_root);
+        require!(total > 0, EscrowError::InvalidAmount);
+        require!(total <= p.monthly_cap, EscrowError::MonthlyCapExceeded);
+        require!(
+            free(p)? >= total && ctx.accounts.vault.amount >= add(p.reserved, total)?,
+            EscrowError::InsufficientFreeBalance
+        );
+        let message = monthly_message(ctx.program_id, &p.key(), period, &allocation_root, total);
         verify_attestation(&ctx.accounts.instructions, &p.identity_authority, &message)?;
         let m = &mut ctx.accounts.month;
         m.project = p.key();
         m.period = period;
         m.allocation_root = allocation_root;
         m.committed = 0;
+        m.total = total;
+        p.reserved = add(p.reserved, total)?;
         emit!(MonthlyCommitted {
             project: p.key(),
             period,
-            allocation_root
+            allocation_root,
+            total
         });
         Ok(())
     }
     // Anyone commits one award of a recorded allocation with its Merkle proof. The award
-    // takes the ordinary fee, and the period's committed total stays within the owner's
-    // current monthly cap. The origin PDA commits each source once.
+    // takes the ordinary fee from the period's existing reservation.
+    // The origin PDA commits each source once.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_monthly_award(
         mut ctx: Context<CommitMonthlyAward>,
@@ -333,25 +343,35 @@ pub mod slop_escrow {
         gross: u64,
         index: u32,
         count: u32,
-        proof: Vec<[u8; 32]>,
+        proof: Vec<AllocationNode>,
     ) -> Result<()> {
         let _ = period;
+        // An admitted month is already funded. Later opt-out or cap changes
+        // affect new admissions, never these reserved obligations.
+        let leaf = AllocationNode {
+            hash: monthly_leaf(actor_id, gross, &source_digest),
+            total: gross,
+        };
+        let root = merkle_sum_root(leaf, index, count, &proof)?;
         require!(
-            ctx.accounts.project.monthly_enabled,
-            EscrowError::MonthlyDisabled
-        );
-        let leaf = monthly_leaf(actor_id, gross, &source_digest);
-        require!(
-            merkle_root(leaf, index, count, &proof)? == ctx.accounts.month.allocation_root,
+            root.hash == ctx.accounts.month.allocation_root
+                && root.total == ctx.accounts.month.total,
             EscrowError::InvalidAllocationProof
         );
         let committed = add(ctx.accounts.month.committed, gross)?;
         require!(
-            committed <= ctx.accounts.project.monthly_cap,
+            committed <= ctx.accounts.month.total,
             EscrowError::MonthlyCapExceeded
         );
         ctx.accounts.month.committed = committed;
         let a = &mut ctx.accounts;
+        // Move an existing reservation into an obligation. The common commit
+        // path adds it back; any failure rolls back the complete instruction.
+        a.project.reserved = a
+            .project
+            .reserved
+            .checked_sub(gross)
+            .ok_or(error!(EscrowError::Arithmetic))?;
         commit_with_fee(
             &mut a.project,
             &a.vault,
@@ -623,6 +643,7 @@ pub fn monthly_message(
     project: &Pubkey,
     period: u32,
     allocation_root: &[u8; 32],
+    total: u64,
 ) -> Vec<u8> {
     [
         MONTHLY_MESSAGE_PREFIX,
@@ -630,6 +651,7 @@ pub fn monthly_message(
         project.as_ref(),
         &period.to_le_bytes(),
         allocation_root,
+        &total.to_le_bytes(),
     ]
     .concat()
 }
@@ -643,22 +665,43 @@ pub fn monthly_leaf(actor_id: u64, gross: u64, source_digest: &[u8; 32]) -> [u8;
     ])
     .to_bytes()
 }
-/// The root from a leaf at `index` of `count` leaves and its proof. A node is
-/// sha256(0x01, left, right); an odd last node moves up unchanged and takes no proof
-/// element. The 0x00 and 0x01 prefixes keep a node from passing as a leaf.
-fn merkle_root(leaf: [u8; 32], index: u32, count: u32, proof: &[[u8; 32]]) -> Result<[u8; 32]> {
+/// Each sibling authenticates both its digest and aggregate gross amount.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq)]
+pub struct AllocationNode {
+    pub hash: [u8; 32],
+    pub total: u64,
+}
+fn sum_node(left: AllocationNode, right: AllocationNode) -> Result<AllocationNode> {
+    Ok(AllocationNode {
+        hash: hashv(&[
+            &[1u8],
+            &left.hash,
+            &left.total.to_le_bytes(),
+            &right.hash,
+            &right.total.to_le_bytes(),
+        ])
+        .to_bytes(),
+        total: add(left.total, right.total)?,
+    })
+}
+fn merkle_sum_root(
+    leaf: AllocationNode,
+    index: u32,
+    count: u32,
+    proof: &[AllocationNode],
+) -> Result<AllocationNode> {
     require!(index < count, EscrowError::InvalidAllocationProof);
     let (mut node, mut index, mut width) = (leaf, index, count);
     let mut siblings = proof.iter();
     while width > 1 {
         if index % 2 == 1 || index + 1 < width {
-            let sibling = siblings
+            let sibling = *siblings
                 .next()
                 .ok_or(error!(EscrowError::InvalidAllocationProof))?;
             node = if index % 2 == 1 {
-                hashv(&[&[1u8], sibling, &node]).to_bytes()
+                sum_node(sibling, node)?
             } else {
-                hashv(&[&[1u8], &node, sibling]).to_bytes()
+                sum_node(node, sibling)?
             };
         }
         index /= 2;
@@ -864,7 +907,10 @@ pub struct CommitMonthly<'info> {
     /// Anyone; pays the period account's rent.
     #[account(mut)]
     pub payer: Signer<'info>,
+    #[account(mut)]
     pub project: Box<Account<'info, Project>>,
+    #[account(seeds=[b"vault",project.key().as_ref()],bump,constraint=vault.mint==project.mint,token::authority=project)]
+    pub vault: Account<'info, TokenAccount>,
     /// One per project and period, so a period commits once.
     #[account(init,payer=payer,space=8+MonthlyAllocation::INIT_SPACE,seeds=[b"month",project.key().as_ref(),&period.to_le_bytes()],bump)]
     pub month: Box<Account<'info, MonthlyAllocation>>,
@@ -1021,6 +1067,7 @@ pub struct MonthlyAllocation {
     pub period: u32,
     pub allocation_root: [u8; 32],
     pub committed: u64,
+    pub total: u64,
 }
 /// The deployment-wide identity authority and fee recipient, written once by
 /// `initialize_config` and never changed.
@@ -1075,6 +1122,7 @@ pub struct MonthlyCommitted {
     pub project: Pubkey,
     pub period: u32,
     pub allocation_root: [u8; 32],
+    pub total: u64,
 }
 #[event]
 pub struct AuthorityRotationProposed {
@@ -1256,31 +1304,34 @@ mod tests {
     }
     #[test]
     fn merkle_proofs_match_the_documented_tree() {
-        let leaves: Vec<[u8; 32]> = (1..=3u64)
-            .map(|i| monthly_leaf(i, i * 10, &[i as u8; 32]))
+        let leaves: Vec<AllocationNode> = (1..=3u64)
+            .map(|i| AllocationNode {
+                hash: monthly_leaf(i, i * 10, &[i as u8; 32]),
+                total: i * 10,
+            })
             .collect();
-        let node = |l: &[u8; 32], r: &[u8; 32]| hashv(&[&[1u8], l, r]).to_bytes();
+        let node = |l: &AllocationNode, r: &AllocationNode| sum_node(*l, *r).unwrap();
         let left = node(&leaves[0], &leaves[1]);
         let root = node(&left, &leaves[2]);
         assert_eq!(
-            merkle_root(leaves[0], 0, 3, &[leaves[1], leaves[2]]).unwrap(),
+            merkle_sum_root(leaves[0], 0, 3, &[leaves[1], leaves[2]]).unwrap(),
             root
         );
         assert_eq!(
-            merkle_root(leaves[1], 1, 3, &[leaves[0], leaves[2]]).unwrap(),
+            merkle_sum_root(leaves[1], 1, 3, &[leaves[0], leaves[2]]).unwrap(),
             root
         );
         // The odd last leaf moves up and needs only the left subtree.
-        assert_eq!(merkle_root(leaves[2], 2, 3, &[left]).unwrap(), root);
+        assert_eq!(merkle_sum_root(leaves[2], 2, 3, &[left]).unwrap(), root);
         // A wrong index and extra or missing proof elements fail.
         assert_ne!(
-            merkle_root(leaves[0], 1, 3, &[leaves[1], leaves[2]]).unwrap(),
+            merkle_sum_root(leaves[0], 1, 3, &[leaves[1], leaves[2]]).unwrap(),
             root
         );
-        assert!(merkle_root(leaves[2], 2, 3, &[left, left]).is_err());
-        assert!(merkle_root(leaves[0], 0, 3, &[leaves[1]]).is_err());
-        assert!(merkle_root(leaves[0], 3, 3, &[]).is_err());
-        assert_eq!(merkle_root(leaves[0], 0, 1, &[]).unwrap(), leaves[0]);
+        assert!(merkle_sum_root(leaves[2], 2, 3, &[left, left]).is_err());
+        assert!(merkle_sum_root(leaves[0], 0, 3, &[leaves[1]]).is_err());
+        assert!(merkle_sum_root(leaves[0], 3, 3, &[]).is_err());
+        assert_eq!(merkle_sum_root(leaves[0], 0, 1, &[]).unwrap(), leaves[0]);
     }
     #[test]
     fn fee_is_two_percent_per_award_or_withdrawal() {

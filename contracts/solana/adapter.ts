@@ -404,26 +404,51 @@ function monthlyLeaf(entry: SolanaMonthlyEntry) {
     ),
   );
 }
-const node = (left: Uint8Array, right: Uint8Array) =>
-  sha256(concat(Uint8Array.of(1), left, right));
+type AllocationNode = { hash: Uint8Array; total: bigint };
+const node = (left: AllocationNode, right: AllocationNode): AllocationNode => {
+  const total = left.total + right.total;
+  if (total > U64) throw new Error("Monthly total overflow");
+  return {
+    hash: sha256(
+      concat(
+        Uint8Array.of(1),
+        left.hash,
+        le(left.total.toString(), 8),
+        right.hash,
+        le(right.total.toString(), 8),
+      ),
+    ),
+    total,
+  };
+};
 function levels(entries: readonly SolanaMonthlyEntry[]) {
   if (entries.length === 0 || entries.length > 0xffffffff)
     throw new Error("Invalid monthly allocation size");
-  const tree: Uint8Array[][] = [entries.map(monthlyLeaf)];
+  const tree: AllocationNode[][] = [
+    entries.map((entry) => ({
+      hash: monthlyLeaf(entry),
+      total: BigInt(entry.grossMicro),
+    })),
+  ];
   while (tree[tree.length - 1].length > 1) {
     const level = tree[tree.length - 1];
-    const next: Uint8Array[] = [];
+    const next: AllocationNode[] = [];
     for (let i = 0; i < level.length; i += 2)
       next.push(i + 1 < level.length ? node(level[i], level[i + 1]) : level[i]);
     tree.push(next);
   }
   return tree;
 }
-/** The program's allocation root: the sha256 Merkle tree over the awards in order. */
+/** Merkle sum root binding the complete allocation and its aggregate gross. */
 export function solanaAllocationRoot(entries: readonly SolanaMonthlyEntry[]) {
-  return hex(levels(entries).at(-1)?.[0] ?? new Uint8Array());
+  const tree = levels(entries);
+  return hex(tree[tree.length - 1][0].hash);
 }
-/** The sibling hashes commit_monthly_award needs for the award at `index`. */
+export function solanaAllocationTotal(entries: readonly SolanaMonthlyEntry[]) {
+  const tree = levels(entries);
+  return tree[tree.length - 1][0].total.toString();
+}
+/** Sibling digests and sums needed to verify an award's complete funded allocation. */
 export function solanaAllocationProof(
   entries: readonly SolanaMonthlyEntry[],
   index: number,
@@ -431,11 +456,15 @@ export function solanaAllocationProof(
   const tree = levels(entries);
   if (!Number.isSafeInteger(index) || index < 0 || index >= entries.length)
     throw new Error("Invalid allocation index");
-  const proof: string[] = [];
+  const proof: { hash: string; total: string }[] = [];
   let at = index;
   for (const level of tree.slice(0, -1)) {
     const sibling = at % 2 === 1 ? at - 1 : at + 1;
-    if (sibling < level.length) proof.push(hex(level[sibling]));
+    if (sibling < level.length)
+      proof.push({
+        hash: hex(level[sibling].hash),
+        total: level[sibling].total.toString(),
+      });
     at = Math.floor(at / 2);
   }
   return proof;
@@ -446,17 +475,19 @@ export function solanaMonthlyMessage(
   projectPda: string,
   period: string,
   allocationRoot: string,
+  total: string,
 ) {
   const match = /^([2-9][0-9]{3})-(0[1-9]|1[0-2])$/.exec(period);
   if (!match) throw new Error("Invalid monthly period");
   const yyyymm = new Uint8Array(4);
   new DataView(yyyymm.buffer).setUint32(0, Number(match[1] + match[2]), true);
   return concat(
-    new TextEncoder().encode("slop-monthly-allocation-v1"),
+    new TextEncoder().encode("slop-monthly-allocation-v2"),
     publicKeyBytes(programId),
     publicKeyBytes(projectPda),
     yyyymm,
     digest(allocationRoot),
+    le(total, 8),
   );
 }
 
@@ -635,7 +666,7 @@ export function solanaPaymentAdapter(
           data.length < 104 ||
           data.length !==
             104 +
-              32 *
+              40 *
                 new DataView(data.buffer, data.byteOffset).getUint32(
                   100,
                   true,
