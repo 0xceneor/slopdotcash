@@ -1614,6 +1614,7 @@ test("two contributors flag through the form, pause the project and notify moder
   const owner = await ownerContext.newPage();
   const ownerErrors = observe(owner);
   await signIn(owner, OWNER_TOKEN);
+  await setSlopbot(`${project.repository}/installed`);
   await draftApplication(owner, project);
   await owner
     .getByRole("button", { name: "Create project", exact: true })

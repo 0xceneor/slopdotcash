@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
 import { CloudflareProjectPersistence } from "../backend/projects/cloudflare-persistence";
 import { handleProjectApi } from "../backend/projects/handler";
-import { setupAuthority } from "../backend/projects/setup";
+import { flaggerAuthority } from "../backend/projects/setup";
 import { githubFlaggerStanding } from "../backend/vetting/flagger-standing";
 import {
   handleProjectFlagsApi,
@@ -128,6 +128,7 @@ let keys: Awaited<ReturnType<typeof vettingKeyPair>>;
 let livePin: VettingPin;
 let clock: Date;
 let ids = 0;
+let installation: "installed" | "missing" | "suspended" = "installed";
 
 beforeEach(async () => {
   const database = sqliteD1(
@@ -140,6 +141,7 @@ beforeEach(async () => {
   flags = new ProjectFlagStore(database.db);
   clock = NOW;
   githubUp = true;
+  installation = "installed";
   retained = await localVettingEvidence(database.db, () => clock);
   vetting = new CloudflareVettingPersistence(
     database.db,
@@ -224,11 +226,11 @@ const flagApi = (request: Request) =>
       const name = Object.keys(ACTORS).find(
         (key) => ACTORS[key].githubId === actor.githubId,
       );
-      return setupAuthority(
+      return flaggerAuthority(
         {
           state: "read",
           access: {
-            installation: "installed",
+            installation,
             installationId: 1,
             permission: name && STANDING[name]?.association ? "write" : "read",
             roleName: null,
@@ -758,6 +760,16 @@ describe("two-contributor flags", () => {
       expect(refused.status).toBe(403);
       expect((await refused.json()).error).toBe(code);
     }
+    for (const state of ["missing", "suspended"] as const) {
+      installation = state;
+      const unavailable = await flag("alice");
+      expect(unavailable.status).toBe(503);
+      expect((await unavailable.json()).error).toBe(
+        "flagger_standing_unavailable",
+      );
+      expect(await flags.activeFlags(clock)).toEqual([]);
+    }
+    installation = "installed";
     // A failed GitHub read refuses the flag; it never admits one.
     githubUp = false;
     const unknown = await flag("alice");

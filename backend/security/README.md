@@ -65,6 +65,14 @@ read"; there is no separate intake App and no long-lived token. Each
 installation owner must accept that permission. Until then intake stays off
 and the manual flow below applies.
 
+Provision the five intake secrets and `SURPLUS_API_KEY` on the production
+Pages project `eliza-computer`. The release secret inventory permits staged
+provisioning. Store the App private key as PEM, not base64-encoded PEM.
+Generate `SLOP_INTAKE_GRANT_KEY` from 32 random bytes encoded as base64url.
+Keep `SLOP_PRIVATE_INTAKE_MODE` off until the App callback URL and live
+reporter authorization have been checked. Provisioning secrets does not
+activate intake or prove that GitHub or Surplus is available.
+
 - Authorization: a per-submission PKCE consent for the intake App. The
   callback checks that `/user` is the account that began the consent and
   stores the user token only in an AES-GCM encrypted HttpOnly

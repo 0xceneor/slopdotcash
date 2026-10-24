@@ -38,9 +38,9 @@ import {
   refreshProjectSetup,
 } from "../../../backend/projects/handler";
 import {
+  flaggerAuthority,
   parseRepositoryAccess,
   readRepositoryAccess,
-  setupAuthority,
   vettingScanRequester,
 } from "../../../backend/projects/setup";
 import { assetTemplateSource } from "../../../backend/projects/skill-publication";
@@ -678,7 +678,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     }),
     repositoryAuthority: async (manifest, actor) => {
       // Only current repository permission determines maintainer exclusion.
-      return setupAuthority(
+      return flaggerAuthority(
         await readRepositoryAccess(
           (repository, member) =>
             slopbotRepositoryAccess(context.env.SLOPBOT, repository, member),

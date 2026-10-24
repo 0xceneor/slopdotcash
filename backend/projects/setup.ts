@@ -161,6 +161,21 @@ export function setupAuthority(
   };
 }
 
+/** An unavailable installation cannot prove that a flagger is not a maintainer. */
+export function flaggerAuthority(
+  access: AccessCheck,
+  actor: GithubActor,
+  repository: string,
+): SetupAuthority {
+  if (access.state === "read" && access.access.installation !== "installed")
+    return {
+      state: "retry",
+      message:
+        "Slopbot must be available to check current repository permission.",
+    };
+  return setupAuthority(access, actor, repository);
+}
+
 /** The funding summary, separate from readiness. */
 export function setupFunding(
   manifest: ProjectDefinition,
