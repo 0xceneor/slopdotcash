@@ -78,6 +78,8 @@ export default defineConfig({
   // (public/_headers) so other program surfaces (e.g. the Eliza Hub landing
   // page) can read the published snapshot. Mirror that in local preview.
   preview: {
+    // Preview must serve the built registry snapshot, not the dev API proxy.
+    proxy: {},
     cors: true,
   },
 });
