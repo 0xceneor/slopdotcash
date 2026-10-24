@@ -76,7 +76,9 @@ export function OwnerBountyVault({
           {!state.canSetup ? (
             <p>
               This project is restricted. New setup and deposits are disabled.
-              The owner can still check transactions and withdraw free funds.
+              {deployments.length > 0
+                ? " The owner can still check existing deposit or withdrawal transactions and withdraw free funds."
+                : " Vault registration can resume after reinstatement."}
             </p>
           ) : null}
           {state.funds ? (
@@ -104,13 +106,9 @@ export function OwnerBountyVault({
             <OwnerVaultSetup
               project={project}
               payoutPolicy="security-bounty"
-              onRegistered={async (_deployment, connected) => {
+              onRegistered={(registered, connected, _notice, revision) => {
                 setWallet(connected);
-                const result = await projectApiRequest<{
-                  project: ProjectDefinition;
-                  revision: number;
-                }>("GET", `projects/${project.id}`);
-                onRegistered(result);
+                onRegistered({ project: registered, revision });
                 setReload((value) => value + 1);
               }}
             />
