@@ -51,6 +51,15 @@ async function harness() {
     INSERT INTO notification_email_preferences VALUES ('${ME.github}',1,'${"d".repeat(64)}','${NOW}');
     INSERT INTO notifications (event_key,recipient_github_id,kind,subject,action_path,source_at,created_at)
       VALUES ('payment-reserved:obligation-1','${ME.github}','award_reserved','alpha','/earnings','${NOW}','${NOW}');
+    INSERT INTO wallet_claims (id,github_user_id,github_login,wallet_address,source,issue_repository,issue_number,source_body_sha256,observed_at,record_sha256,supersedes_claim_id,created_at,chain)
+      VALUES ('claim-1','${ME.github}','${ME.login}','0x8f77c37d8650776bfe73c9b12b15209ee15d9b86','d1_registry',NULL,NULL,'${"a".repeat(64)}','${NOW}','${"b".repeat(64)}',NULL,'${NOW}','base');
+    INSERT INTO payment_obligations VALUES ('obligation-1','alpha','${ME.github}','base-sepolia','base','0x2222222222222222222222222222222222222222','0x3333333333333333333333333333333333333333',6,'100000000','2000000','${"9".repeat(64)}','reserved','${NOW}',NULL);
+    INSERT INTO project_revisions (project_id,revision,manifest,manifest_sha256,reason,created_at)
+      VALUES ('alpha',1,'{"id":"alpha","status":"active"}','${"a".repeat(64)}','Listed','${NOW}');
+    INSERT INTO projects (id,status,revision,manifest,manifest_sha256,created_at,updated_at)
+      VALUES ('alpha','active',1,'{"id":"alpha","status":"active"}','${"a".repeat(64)}','${NOW}','${NOW}');
+    INSERT INTO security_cases (id,project_id,advisory_repository,advisory_ghsa,reporter_github_id,reporter_github_login,submission_state,received_at,verified_at,verified_by_github_id,receipt_state,remediation_state,award_state,payment_state,disclosure_state,recognition,appeal_state,revision,created_at,updated_at)
+      VALUES ('sc_closing0001','alpha','example/alpha','GHSA-aaaa-bbbb-cccc','${ME.github}','${ME.login}','verified','${NOW}','${NOW}','4200','received','not-started','not-applicable','not-applicable','embargoed','private','none',1,'${NOW}','${NOW}');
   `);
   let clock = NOW;
   const identity = { login: ME.login };
@@ -124,6 +133,41 @@ test("closing an account ends every session, removes optional connections and ke
         ME.actor,
       ),
     ).toBe(2);
+    // Closure changes only the membership, its optional connections, its
+    // sessions, its email preference and the optional mail queue. The wallet,
+    // the unpaid obligation, the private case and every other record stay
+    // exactly as they were.
+    const changed = new Set([
+      "points_members",
+      "points_sessions",
+      "points_x_links",
+      "points_x_flows",
+      "points_telegram_links",
+      "points_telegram_flows",
+      "notification_email_preferences",
+      "activity_notification_outbox",
+      // The request limiter counts the closure request itself.
+      "identity_rate_limits",
+    ]);
+    const snapshot = () =>
+      Object.fromEntries(
+        (
+          sqlite
+            .query(
+              "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .all() as { name: string }[]
+        )
+          .filter(({ name }) => !changed.has(name))
+          .map(({ name }) => [
+            name,
+            sqlite.query(`SELECT * FROM "${name}" ORDER BY rowid`).all(),
+          ]),
+      );
+    const before = snapshot();
+    expect(before.wallet_claims).toHaveLength(1);
+    expect(before.payment_obligations).toHaveLength(1);
+    expect(before.security_cases).toHaveLength(1);
 
     const closed = await call("account/close", tokens.me, {
       login: "closing-member",
@@ -131,6 +175,7 @@ test("closing an account ends every session, removes optional connections and ke
     expect(closed.status).toBe(200);
     expect(closed.body).toEqual({ closed: true, closedAt: NOW });
     expect(closed.cookie).toContain("Max-Age=0");
+    expect(snapshot()).toEqual(before);
     // A repeated attempt has no session left to act with.
     expect(
       (await call("account/close", tokens.me, { login: ME.login })).status,
