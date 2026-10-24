@@ -162,13 +162,21 @@ export async function resolveAppeal(
   appealKey: string,
   resolution: "upheld" | "denied",
   by: "appellant" | "maintainer" | "moderator",
+  onlyUnescalated = false,
 ): Promise<boolean> {
   const result = await db
     .prepare(
       `UPDATE slopbot_appeals SET resolved_at = ?, resolution = ?, resolved_by = ?
-       WHERE appeal_key = ? AND resolved_at IS NULL`,
+       WHERE appeal_key = ? AND resolved_at IS NULL
+         AND (? = 0 OR escalated_at IS NULL)`,
     )
-    .bind(new Date().toISOString(), resolution, by, appealKey)
+    .bind(
+      new Date().toISOString(),
+      resolution,
+      by,
+      appealKey,
+      onlyUnescalated ? 1 : 0,
+    )
     .run();
   return (result.meta?.changes ?? 0) === 1;
 }

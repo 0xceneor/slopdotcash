@@ -32,6 +32,8 @@ type Run = {
   deliver: (job: Job) => Promise<string>;
   tick: () => Promise<Job[]>;
   model: (category: Category, confidence: number) => void;
+  pauseNextReopen: () => { entered: Promise<void>; release: () => void };
+  loseNextReopenResponse: () => void;
   writes: string[];
   comments: string[];
   labels: string[];
@@ -102,6 +104,8 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
   const comments: string[] = [];
   const labels: string[] = [];
   let state = "open";
+  let pauseReopen: (() => Promise<void>) | null = null;
+  let loseReopenResponse = false;
   let verdict = { category: "spam" as Category, confidence: 0.97 };
   const config = Buffer.from(
     JSON.stringify({ version: 1, audience: "protection", closure: true }),
@@ -173,7 +177,20 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
           pull_request: {},
         });
       if (path.endsWith("/pulls/5") && request.method === "PATCH") {
-        state = ((await request.json()) as { state: string }).state;
+        const next = ((await request.json()) as { state: string }).state;
+        if (next === "open" && pauseReopen) {
+          const pause = pauseReopen;
+          pauseReopen = null;
+          await pause();
+        }
+        state = next;
+        if (next === "open" && loseReopenResponse) {
+          loseReopenResponse = false;
+          return Response.json(
+            { error: "synthetic lost response" },
+            { status: 503 },
+          );
+        }
         return Response.json({ state });
       }
       if (path.endsWith("/pulls/5"))
@@ -287,6 +304,24 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
   };
   try {
     await cb({
+      loseNextReopenResponse: () => {
+        loseReopenResponse = true;
+      },
+      pauseNextReopen: () => {
+        let entered!: () => void;
+        let release!: () => void;
+        const arrival = new Promise<void>((resolve) => {
+          entered = resolve;
+        });
+        const resumed = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        pauseReopen = async () => {
+          entered();
+          await resumed;
+        };
+        return { entered: arrival, release };
+      },
       writes,
       comments,
       labels,
@@ -519,5 +554,66 @@ test("a rejected draft escalates, and an appeal unresolved for 7 days escalates 
     expect(run.sql(APPEAL)).toEqual([
       { draft: "deny", escalated: 1, resolution: null, resolved_by: null },
     ]);
+  });
+});
+
+test("concurrent moderator decisions cannot deny an appeal after its uphold starts reopening the PR", async () => {
+  await closedItem(async (run) => {
+    run.model("scam", 0.97);
+    await run.review();
+    await run.deliver(run.job("appeal", { senderId: AUTHOR }));
+    const pause = run.pauseNextReopen();
+    const uphold = run.deliver(
+      run.job("appeal_command", { command: "uphold", senderId: MODERATOR }),
+    );
+    await pause.entered;
+    try {
+      await run.deliver(
+        run.job("appeal_command", { command: "deny", senderId: MODERATOR }),
+      );
+    } finally {
+      pause.release();
+      await uphold;
+    }
+    expect(run.sql("SELECT resolution FROM slopbot_appeals")).toEqual([
+      { resolution: "upheld" },
+    ]);
+    expect(run.sql("SELECT reversal FROM slopbot_penalties")).toEqual([
+      { reversal: "appeal_upheld" },
+    ]);
+    expect(
+      run.comments.some((comment) => comment.includes("**Appeal denied**")),
+    ).toBe(false);
+  });
+});
+
+test("a retry after an uncertain reopen completes the recorded appeal decision", async () => {
+  await closedItem(async (run) => {
+    run.model("scam", 0.97);
+    await run.review();
+    await run.deliver(run.job("appeal", { senderId: AUTHOR }));
+    run.loseNextReopenResponse();
+    await expect(
+      run.deliver(
+        run.job("appeal_command", { command: "uphold", senderId: MODERATOR }),
+      ),
+    ).rejects.toThrow("appeal job was retried");
+    expect(run.sql("SELECT resolution FROM slopbot_appeals")).toEqual([
+      { resolution: "upheld" },
+    ]);
+    expect(run.sql("SELECT reversal FROM slopbot_penalties")).toEqual([
+      { reversal: null },
+    ]);
+    await run.deliver(
+      run.job("appeal_command", { command: "deny", senderId: MODERATOR }),
+    );
+    expect(run.sql("SELECT resolution FROM slopbot_appeals")).toEqual([
+      { resolution: "upheld" },
+    ]);
+    expect(run.sql("SELECT reversal FROM slopbot_penalties")).toEqual([
+      { reversal: "appeal_upheld" },
+    ]);
+    expect(run.labels).not.toContain("slopbot: scam");
+    expect(run.comments.at(-1)).toContain("**Appeal upheld**");
   });
 });

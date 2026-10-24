@@ -1863,8 +1863,16 @@ export async function applyAppealCommand(
   const appeal = await latestAppealFor(db, session.issue.node_id);
   if (appeal === null) return "no open appeal";
   if (appeal.resolved_at !== null) {
-    // Finish a resolution whose comment was not recorded before a failure.
-    await publishAppealState(env, job, session, appeal, "resolution");
+    // Resume the recorded decision, including external writes interrupted
+    // before their response arrived. Never apply this retry's new command.
+    await finishAppeal(
+      env,
+      job,
+      session,
+      appeal,
+      appeal.resolution!,
+      appeal.resolved_by!,
+    );
     return "appeal already resolved";
   }
   if (job.command === "accept" || job.command === "reject") {
@@ -1928,8 +1936,21 @@ async function finishAppeal(
   by: "appellant" | "maintainer" | "moderator",
 ): Promise<string> {
   const db = env.SLOPBOT_DB;
+  // Choose the decision before external effects. A concurrent rejection can
+  // escalate an unanswered draft, and only a moderator may then resolve it.
+  await resolveAppeal(
+    db,
+    appeal.appeal_key,
+    resolution,
+    by,
+    by !== "moderator",
+  );
+  const current = await appealByKey(db, appeal.appeal_key);
+  if (current === null) throw new Error("Appeal is missing");
+  if (current.resolved_at === null)
+    return "a Slop moderator decides this appeal";
   const { issue } = session;
-  if (resolution === "upheld") {
+  if (current.resolution === "upheld") {
     const closedBySlopbot = await store.count(
       db,
       "SELECT COUNT(*) AS n FROM slopbot_actions WHERE item_node_id = ? AND action = 'close'",
@@ -1963,9 +1984,6 @@ async function finishAppeal(
     }
     await reversePenalty(db, issue.node_id, "appeal_upheld");
   }
-  await resolveAppeal(db, appeal.appeal_key, resolution, by);
-  const current = await appealByKey(db, appeal.appeal_key);
-  if (current?.resolved_at == null) throw new Error("Appeal was not resolved");
   await publishAppealState(env, job, session, current, "resolution");
   return `appeal ${current.resolution} by the ${current.resolved_by}`;
 }
