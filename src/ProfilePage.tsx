@@ -180,8 +180,6 @@ export function ProfilePage({
         work={events}
         login={login}
         cycles={state.cycleIndex}
-
-
       >
         {matches.length > 0 ? (
           <section className="profile-card" aria-label="Projects">

@@ -256,8 +256,6 @@ test("equal contributors share cycle ranks", async ({ page, request }) => {
   await expect(followingRow.locator(".rank-cell")).toHaveText(
     `#${expectedRank + tiedLeaders.length}`,
   );
-
-
 });
 
 test("discovers projects and one points-ranked homepage leaderboard", async ({
