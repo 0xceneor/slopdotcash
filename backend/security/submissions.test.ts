@@ -45,6 +45,11 @@ const PROGRAM = {
     network: null,
     grossMinor: "1000000",
   },
+  funding: {
+    state: "verified-available",
+    evidence: "synthetic-funding-evidence",
+    verifiedAt: START,
+  },
   sponsor: { name: "Slop", githubId: null },
   approvers: {
     technical: [MAINTAINER, MAINTAINER_2],
@@ -594,8 +599,8 @@ describe("private intake: send outcomes", () => {
       receivedAtSource: "github-verified",
       receivedAt: advisory.advisory.created_at,
       view: "reporter",
-      nextAction: "Triage new private report",
-      nextActionDueAt: "2026-10-24T10:00:00.000Z",
+      nextStep: "Waiting for the project owner's response.",
+      nextStepDueAt: "2026-10-24T10:00:00.000Z",
     });
     expect(JSON.stringify(view.body)).not.toContain("autoAnalysis");
     expect(JSON.stringify(view.body)).not.toContain("urgent");
@@ -610,6 +615,7 @@ describe("private intake: send outcomes", () => {
     expect(restricted.body.case).toMatchObject({
       receivedAtSource: "github-verified",
       receiptEvidenceDigest: verified.receipt_evidence_digest,
+      analysis: { state: "unavailable", retryable: true },
     });
   });
 

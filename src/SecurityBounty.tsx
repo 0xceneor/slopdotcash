@@ -155,7 +155,6 @@ const BLOCKED_INTAKE: Record<Exclude<Readiness["state"], "ready">, string> = {
  * answer is fresh. Every other state blocks the handoff (SEC-07).
  */
 function IntakeHandoff({ project }: { project: ProjectDefinition }) {
-  const session = useProjectSession();
   const [state, setState] = useState<ReadinessState>({ status: "idle" });
   const check = useCallback(() => {
     setState({ status: "checking" });
@@ -182,21 +181,6 @@ function IntakeHandoff({ project }: { project: ProjectDefinition }) {
     );
     return () => window.clearTimeout(timer);
   }, [state]);
-  if (session.status === "signed-in")
-    return (
-      <section aria-labelledby="security-report" className="admin-card">
-        <h2 id="security-report">Report a vulnerability privately</h2>
-        <p>
-          Report security findings privately, including uncertain severity or
-          potential loss of funds. Keep exploit details out of public posts.
-        </p>
-        <ReportStarter
-          existing={[]}
-          onChanged={() => {}}
-          projects={[project]}
-        />
-      </section>
-    );
   return (
     <section aria-labelledby="security-report" className="admin-card">
       <h2 id="security-report">Report a vulnerability privately</h2>
@@ -777,22 +761,10 @@ type SecurityCase = {
   events?: CaseEvent[];
 };
 
-type Submission = {
-  id: string;
-  projectId: string;
-  startedAt: string;
-  state: "awaiting-report" | "received";
-  lastCheck: "none-found" | "unavailable" | "received" | null;
-  lastCheckedAt: string | null;
-  caseId: string | null;
-  handoffUrl: string;
-};
-
 type CaseList = {
   viewer: { githubId: string; githubLogin: string };
   programs: { projectId: string; roles: string[] }[];
   cases: SecurityCase[];
-  submissions: Submission[];
 };
 
 type Loaded<T> =
@@ -904,6 +876,9 @@ const SUBMISSION_LABELS: Record<SecurityCase["submissionState"], string> = {
 };
 
 const EVENT_LABELS: Record<string, string> = {
+  submit: "Reporter submitted privately; GitHub receipt verified",
+  "submit-direct":
+    "Reporter linked their GitHub report; GitHub receipt verified",
   claim: "Reporter linked the GitHub report",
   record: "Maintainer recorded the GitHub report",
   "verify-link": "Maintainer verified the GitHub report",
@@ -938,177 +913,6 @@ const RESPONSE_KINDS = new Set([
   "decide-related-party",
   "reject-link",
 ]);
-
-const CHECK_MESSAGES: Record<
-  Exclude<Submission["lastCheck"], null | "received">,
-  string
-> = {
-  "none-found":
-    "GitHub has no private report from your account for this project yet. If you just submitted it, wait a moment and check again; otherwise use the GitHub form.",
-  unavailable:
-    "Slop could not read GitHub. Do not submit again — check again later. Your report is safe on GitHub.",
-};
-
-/**
- * One private report: open GitHub's private form, then let Slop confirm the
- * receipt from GitHub. A check always comes before a second submission, so
- * an interrupted report is found instead of duplicated (PRD section 8).
- */
-function SubmissionCard({
-  submission,
-  projectName,
-  onReceived,
-}: {
-  submission: Submission;
-  projectName: string;
-  onReceived: () => void;
-}) {
-  const [current, setCurrent] = useState(submission);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const check = () => {
-    setBusy(true);
-    setError(null);
-    projectApiRequest<{ submission: Submission }>(
-      "POST",
-      `security-submissions/${encodeURIComponent(current.id)}/check`,
-      {},
-    ).then(
-      (body) => {
-        setBusy(false);
-        setCurrent(body.submission);
-        if (body.submission.state === "received") onReceived();
-      },
-      (caught: unknown) => {
-        setBusy(false);
-        setError(errorMessage(caught));
-      },
-    );
-  };
-  if (current.state === "received")
-    return (
-      <p className="admin-status" role="status">
-        GitHub received your {projectName} report. Its private case is listed
-        under <Link href="/security">Security cases</Link>.
-      </p>
-    );
-  return (
-    <div aria-live="polite" className="security-handoff">
-      <ol>
-        <li>
-          <a
-            className="button primary-button"
-            href={current.handoffUrl}
-            rel="noreferrer"
-            target="_blank"
-          >
-            Open GitHub's private report form{" "}
-            <ExternalLink aria-hidden="true" />
-          </a>
-        </li>
-        <li>
-          <button
-            className="button secondary-button"
-            disabled={busy}
-            onClick={check}
-            type="button"
-          >
-            {busy ? "Checking GitHub…" : "I submitted it — confirm receipt"}
-          </button>
-        </li>
-      </ol>
-      {current.lastCheck && current.lastCheck !== "received" ? (
-        <p className="admin-status">
-          {CHECK_MESSAGES[current.lastCheck]} (Checked{" "}
-          {formatUtc(current.lastCheckedAt)}.)
-        </p>
-      ) : null}
-      <FormError message={error} />
-    </div>
-  );
-}
-
-/** A signed-in researcher starts a private report for one program. */
-export function ReportStarter({
-  projects,
-  existing,
-  onChanged,
-}: {
-  projects: ProjectDefinition[];
-  existing: Submission[];
-  onChanged: () => void;
-}) {
-  const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
-  const [started, setStarted] = useState<Submission | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  if (projects.length === 0)
-    return (
-      <p className="admin-status">No project runs a security program yet.</p>
-    );
-  const open = started ?? existing.find((s) => s.projectId === projectId);
-  const name = (id: string) =>
-    projects.find((project) => project.id === id)?.name ?? id;
-  const start = (event: FormEvent) => {
-    event.preventDefault();
-    setBusy(true);
-    setError(null);
-    projectApiRequest<{ submission: Submission }>(
-      "POST",
-      "security-submissions",
-      { projectId },
-    ).then(
-      (body) => {
-        setBusy(false);
-        setStarted(body.submission);
-      },
-      (caught: unknown) => {
-        setBusy(false);
-        setError(
-          `${errorMessage(caught)} Do not use a public channel; keep your notes private.`,
-        );
-      },
-    );
-  };
-  return (
-    <div className="security-form">
-      {projects.length > 1 ? (
-        <ProjectSelect
-          onChange={(value) => {
-            setProjectId(value);
-            setStarted(null);
-          }}
-          projects={projects}
-          value={projectId}
-        />
-      ) : null}
-      {open ? (
-        <SubmissionCard
-          key={open.id}
-          onReceived={onChanged}
-          projectName={name(open.projectId)}
-          submission={open}
-        />
-      ) : (
-        <form onSubmit={start}>
-          <p>
-            Slop checks that GitHub private reporting is on, opens GitHub's
-            private form, and then confirms the receipt from GitHub. Your report
-            text stays on GitHub.
-          </p>
-          <FormError message={error} />
-          <button
-            className="button primary-button"
-            disabled={busy}
-            type="submit"
-          >
-            {busy ? "Checking GitHub…" : "Start a private report"}
-          </button>
-        </form>
-      )}
-    </div>
-  );
-}
 
 function ProjectSelect({
   projects,
@@ -1202,6 +1006,518 @@ function ImportReports({
   );
 }
 
+function ClaimForm({
+  programProjects,
+  onCreated,
+}: {
+  programProjects: ProjectDefinition[];
+  onCreated: (created: SecurityCase) => void;
+}) {
+  const [projectId, setProjectId] = useState(programProjects[0]?.id ?? "");
+  const [advisory, setAdvisory] = useState("");
+  const [key, setKey] = useState(requestKey);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (programProjects.length === 0)
+    return (
+      <p className="admin-status">No project runs a security program yet.</p>
+    );
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    projectApiRequest<{ case: SecurityCase }>("POST", "security-cases", {
+      mode: "claim",
+      projectId,
+      advisory: advisory.trim(),
+      idempotencyKey: key,
+    }).then(
+      (body) => {
+        setBusy(false);
+        setAdvisory("");
+        setKey(requestKey());
+        onCreated(body.case);
+      },
+      (caught: unknown) => {
+        setBusy(false);
+        setError(errorMessage(caught));
+      },
+    );
+  };
+  return (
+    <form className="security-form" onSubmit={submit}>
+      <ProjectSelect
+        onChange={setProjectId}
+        projects={programProjects}
+        value={projectId}
+      />
+      <label>
+        GitHub advisory ID
+        <input
+          autoComplete="off"
+          onChange={(event) => setAdvisory(event.target.value)}
+          pattern="GHSA-[2-9cfghjmpqrvwx]{4}-[2-9cfghjmpqrvwx]{4}-[2-9cfghjmpqrvwx]{4}"
+          placeholder="GHSA-xxxx-xxxx-xxxx"
+          required
+          spellCheck={false}
+          value={advisory}
+        />
+        <small className="field-hint">
+          Only the ID. Do not paste report details here.
+        </small>
+      </label>
+      <FormError message={error} />
+      <button className="button primary-button" disabled={busy} type="submit">
+        {busy ? "Linking…" : "Link my GitHub report"}
+      </button>
+    </form>
+  );
+}
+
+/**
+ * "Already reported on GitHub? Verify it": GitHub's own record proves the
+ * author and the receipt time, so no maintainer link check is needed.
+ */
+function DirectVerifyForm({
+  programProjects,
+}: {
+  programProjects: ProjectDefinition[];
+}) {
+  const [projectId, setProjectId] = useState(programProjects[0]?.id ?? "");
+  const [advisory, setAdvisory] = useState("");
+  const [key] = useState(requestKey);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (programProjects.length === 0)
+    return (
+      <p className="admin-status">No project runs a security program yet.</p>
+    );
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    projectApiRequest<{ submission: Submission; authorizeUrl: string }>(
+      "POST",
+      "security-submissions",
+      {
+        projectId,
+        advisory: advisory.trim(),
+        idempotencyKey: key,
+        origin: "direct",
+      },
+    ).then(
+      (body) => window.location.assign(body.authorizeUrl),
+      (caught: unknown) => {
+        setBusy(false);
+        setError(errorMessage(caught));
+      },
+    );
+  };
+  return (
+    <form className="security-form" onSubmit={submit}>
+      <ProjectSelect
+        onChange={setProjectId}
+        projects={programProjects}
+        value={projectId}
+      />
+      <label>
+        GitHub advisory ID
+        <input
+          autoComplete="off"
+          onChange={(event) => setAdvisory(event.target.value)}
+          pattern="GHSA-[2-9cfghjmpqrvwx]{4}-[2-9cfghjmpqrvwx]{4}-[2-9cfghjmpqrvwx]{4}"
+          placeholder="GHSA-xxxx-xxxx-xxxx"
+          required
+          spellCheck={false}
+          value={advisory}
+        />
+        <small className="field-hint">
+          Only the ID. Slop checks with GitHub that you are its author.
+        </small>
+      </label>
+      <FormError message={error} />
+      <button className="button primary-button" disabled={busy} type="submit">
+        {busy ? "Opening GitHub…" : "Authorize GitHub and verify"}
+      </button>
+    </form>
+  );
+}
+
+function submissionStatus(submission: Submission): string {
+  switch (submission.state) {
+    case "draft":
+      return submission.retryAllowed
+        ? "GitHub has no copy. You can send again."
+        : submission.origin === "direct"
+          ? "Ready to verify with GitHub."
+          : "Not sent yet.";
+    case "submitting":
+      return "Sending to GitHub privately…";
+    case "uncertain":
+      return submission.reconcileAfter &&
+        Date.parse(submission.reconcileAfter) > Date.now()
+        ? `We could not confirm GitHub received it yet. GitHub may still be saving it; check again after ${formatUtc(submission.reconcileAfter)}.`
+        : "We could not confirm GitHub received it. Check again.";
+    case "submitted":
+      return "Received by GitHub. Confirming…";
+    case "receipt-verified":
+      return `Received by GitHub at ${formatUtc(submission.githubCreatedAt)} (verified with GitHub).`;
+    case "failed":
+      return (
+        FAILURE_LABELS[submission.failureCode ?? ""] ??
+        "GitHub did not accept the report."
+      );
+    case "abandoned":
+      return "Expired after 24 hours without a send.";
+  }
+}
+
+/** One private submission and the only action its state allows. */
+function SubmissionCard({
+  submission,
+  focused,
+  onUpdated,
+  onOpenCase,
+}: {
+  submission: Submission;
+  focused: boolean;
+  onUpdated: (submission: Submission) => void;
+  onOpenCase: (caseId: string) => void;
+}) {
+  const [draft, setDraft] = useState<ReportDraft>(
+    () => loadDraft(submission.id) ?? EMPTY_DRAFT,
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [needsGrant, setNeedsGrant] = useState(false);
+  const session = useProjectSession();
+  const keepDraft = needsDraft(submission);
+  useEffect(() => {
+    if (!keepDraft) clearDraft(submission.id);
+  }, [submission.id, keepDraft]);
+  const run = (path: string, body: Record<string, unknown>) => {
+    setBusy(true);
+    setError(null);
+    projectApiRequest<{ submission: Submission }>(
+      "POST",
+      `security-submissions/${encodeURIComponent(submission.id)}/${path}`,
+      body,
+    ).then(
+      (result) => {
+        setBusy(false);
+        setNeedsGrant(false);
+        onUpdated(result.submission);
+      },
+      (caught: unknown) => {
+        setBusy(false);
+        if (
+          caught instanceof ProjectApiError &&
+          caught.code === "grant_required"
+        )
+          setNeedsGrant(true);
+        else setError(errorMessage(caught));
+      },
+    );
+  };
+  const authorize = () => {
+    setBusy(true);
+    projectApiRequest<{ authorizeUrl: string }>(
+      "POST",
+      `security-submissions/${encodeURIComponent(submission.id)}/authorize`,
+      {},
+    ).then(
+      (body) => window.location.assign(body.authorizeUrl),
+      (caught: unknown) => {
+        setBusy(false);
+        setError(errorMessage(caught));
+      },
+    );
+  };
+  const canSend =
+    submission.origin === "slop" &&
+    (submission.state === "draft" ||
+      (submission.state === "failed" &&
+        !TERMINAL_FAILURES.includes(submission.failureCode ?? "") &&
+        submission.advisory === null));
+  const expectedRevision = submission.revision;
+  return (
+    <article
+      aria-labelledby={`submission-${submission.id}`}
+      className={`admin-card security-case${focused ? " is-focused" : ""}`}
+    >
+      <h3 id={`submission-${submission.id}`}>
+        Private report · {submission.projectId}
+      </h3>
+      <p aria-live="polite" className="admin-status" role="status">
+        {submissionStatus(submission)}
+      </p>
+      {submission.advisory ? (
+        <p>
+          <ExternalLinkAnchor href={submission.advisory.url}>
+            {submission.advisory.ghsa}
+          </ExternalLinkAnchor>
+        </p>
+      ) : null}
+      {submission.state === "receipt-verified" && submission.caseId ? (
+        <button
+          className="text-button"
+          onClick={() => onOpenCase(submission.caseId as string)}
+          type="button"
+        >
+          Open the private case
+        </button>
+      ) : null}
+      {canSend ? (
+        <form
+          className="security-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveDraft(submission.id, draft);
+            run("send", { expectedRevision, report: reportBody(draft) });
+          }}
+        >
+          <IntakeNotices
+            login={
+              session.status === "signed-in"
+                ? session.session.githubLogin
+                : null
+            }
+          />
+          <ReportFields
+            draft={draft}
+            onChange={(next) => {
+              setDraft(next);
+              saveDraft(submission.id, next);
+            }}
+          />
+          <button
+            className="button primary-button"
+            disabled={busy}
+            type="submit"
+          >
+            {submission.state === "failed"
+              ? "Fix and resend"
+              : "Submit privately"}
+          </button>
+        </form>
+      ) : null}
+      {submission.origin === "direct" && submission.state === "draft" ? (
+        <button
+          className="button primary-button"
+          disabled={busy}
+          onClick={() => run("verify", { expectedRevision })}
+          type="button"
+        >
+          Verify with GitHub
+        </button>
+      ) : null}
+      {submission.state === "uncertain" || submission.state === "submitted" ? (
+        <button
+          className="button primary-button"
+          disabled={busy}
+          onClick={() => run("reconcile", { expectedRevision })}
+          type="button"
+        >
+          <RotateCcw aria-hidden="true" /> Check again
+        </button>
+      ) : null}
+      {needsGrant ? (
+        <div className="form-error" role="alert">
+          <CircleAlert aria-hidden="true" /> Authorize GitHub for this report
+          first.
+          <button
+            className="text-button"
+            disabled={busy}
+            onClick={authorize}
+            type="button"
+          >
+            Authorize GitHub to submit as you
+          </button>
+        </div>
+      ) : null}
+      <FormError message={error} />
+    </article>
+  );
+}
+
+/**
+ * The reporter's automatic private submissions. Shows nothing while the
+ * intake is off, so the manual claim path stays the only path shown.
+ */
+function SubmissionsPanel({
+  focusId,
+  grantError,
+  onAvailability,
+  onOpenCase,
+}: {
+  focusId: string | null;
+  grantError: string | null;
+  onAvailability: (available: boolean) => void;
+  onOpenCase: (caseId: string) => void;
+}) {
+  const [submissions, setSubmissions] = useState<Submission[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    projectApiRequest<{ automatic: boolean; submissions: Submission[] }>(
+      "GET",
+      "security-submissions",
+    ).then(
+      (body) => {
+        // Report text is kept only while its submission can still be sent.
+        pruneDrafts(body.submissions);
+        setSubmissions(body.submissions);
+        onAvailability(body.automatic === true);
+      },
+      (caught: unknown) => {
+        // The manual path stays available whenever the list cannot load.
+        onAvailability(false);
+        setError(errorMessage(caught));
+      },
+    );
+  }, [onAvailability]);
+  useEffect(load, [load]);
+  if (error)
+    return (
+      <div className="form-error" role="alert">
+        <CircleAlert aria-hidden="true" /> {error}
+        <button className="text-button" onClick={load} type="button">
+          <RotateCcw aria-hidden="true" /> Retry
+        </button>
+      </div>
+    );
+  const shown = (submissions ?? []).filter(
+    (entry) => entry.state !== "abandoned" || entry.id === focusId,
+  );
+  if (shown.length === 0 && !grantError) return null;
+  return (
+    <section aria-labelledby="security-submissions" className="admin-section">
+      <h2 id="security-submissions">Your private reports</h2>
+      {grantError ? (
+        <p className="form-error" role="alert">
+          <CircleAlert aria-hidden="true" />{" "}
+          {GRANT_ERRORS[grantError] ?? GRANT_ERRORS.grant_exchange_failed}
+        </p>
+      ) : null}
+      {shown.map((submission) => (
+        <SubmissionCard
+          focused={submission.id === focusId}
+          key={submission.id}
+          onOpenCase={onOpenCase}
+          onUpdated={(updated) =>
+            setSubmissions((current) =>
+              (current ?? []).map((entry) =>
+                entry.id === updated.id ? updated : entry,
+              ),
+            )
+          }
+          submission={submission}
+        />
+      ))}
+    </section>
+  );
+}
+
+function RecordForm({
+  programProjects,
+  onCreated,
+}: {
+  programProjects: ProjectDefinition[];
+  onCreated: (created: SecurityCase) => void;
+}) {
+  const [projectId, setProjectId] = useState(programProjects[0]?.id ?? "");
+  const [advisory, setAdvisory] = useState("");
+  const [reporterId, setReporterId] = useState("");
+  const [reporterLogin, setReporterLogin] = useState("");
+  const [receivedAt, setReceivedAt] = useState("");
+  const [confirmed, setConfirmed] = useState(false);
+  const [key, setKey] = useState(requestKey);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    projectApiRequest<{ case: SecurityCase }>("POST", "security-cases", {
+      mode: "record",
+      projectId,
+      advisory: advisory.trim(),
+      reporterGithubId: reporterId.trim(),
+      reporterGithubLogin: reporterLogin.trim(),
+      receivedAt: utcInput(receivedAt),
+      confirmation: confirmed,
+      idempotencyKey: key,
+    }).then(
+      (body) => {
+        setBusy(false);
+        setKey(requestKey());
+        onCreated(body.case);
+      },
+      (caught: unknown) => {
+        setBusy(false);
+        setError(errorMessage(caught));
+      },
+    );
+  };
+  return (
+    <form className="security-form" onSubmit={submit}>
+      <ProjectSelect
+        onChange={setProjectId}
+        projects={programProjects}
+        value={projectId}
+      />
+      <label>
+        GitHub advisory ID
+        <input
+          autoComplete="off"
+          onChange={(event) => setAdvisory(event.target.value)}
+          required
+          spellCheck={false}
+          value={advisory}
+        />
+      </label>
+      <label>
+        Reporter GitHub account ID
+        <input
+          inputMode="numeric"
+          onChange={(event) => setReporterId(event.target.value)}
+          required
+          value={reporterId}
+        />
+      </label>
+      <label>
+        Reporter GitHub login
+        <input
+          onChange={(event) => setReporterLogin(event.target.value)}
+          required
+          value={reporterLogin}
+        />
+      </label>
+      <label>
+        Time GitHub received the report (UTC)
+        <input
+          onChange={(event) => setReceivedAt(event.target.value)}
+          required
+          type="datetime-local"
+          value={receivedAt}
+        />
+      </label>
+      <label className="checkbox-label">
+        <input
+          checked={confirmed}
+          onChange={(event) => setConfirmed(event.target.checked)}
+          type="checkbox"
+        />
+        I checked on GitHub that this advisory exists and that this reporter
+        submitted it.
+      </label>
+      <FormError message={error} />
+      <button className="button primary-button" disabled={busy} type="submit">
+        {busy ? "Recording…" : "Record verified report"}
+      </button>
+    </form>
+  );
+}
+
 type FieldSpec =
   | {
       name: string;
@@ -1262,6 +1578,29 @@ function actionSpec(action: string, record: SecurityCase): ActionSpec | null {
   const proposal =
     record.analysis?.state === "complete" ? record.analysis : null;
   switch (action) {
+    case "verify-link":
+      return {
+        title: "Verify the GitHub report",
+        submit: "Verify report",
+        fields: [
+          {
+            name: "receivedAt",
+            label: "Time GitHub received the report (UTC)",
+            kind: "utc",
+          },
+          {
+            name: "confirmation",
+            label: `I checked on GitHub that ${record.advisory?.ghsa ?? "this advisory"} exists and that @${record.reporter?.githubLogin ?? "the reporter"} submitted it.`,
+            kind: "checkbox",
+          },
+        ],
+      };
+    case "reject-link":
+      return {
+        title: "Reject this link",
+        submit: "Reject link",
+        fields: [REASON],
+      };
     case "request-information":
       return {
         title: "Ask the reporter for information",
@@ -1793,42 +2132,6 @@ function ActionForm({
   );
 }
 
-const PAYMENT_LABELS: Record<string, string> = {
-  "not-applicable": "No approved award",
-  "awaiting-owner-commitment": "Waiting for the vault owner",
-  "needs-wallet": "Wallet required",
-  uncertain: "Submission outcome not yet confirmed",
-  ready: "Ready for payment",
-  processing: "Payment in progress",
-  submitted: "Waiting for finality",
-  held: "Payment held",
-  paid: "Paid",
-};
-
-const EVENT_LABELS: Record<string, string> = {
-  submit: "Reporter submitted privately; GitHub receipt verified",
-  "submit-direct":
-    "Reporter linked their GitHub report; GitHub receipt verified",
-  claim: "Reporter linked the GitHub report",
-  record: "Maintainer recorded the GitHub report",
-  "verify-link": "Maintainer verified the GitHub report",
-  "reject-link": "Maintainer rejected the link",
-  "assign-triager": "Triager assigned",
-  "revoke-triager": "Triager removed",
-  triage: "Triage state changed",
-  "next-action": "Next action set",
-  decide: "Technical decision recorded",
-  remediation: "Remediation state changed",
-  disclosure: "Disclosure decision recorded",
-  recognition: "Recognition choice changed",
-  appeal: "Appeal sent",
-  "decide-appeal": "Appeal decided",
-  "approve-award": "Award approved",
-  "consent-payment": "Reporter accepted chain visibility",
-  "prepare-payment": "Unsigned payment prepared",
-  "decide-related-party": "Related-party award reviewed",
-  "reserve-award": "Award reserved with raised capacity",
-};
 function awardText(record: SecurityCase): string {
   if (record.award === null || record.terms === null)
     return AWARD_LABELS[record.awardState] ?? record.awardState;
@@ -2039,7 +2342,7 @@ function CaseDetail({
         <Fact term="Receipt">
           {SUBMISSION_LABELS[record.submissionState]}
           {record.receivedAt
-            ? ` ${formatUtc(record.receivedAt)}${record.receivedAtSource === "github-advisory" ? " (verified from GitHub)" : " (maintainer-attested)"}`
+            ? ` ${formatUtc(record.receivedAt)}${record.receivedAtSource === "github-verified" ? " (verified from GitHub)" : " (maintainer-attested)"}`
             : ""}
           {record.advisory ? (
             <>
@@ -2310,6 +2613,11 @@ export function SecurityCasesPage() {
     },
     [reload],
   );
+  const created = (record: SecurityCase) => {
+    setSelected(record.id);
+    setNote("Report saved.");
+    reload();
+  };
   const programProjects = useMemo(
     () => PROJECTS.filter((project) => project.securityBounty !== undefined),
     [],
@@ -2354,6 +2662,7 @@ export function SecurityCasesPage() {
     );
     body = (
       <>
+        {note ? <p role="status">{note}</p> : null}
         <section aria-labelledby="security-cases" className="admin-section">
           <h2 id="security-cases">Your cases</h2>
           {list.value.cases.length === 0 ? (
@@ -2422,12 +2731,21 @@ export function SecurityCasesPage() {
         {maintained.size > 0 ? (
           <section aria-labelledby="security-import" className="admin-section">
             <h2 id="security-import">Reports sent on GitHub directly</h2>
-            <ImportReports
-              onImported={reload}
-              projects={programProjects.filter((project) =>
-                maintained.has(project.id),
-              )}
-            />
+            {automatic === false ? (
+              <RecordForm
+                onCreated={created}
+                programProjects={programProjects.filter((project) =>
+                  maintained.has(project.id),
+                )}
+              />
+            ) : (
+              <ImportReports
+                onImported={reload}
+                projects={programProjects.filter((project) =>
+                  maintained.has(project.id),
+                )}
+              />
+            )}
           </section>
         ) : null}
       </>
