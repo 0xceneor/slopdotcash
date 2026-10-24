@@ -417,34 +417,44 @@ export function OwnerVaultSetup({
                 reload the setup options.
               </p>
             ) : null}
-            {!bounty ? <>
-            <label>
-              Automatic monthly payment
-              <select
-                value={automatic === null ? "" : automatic ? "on" : "off"}
-                disabled={busy}
-                onChange={(e) =>
-                  setAutomatic(
-                    e.target.value === "" ? null : e.target.value === "on",
-                  )
-                }
-              >
-                <option value="">Choose a setting</option>
-                <option value="on">On</option>
-                <option value="off">Off</option>
-              </select>
-            </label>
-            <p>
-              The cap is {project.reward.monthlyCapDisplay} per month. You can
-              change this setting later.
-            </p>
-            </> : <p>Each approved bounty pays 75% to the researcher and 25% to Slop. You decide whether to award each report.</p>}
+            {!bounty ? (
+              <>
+                <label>
+                  Automatic monthly payment
+                  <select
+                    value={automatic === null ? "" : automatic ? "on" : "off"}
+                    disabled={busy}
+                    onChange={(e) =>
+                      setAutomatic(
+                        e.target.value === "" ? null : e.target.value === "on",
+                      )
+                    }
+                  >
+                    <option value="">Choose a setting</option>
+                    <option value="on">On</option>
+                    <option value="off">Off</option>
+                  </select>
+                </label>
+                <p>
+                  The cap is {project.reward.monthlyCapDisplay} per month. You
+                  can change this setting later.
+                </p>
+              </>
+            ) : (
+              <p>
+                Each approved bounty pays 75% to the researcher and 25% to Slop.
+                You decide whether to award each report.
+              </p>
+            )}
 
             <button
               className="button"
               type="button"
               disabled={
-                busy || !claim || (!bounty && automatic === null) || Boolean(saved.error)
+                busy ||
+                !claim ||
+                (!bounty && automatic === null) ||
+                Boolean(saved.error)
               }
               onClick={() => void reviewCreation()}
             >
