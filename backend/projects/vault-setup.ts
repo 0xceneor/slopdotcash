@@ -271,6 +271,7 @@ export function attachBountyVault(
         feeBasisPoints: 2500,
         withdrawalFeeBasisPoints: 200,
         feeMode: "deduct-from-gross",
+        ...program.settlement,
         deployments: [deployment],
       },
     },
