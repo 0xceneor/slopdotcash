@@ -414,7 +414,9 @@ test("an owner creates and updates directly; an admin can delist by exception @r
   const admin = await adminContext.newPage();
   const adminErrors = observe(admin);
   await signIn(admin, ADMIN_TOKEN);
-  await admin.goto("/admin", { waitUntil: "networkidle" });
+  await admin.goto(`/admin?project=${project.id}`, {
+    waitUntil: "networkidle",
+  });
   const card = admin.locator(".admin-card", {
     has: admin.getByText(project.id, { exact: true }),
   });

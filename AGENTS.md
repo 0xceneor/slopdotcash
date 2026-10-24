@@ -192,11 +192,10 @@ a project that flags alone paused; a moderator decides only after a confirmed
 malicious result. Contributor skills must not install or work on flagged
 projects.
 
-Where code in `backend/projects/` still requires admin approval, that step is
-implementation to migrate, not the target product rule. Replace it only through
-a reviewed change, and keep the GitHub repository identity and current
-write/maintain authority checks. Do not bypass deployed checks outside that
-change.
+The owner creates and updates projects through `backend/projects/`. Preserve
+permanent repository and actor IDs when checking current GitHub write/maintain
+authority. A stored application can be published by its applicant through the
+same checks; it does not need an admin decision.
 
 A paused project is registered and listed, but none of its repositories is
 collected, so nothing on them reaches the ledger or the leaderboard. It
@@ -324,9 +323,9 @@ Monthly allocations use integer base units of the project asset and largest
 remainder. Never use floats for money, assume six decimals, or let rollover
 increase a later monthly cap.
 
-A review budget is an optional additive cash line. Review events remain in the
-shared pool unchanged; a committed review line may pay them only on top of that
-treatment, with separate public arithmetic and evidence.
+New project setup uses one monthly pool. Preserve historical committed review
+budgets and their terms; do not offer a second review budget for new projects.
+Review credit follows the canonical scoring policy.
 
 Automatic monthly payment is the PRD default for every project with funds
 committed in its vault. The owner sets the monthly amount during setup, can
