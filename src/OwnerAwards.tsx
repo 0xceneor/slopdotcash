@@ -191,6 +191,12 @@ export default function OwnerAwards({
         setView({ ...view, automatic: body.automatic });
     });
 
+  // Decision D1: with the automatic default on, the cutoff fixes the
+  // allocations until the coordinator freezes them.
+  const cutoffPassed =
+    view?.automatic === true &&
+    view.cutoffAt !== null &&
+    Date.now() >= Date.parse(view.cutoffAt);
   const total = view?.proposal?.allocations.reduce(
     (sum, row) => sum + BigInt(row.grossBase),
     0n,
@@ -248,9 +254,11 @@ export default function OwnerAwards({
             Automatic monthly payment is{" "}
             <strong>{view.automatic ? "on" : "off"}</strong>.{" "}
             {view.automatic
-              ? view.cutoffAt
-                ? `Unless you finalize earlier, the current allocations are finalized at ${new Date(view.cutoffAt).toLocaleString()}.`
-                : "The automatic cutoff is not defined yet, so finalize this month yourself when it is ready."
+              ? cutoffPassed
+                ? "The cutoff has passed. The automatic process finalizes the current allocations."
+                : view.cutoffAt
+                  ? `Unless you finalize earlier, the current allocations are finalized at ${new Date(view.cutoffAt).toLocaleString()}.`
+                  : "Automatic payment starts with a later month, so finalize this month yourself when it is ready."
               : "Finalize each month yourself."}
           </p>
           <button
@@ -297,7 +305,7 @@ export default function OwnerAwards({
                           id={id}
                           inputMode="decimal"
                           spellCheck={false}
-                          disabled={busy}
+                          disabled={busy || cutoffPassed}
                           value={
                             drafts[row.githubUserId] ??
                             editableUnits(row.grossBase, decimals)
@@ -313,7 +321,9 @@ export default function OwnerAwards({
                           className="button secondary-button"
                           type="button"
                           disabled={
-                            busy || drafts[row.githubUserId] === undefined
+                            busy ||
+                            cutoffPassed ||
+                            drafts[row.githubUserId] === undefined
                           }
                           onClick={() => void save(row.githubUserId)}
                         >

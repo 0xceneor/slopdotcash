@@ -26,16 +26,19 @@ test("owner edits monthly allocations privately, finalizes them and keeps sign-i
   let sequence = 0;
   let frozen = false;
   let automatic = true;
+  // Decision D1: the 2026-11 cutoff is 72 hours after the month ends.
+  let cutoffAt = "2026-12-04T00:00:00.000Z";
+  await page.clock.setFixedTime(new Date("2026-12-02T12:00:00.000Z"));
   const allocations = [
     { githubUserId: "1", login: "first-contributor", grossBase: "1234567890" },
     { githubUserId: "2", login: "second-contributor", grossBase: "2000000000" },
   ];
   const body = () => ({
     projectId: "eliza",
-    period: "2026-09",
+    period: "2026-11",
     manifestSha256: "a".repeat(64),
     automatic,
-    cutoffAt: "2026-10-03T00:00:00.000Z",
+    cutoffAt,
     deployment: null,
     asset: {
       network: "base-sepolia",
@@ -58,7 +61,7 @@ test("owner edits monthly allocations privately, finalizes them and keeps sign-i
     run: frozen
       ? {
           trigger: "owner",
-          frozenAt: "2026-10-02T00:00:00.000Z",
+          frozenAt: "2026-12-02T00:00:00.000Z",
           snapshotSha256: "c".repeat(64),
           totalGrossBase: "3234567890",
           network: "base-sepolia",
@@ -79,7 +82,7 @@ test("owner edits monthly allocations privately, finalizes them and keeps sign-i
       : null,
   });
   await page.route(
-    "**/api/v1/payments/projects/eliza/monthly/2026-09",
+    "**/api/v1/payments/projects/eliza/monthly/2026-11",
     (route) =>
       route.fulfill({
         status,
@@ -94,7 +97,7 @@ test("owner edits monthly allocations privately, finalizes them and keeps sign-i
   );
   const changes: unknown[] = [];
   await page.route(
-    "**/api/v1/payments/projects/eliza/monthly/2026-09/allocations",
+    "**/api/v1/payments/projects/eliza/monthly/2026-11/allocations",
     (route) => {
       const change = route.request().postDataJSON();
       changes.push(change);
@@ -104,7 +107,7 @@ test("owner edits monthly allocations privately, finalizes them and keeps sign-i
     },
   );
   await page.route(
-    "**/api/v1/payments/projects/eliza/monthly/2026-09/finalize",
+    "**/api/v1/payments/projects/eliza/monthly/2026-11/finalize",
     (route) => {
       expect(route.request().postDataJSON()).toEqual({
         expectedSequence: sequence,
@@ -124,7 +127,7 @@ test("owner edits monthly allocations privately, finalizes them and keeps sign-i
   await expect(
     page.getByRole("heading", { name: "Monthly awards", exact: true }),
   ).toBeVisible();
-  await page.getByLabel("Contribution month").fill("2026-09");
+  await page.getByLabel("Contribution month").fill("2026-11");
   const load = page.getByRole("button", { name: "Load awards", exact: true });
   await load.focus();
   await page.keyboard.press("Enter");
@@ -150,6 +153,17 @@ test("owner edits monthly allocations privately, finalizes them and keeps sign-i
   expect(changes).toEqual([
     { githubUserId: "2", grossBase: "1500000000", expectedSequence: 0 },
   ]);
+  // After the cutoff, with the automatic default on, allocations are fixed.
+  cutoffAt = "2026-12-01T00:00:00.000Z";
+  await load.click();
+  await expect(awards).toContainText("The cutoff has passed");
+  await expect(
+    awards.getByLabel("Award for second-contributor"),
+  ).toBeDisabled();
+  cutoffAt = "2026-12-04T00:00:00.000Z";
+  await load.click();
+  await expect(awards).toContainText("Unless you finalize earlier");
+  await expect(awards.getByLabel("Award for second-contributor")).toBeEnabled();
   await awards
     .getByRole("button", { name: "Turn off automatic payment" })
     .click();

@@ -1,15 +1,16 @@
 name: Propose monthly allocations
 
-# GitHub runs schedules only on the default branch (development), so the
-# scheduled run dispatches this workflow on main and development. Each
+# GitHub runs a schedule only on the default branch, so the scheduled run
+# dispatches this workflow on main and development. Each
 # dispatched run freezes the complete ledger of the last closed UTC month and
 # writes the proposed private allocation of every funded monthly project to
 # its branch's D1 database: main to slop-private, development to
 # slop-staging. Nothing is committed, published or opened as a pull request.
 # Owners change amounts privately; the payments coordinator finalizes the
-# current allocations at the owner-decided cutoff (backend/payments/README.md).
-# Writing a month's proposal is idempotent, so the run repeats on the first
-# three days of the month to recover from a failed run.
+# current allocations at the owner-decided cutoff, 72 hours after the month
+# ends (decision D1, backend/payments/README.md). Writing a month's proposal is
+# idempotent, so the run repeats on the first three days of the month, before
+# that cutoff, to recover from a failed run.
 on:
   schedule:
     - cron: "11 0 1-3 * *"

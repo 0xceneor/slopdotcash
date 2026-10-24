@@ -148,7 +148,9 @@ export function notificationTitle(n: Notification): string {
     case "reinstatement_review":
       return `A reinstatement request for ${n.subject} needs your independent review.`;
     case "payout_exception":
-      return `A payout from ${n.subject} is held and needs attention.`;
+      return n.eventKey.startsWith("monthly-underfunded:")
+        ? `The ${n.subject} monthly awards are underfunded.`
+        : `A payout from ${n.subject} is held and needs attention.`;
     case "security_case":
       return `Private security case ${n.subject} changed.`;
   }
@@ -165,8 +167,11 @@ export function notificationAction(n: Notification): string {
     case "reinstatement_requested":
     case "project_reinstated":
     case "reinstatement_denied":
-    case "payout_exception":
       return "Open project";
+    case "payout_exception":
+      return n.eventKey.startsWith("monthly-underfunded:")
+        ? "Open monthly awards"
+        : "Open project";
     case "reinstatement_review":
       return "Open admin";
     case "security_case":
