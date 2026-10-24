@@ -162,15 +162,15 @@ test.describe.configure({ mode: "serial" });
 
 /**
  * Every viewport shares one D1, so each uses its own repositories and project
- * ids instead of assuming the registry it finds is empty. The organization
- * repository cannot prove control; the user repository belongs to e2e-owner.
+ * ids instead of assuming the registry it finds is empty. Both repositories
+ * belong to e2e-owner; the unrelated applicant cannot prove control.
  */
 function fixtureProjects() {
   const suffix = test.info().project.name.replace(/-chromium$/u, "");
   const words = suffix.replaceAll("-", " ");
   return {
     queued: {
-      repository: `example/open-registry-${suffix}`,
+      repository: `e2e-owner/open-registry-${suffix}`,
       id: `open-registry-${suffix}`,
       name: `Open Registry ${words}`,
     },
@@ -228,11 +228,12 @@ async function draftApplication(
   await page.getByRole("button", { name: "Next: Contribution rules" }).click();
   await page.getByLabel("Project name").fill(project.name);
   await page.getByRole("button", { name: "Next: Rewards" }).click();
-  await page.getByLabel("Monthly pool target, USD").fill("1000");
+  await page.getByLabel("Pay contributors a monthly amount").check();
+  await page.getByLabel("Monthly amount (USDC)").fill("1000");
   await page.getByRole("button", { name: "Next: Review" }).click();
   await expect(
     page.getByRole("article", { name: "Listing preview" }),
-  ).toContainText("$1,000 · unfunded pledge");
+  ).toContainText("1,000 USDC");
 }
 
 async function listedProject(page: Page, id: string) {
@@ -296,7 +297,7 @@ test("a signed-out visitor must sign in to look up GitHub and submit @registry",
     `/api/v1/project-github/repositories/${project.repository}`,
   );
   expect(lookup.status()).toBe(401);
-  const forged = await page.request.post("/api/v1/project-applications", {
+  const forged = await page.request.post("/api/v1/projects", {
     data: {},
     headers: { origin: "https://attacker.example" },
   });
@@ -305,54 +306,45 @@ test("a signed-out visitor must sign in to look up GitHub and submit @registry",
   expect(errors).toEqual([]);
 });
 
-test("an unproven application waits for an admin, who lists it paused @registry", async ({
+test("unproven access cannot create a project; its owner lists it paused @registry", async ({
   browser,
 }) => {
   const project = fixtureProjects().queued;
-  const applicantContext = await browser.newContext(walkthroughOptions());
-  const applicant = await applicantContext.newPage();
-  const applicantErrors = observe(applicant);
-  await signIn(applicant, APPLICANT_TOKEN);
-  await draftApplication(applicant, project);
-  await applicant.getByRole("button", { name: /Submit for review/u }).click();
-  const receipt = applicant.getByRole("status").filter({
-    hasText: "Application submitted",
-  });
-  await expect(receipt).toContainText(
-    "GitHub check: Not proven: @e2e-applicant is not a public member of example",
+  const context = await browser.newContext(walkthroughOptions());
+  const page = await context.newPage();
+  await signIn(page, APPLICANT_TOKEN);
+  await draftApplication(page, project);
+  const rejected = page.waitForResponse(
+    (response) =>
+      response.url().endsWith("/api/v1/projects") &&
+      response.request().method() === "POST",
   );
-  await expect(receipt).toContainText("submitted by @e2e-applicant");
-  await expectAccessible(applicant);
-  expect(await listedProject(applicant, project.id)).toBeUndefined();
-
-  // An applicant is not an admin, so the review queue stays closed.
-  await applicant.goto("/admin", { waitUntil: "networkidle" });
-  await expect(applicant.getByRole("alert")).toContainText(
+  await page
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  // No installation reader runs in this lane. Public facts do not prove
+  // this account's access, so unavailable authority must not list the project.
+  expect((await rejected).status()).toBe(503);
+  expect(await listedProject(page, project.id)).toBeUndefined();
+  await expect(page.getByRole("alert")).toContainText("Slopbot");
+  await page.goto("/admin", { waitUntil: "networkidle" });
+  await expect(page.getByRole("alert")).toContainText(
     "@e2e-applicant is not a Slop admin",
   );
-  expect(applicantErrors).toEqual([]);
-  await applicantContext.close();
+  await context.close();
 
-  const adminContext = await browser.newContext(walkthroughOptions());
-  const admin = await adminContext.newPage();
-  const adminErrors = observe(admin);
-  await signIn(admin, ADMIN_TOKEN);
-  await admin.goto("/admin", { waitUntil: "networkidle" });
-  const card = admin.locator(".admin-card", { hasText: project.repository });
-  await expect(card).toContainText(project.name);
-  await expect(card).toContainText("$1,000 pledged");
-  // No notify Worker runs locally, so the stored application says so.
-  await expect(card).toContainText("Failed to send");
-  await expectAccessible(admin);
-  await card.getByRole("button", { name: "Approve as paused project" }).click();
-  const listedCard = admin.locator(".admin-card", {
-    has: admin.getByText(project.id, { exact: true }),
-  });
-  await expect(listedCard).toContainText("paused");
-  await expect(listedCard).toContainText("1 · updated");
-  await expect(listedCard).toContainText("Generated from revision 1");
-
-  expect(await listedProject(admin, project.id)).toMatchObject({
+  const ownerContext = await browser.newContext(walkthroughOptions());
+  const owner = await ownerContext.newPage();
+  const errors = observe(owner);
+  await signIn(owner, OWNER_TOKEN);
+  await draftApplication(owner, project);
+  await owner
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(owner.locator(".project-setup-status")).toContainText(
+    "Setup status",
+  );
+  expect(await listedProject(owner, project.id)).toMatchObject({
     status: "paused",
     listingTier: "community",
     skill: {
@@ -365,18 +357,19 @@ test("an unproven application waits for an admin, who lists it paused @registry"
     },
   });
   const history = await (
-    await admin.request.get("/api/v1/project-revisions")
+    await owner.request.get("/api/v1/project-revisions")
   ).json();
   expect(
     history.revisions.filter(
       (entry: { projectId: string }) => entry.projectId === project.id,
     ),
   ).toMatchObject([{ revision: 1 }]);
-  expect(adminErrors).toEqual([]);
-  await adminContext.close();
+  await expectAccessible(owner);
+  expect(errors).toEqual([]);
+  await ownerContext.close();
 });
 
-test("an owner's proof and generated skills reach the admin, who lists and delists it @registry", async ({
+test("an owner creates and revises a project before an admin delists it @registry", async ({
   browser,
 }) => {
   const project = fixtureProjects().owned;
@@ -385,60 +378,52 @@ test("an owner's proof and generated skills reach the admin, who lists and delis
   const ownerErrors = observe(owner);
   await signIn(owner, OWNER_TOKEN);
   await draftApplication(owner, project);
-  await owner.getByRole("button", { name: /Submit for review/u }).click();
-  const receipt = owner.getByRole("status").filter({
-    hasText: "Application submitted",
-  });
-  await expect(receipt).toContainText(
-    `GitHub check: Proven: @e2e-owner owns ${project.repository}`,
+  await owner
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(owner.locator(".project-setup-status")).toContainText(
+    "Setup status",
   );
   await expectAccessible(owner);
-  // Every application waits for an admin, even a proven owner's (PRJ-02).
-  expect(await listedProject(owner, project.id)).toBeUndefined();
-  const mine = await (
-    await owner.request.get("/api/v1/project-applications/mine", {
-      headers: { cookie: `__Host-slop_points=${OWNER_TOKEN}` },
-    })
-  ).json();
-  const listed = mine.applications.find(
-    (entry: { projectId: string }) => entry.projectId === project.id,
-  ).manifest;
+  expect(await listedProject(owner, project.id)).toMatchObject({
+    status: "paused",
+  });
+  const listed = (
+    await (await owner.request.get(`/api/v1/projects/${project.id}`)).json()
+  ).project;
 
   // Facts that GitHub does not confirm are refused, never listed.
   // The request API keeps the expected 422 out of the page console.
-  const forgedResponse = await owner.request.post(
-    "/api/v1/project-applications",
-    {
-      // The request client sends no Secure cookie over local http.
-      headers: {
-        origin: new URL(owner.url()).origin,
-        cookie: `__Host-slop_points=${OWNER_TOKEN}`,
-      },
-      data: {
-        manifest: {
-          ...listed,
-          id: `${project.id}-forged`,
-          slug: `${project.id}-forged`,
-          skill: {
-            ...listed.skill,
-            publicPath: `/projects/${project.id}-forged/skill.md`,
+  const forgedResponse = await owner.request.post("/api/v1/projects", {
+    // The request client sends no Secure cookie over local http.
+    headers: {
+      origin: new URL(owner.url()).origin,
+      cookie: `__Host-slop_points=${OWNER_TOKEN}`,
+    },
+    data: {
+      manifest: {
+        ...listed,
+        id: `${project.id}-forged`,
+        slug: `${project.id}-forged`,
+        skill: {
+          ...listed.skill,
+          publicPath: `/projects/${project.id}-forged/skill.md`,
+        },
+        repositories: [
+          {
+            ...listed.repositories[0],
+            id: `${project.repository}-forged`,
+            displayName: `${project.repository}-forged`,
+            githubUrl: `https://github.com/${project.repository}-forged`,
           },
-          repositories: [
-            {
-              ...listed.repositories[0],
-              id: `${project.repository}-forged`,
-              displayName: `${project.repository}-forged`,
-              githubUrl: `https://github.com/${project.repository}-forged`,
-            },
-          ],
-          links: {
-            ...listed.links,
-            repository: `https://github.com/${project.repository}-forged`,
-          },
+        ],
+        links: {
+          ...listed.links,
+          repository: `https://github.com/${project.repository}-forged`,
         },
       },
     },
-  );
+  });
   const forged = {
     status: forgedResponse.status(),
     body: await forgedResponse.json(),
@@ -455,47 +440,11 @@ test("an owner's proof and generated skills reach the admin, who lists and delis
   const adminErrors = observe(admin);
   await signIn(admin, ADMIN_TOKEN);
   await admin.goto("/admin", { waitUntil: "networkidle" });
-  const application = admin.locator(".admin-card", {
-    hasText: project.repository,
-  });
-  await expect(application).toContainText(
-    `Proven: @e2e-owner owns ${project.repository}`,
-  );
-  // The admin reviews the exact generated skill before approving it.
-  await application
-    .getByText("Preview generated contributor skill", { exact: true })
-    .click();
-  await expect(
-    application.getByLabel("Contributor skill SKILL.md"),
-  ).toHaveValue(new RegExp(`# Contribute to ${project.repository}`, "u"));
-  await expect(
-    application.getByLabel("Contributor skill project.json"),
-  ).toHaveValue(/"approvedScope": "Merged pull requests/u);
-  await expectAccessible(admin);
-  const applicationElementId = await application.getAttribute("id");
-  await application
-    .getByRole("button", { name: "Approve as paused project" })
-    .click();
   const card = admin.locator(".admin-card", {
     has: admin.getByText(project.id, { exact: true }),
   });
   await expect(card).toContainText("Generated from revision 1");
-  if (!applicationElementId) throw new Error("Application link is missing");
-  await admin.goto(
-    `/admin/applications/${applicationElementId.replace(/^application-/, "")}`,
-    { waitUntil: "networkidle" },
-  );
-  await expect(
-    admin.getByRole("radio", { name: "Approved", exact: true }),
-  ).toBeChecked();
-  await expect(admin.locator(`#${applicationElementId}`)).toBeVisible();
-  await admin.screenshot({
-    path: test.info().outputPath("approved-application-deep-link.png"),
-    fullPage: true,
-  });
-  await admin.goto(`/admin?project=${project.id}`, {
-    waitUntil: "networkidle",
-  });
+  await expectAccessible(admin);
 
   // The installer's trust root: the exact approved bytes and their digest.
   const revision = await (
@@ -509,7 +458,7 @@ test("an owner's proof and generated skills reach the admin, who lists and delis
     skill: { sourcePath: "skills/project-contributor-template" },
   });
 
-  // A maintainer submits a real update; approval publishes one paused revision.
+  // The verified maintainer publishes a presentation-only revision directly.
   const returningContext = await browser.newContext(walkthroughOptions());
   const returningOwner = await returningContext.newPage();
   await signIn(returningOwner, OWNER_TOKEN);
@@ -520,35 +469,21 @@ test("an owner's proof and generated skills reach the admin, who lists and delis
     .getByRole("textbox", { name: "Short description", exact: true })
     .fill("Useful accepted outcomes with a clearer project scope");
   await returningOwner
-    .getByLabel("Reason for the change", { exact: true })
+    .getByLabel("Revision note", { exact: true })
     .fill("Clarify the project scope for contributors");
-  await returningOwner
-    .getByRole("button", { name: "Submit changes for review" })
-    .click();
+  await returningOwner.getByRole("button", { name: "Publish changes" }).click();
   await expect(returningOwner.getByRole("status")).toContainText(
-    "Changes submitted for admin review",
+    "Published revision 2",
   );
-  expect(
-    (await (await admin.request.get(`/api/v1/projects/${project.id}`)).json())
-      .revision,
-  ).toBe(1);
   await admin.reload({ waitUntil: "networkidle" });
-  const update = admin.locator(".admin-card", {
-    has: admin.getByRole("button", { name: "Approve paused revision" }),
-    hasText: project.repository,
-  });
-  await expect(update).toContainText(
-    "Clarify the project scope for contributors",
-  );
-  await update.getByRole("button", { name: "Approve paused revision" }).click();
   await expect(card).toContainText("2 · updated");
   expect(
     (await (await admin.request.get(`/api/v1/projects/${project.id}`)).json())
       .project.headline,
   ).toBe("Useful accepted outcomes with a clearer project scope");
   await returningOwner.goto("/projects/new", { waitUntil: "networkidle" });
-  await returningOwner.getByText("Your applications", { exact: true }).click();
-  await expect(returningOwner.locator("main")).toContainText("approved");
+  await returningOwner.getByText("Your projects", { exact: true }).click();
+  await expect(returningOwner.locator("main")).toContainText(project.name);
   await expectAccessible(returningOwner);
   await returningContext.close();
 
@@ -574,7 +509,7 @@ test("an admin cannot activate or publish skills without canonical scan closure 
   const errors = observe(admin);
   await signIn(admin, ADMIN_TOKEN);
 
-  // The approved paused project already shows on the public site from D1.
+  // The self-service paused project already shows on the public site from D1.
   await admin.goto(`/projects/${project.id}`, { waitUntil: "networkidle" });
   await expect(admin.locator("h1")).toHaveText(project.name);
   // The reward asset is the Base stablecoin the application chose.
@@ -587,10 +522,13 @@ test("an admin cannot activate or publish skills without canonical scan closure 
   expect(await unscanned.text()).toContain("security vetting");
   expect(
     await (await request.get(`/api/v1/projects/${project.id}`)).json(),
-  ).toMatchObject({ skillsPublished: false, vetting: { state: "unscanned" } });
+  ).toMatchObject({ skillsPublished: false, vetting: { state: "queued" } });
 
   // An incomplete scan quarantines the revision, and it cannot activate.
-  let vettingCard = await queueScan(admin, project.id, "Admission scan");
+  await admin.goto("/admin", { waitUntil: "networkidle" });
+  let vettingCard = admin.getByRole("article", {
+    name: `Security vetting for ${project.id}`,
+  });
   await expect(vettingCard.locator(".admin-badge")).toHaveText("Queued");
   await postVettingResult(
     request,
@@ -734,14 +672,14 @@ test("an admin cannot activate or publish skills without canonical scan closure 
   await adminContext.close();
 });
 
-test("the applicant's inbox lists each decision and revision once and keeps the read state @registry", async ({
+test("the owner's inbox lists each external revision once and keeps the read state @registry", async ({
   browser,
 }) => {
   const project = fixtureProjects().queued;
   const context = await browser.newContext(walkthroughOptions());
   const page = await context.newPage();
   const errors = observe(page);
-  await signIn(page, APPLICANT_TOKEN);
+  await signIn(page, OWNER_TOKEN);
   await page.goto("/inbox", { waitUntil: "networkidle" });
   await expect(page.locator("h1")).toHaveText("Inbox");
   const approved = page.locator(".inbox-item", {
@@ -750,11 +688,10 @@ test("the applicant's inbox lists each decision and revision once and keeps the 
   const revised = page.locator(".inbox-item", {
     hasText: `The ${project.id} project manifest changed.`,
   });
-  await expect(approved).toHaveCount(1);
+  await expect(approved).toHaveCount(0);
   await expect(revised).toHaveCount(1);
-  await expect(approved.locator(".inbox-state")).toHaveText("Unread");
   await expect(
-    approved.getByRole("link", { name: "Open project" }),
+    revised.getByRole("link", { name: "Open project" }),
   ).toHaveAttribute("href", `/projects/${project.id}`);
   await expect(revised).toContainText("Clarify paused project description");
   await expectAccessible(page);
@@ -766,10 +703,9 @@ test("the applicant's inbox lists each decision and revision once and keeps the 
   // The read state is stored, not kept only in the page.
   await page.reload({ waitUntil: "networkidle" });
   await expect(revised.locator(".inbox-state")).toHaveText("Read");
-  await expect(approved.locator(".inbox-state")).toHaveText("Unread");
 
   // The request client sends no Secure cookie over local http.
-  const cookie = `__Host-slop_points=${APPLICANT_TOKEN}`;
+  const cookie = `__Host-slop_points=${OWNER_TOKEN}`;
   const inbox = await (
     await page.request.get("/api/v1/notifications", { headers: { cookie } })
   ).json();
@@ -778,7 +714,6 @@ test("the applicant's inbox lists each decision and revision once and keeps the 
     (entry: { subject: string }) => entry.subject === project.id,
   );
   expect(mine.map((entry: { kind: string }) => entry.kind).sort()).toEqual([
-    "application_approved",
     "project_revision",
   ]);
   const keys = inbox.notifications.map(
@@ -882,7 +817,7 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   await expect(ban).toContainText("No revision needed");
   await ban.getByRole("button", { name: "Confirm: Ban project" }).click();
   await expect(panel()).toContainText("Banned");
-  // ELG-02: the applicant who listed the project files the appeal. The
+  // ELG-02: the verified steward who created the project files the appeal. The
   // request client sends no Secure cookie over local http.
   const appeal = {
     projectId: project.id,
@@ -894,17 +829,17 @@ test("moderators restrict a project and refuse reinstatement without canonical s
     cookie: `__Host-slop_points=${token}`,
   });
   const stranger = await admin.request.post("/api/v1/project-appeals", {
-    headers: appealHeaders(OWNER_TOKEN),
+    headers: appealHeaders(APPLICANT_TOKEN),
     data: appeal,
   });
   expect(stranger.status()).toBe(403);
   const appealed = await admin.request.post("/api/v1/project-appeals", {
-    headers: appealHeaders(APPLICANT_TOKEN),
+    headers: appealHeaders(OWNER_TOKEN),
     data: appeal,
   });
   expect(appealed.status()).toBe(200);
   expect((await appealed.json()).record).toMatchObject({
-    actorRole: "project-applicant",
+    actorRole: "project-steward",
     decisionSource: "owner-request",
     appealAfter: "requested",
   });
@@ -1085,12 +1020,12 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   expect(moderatorErrors).toEqual([]);
   await moderatorContext.close();
 
-  // The applicant who listed the project sees each enforcement record once,
+  // The owner who created the project sees each enforcement record once,
   // without the private reason or evidence reference.
   const applicantContext = await browser.newContext(walkthroughOptions());
   const applicant = await applicantContext.newPage();
   const applicantErrors = observe(applicant);
-  await signIn(applicant, APPLICANT_TOKEN);
+  await signIn(applicant, OWNER_TOKEN);
   await applicant.goto("/inbox", { waitUntil: "networkidle" });
   for (const title of [
     `The ${project.id} project is quarantined.`,
