@@ -6,9 +6,15 @@ import {
   type NotificationsDependencies,
 } from "../../backend/notifications/handler";
 import {
+  FAKE_OAUTH,
+  fakeGithub,
+} from "../../backend/security/github-advisories.fake";
+import {
   handleSecurityApi,
   type SecurityD1Database,
 } from "../../backend/security/handler";
+import { githubIntakeOAuth } from "../../backend/security/intake-grant";
+import { deterministicAnalyzer } from "../../backend/security/report-analysis";
 import { sqliteD1 } from "../../tests/sqlite-d1";
 import {
   destinationDigest,
@@ -56,11 +62,29 @@ async function setup(beforeMailMigration = false) {
     .run(manifest, "a".repeat(64), at, at);
   let current = new Date(at);
   let sequence = 0;
-  const call = async (actor: typeof owner, path: string, body: object) =>
+  const github = fakeGithub({ now: () => current });
+  github.install("example/bounty");
+  const cookies = new Map([
+    ["__Host-slop_points", "fixture-session-" + "x".repeat(40)],
+  ]);
+  const absorb = (response: Response) => {
+    for (const cookie of response.headers.getSetCookie()) {
+      const pair = cookie.split(";")[0];
+      cookies.set(
+        pair.slice(0, pair.indexOf("=")),
+        pair.slice(pair.indexOf("=") + 1),
+      );
+    }
+  };
+  const call = async (actor: typeof owner, path: string, body?: object) =>
     handleSecurityApi(
       new Request(origin + "/api/v1/" + path, {
-        method: "POST",
-        headers: { origin, "content-type": "application/json" },
+        method: body === undefined ? "GET" : "POST",
+        headers: {
+          origin,
+          "content-type": "application/json",
+          cookie: [...cookies].map(([k, v]) => `${k}=${v}`).join("; "),
+        },
         body: JSON.stringify(body),
       }),
       {
@@ -72,42 +96,61 @@ async function setup(beforeMailMigration = false) {
           fetch: async () => Response.json({ enabled: true }),
           apiOrigin: "https://github.invalid",
         },
-        // GitHub holds the reporter's private report; Slop verifies it.
-        advisories: {
-          privateReports: async () => ({
-            state: "ok" as const,
-            reports: [
-              {
-                ghsa: "GHSA-7c8f-9g2h-3j4m",
-                createdAt: at,
-                state: "triage",
-                author: reporter,
-                summary: "Synthetic report",
-                description: "Synthetic report body",
-                severity: null,
-                cweIds: [],
-                packages: [],
-              },
-            ],
+        intake: {
+          mode: "on",
+          grantKey: Buffer.alloc(32, 7).toString("base64url"),
+          clientId: "Iv1.intakeclient",
+          authorizeOrigin: FAKE_OAUTH,
+          oauth: githubIntakeOAuth({
+            fetch: github.fetch,
+            oauthOrigin: FAKE_OAUTH,
+            clientId: "Iv1.intakeclient",
+            clientSecret: "fixture-secret",
           }),
-          privateReport: async () => ({ state: "unavailable" as const }),
+          advisories: github.client,
+          installation: github.installation,
+          analyzer: deterministicAnalyzer,
         },
       },
     );
+  const advisory = github.seed(
+    "example/bounty",
+    { id: Number(reporter.githubId), login: reporter.githubLogin },
+    { summary: "Synthetic report", description: "Synthetic report body" },
+    at,
+  );
   const started = await call(reporter, "security-submissions", {
     projectId: "bounty",
+    origin: "direct",
+    advisory: advisory.ghsa_id,
+    idempotencyKey: "notify-intake-key-0001",
   });
   expect(started?.status).toBe(201);
   if (started === null) throw new Error("Submission route missing");
-  const submissionId = (
-    (await started.json()) as { submission: { id: string } }
-  ).submission.id;
+  absorb(started);
+  const draft = (await started.json()) as {
+    submission: { id: string };
+    authorizeUrl: string;
+  };
+  const state = new URL(draft.authorizeUrl).searchParams.get("state");
+  const code = github.issueCode({
+    id: Number(reporter.githubId),
+    login: reporter.githubLogin,
+  });
+  const authorized = await call(
+    reporter,
+    `security-submissions/authorize/callback?code=${code}&state=${state}`,
+  );
+  expect(authorized?.status).toBe(303);
+  if (authorized === null) throw new Error("Authorization callback missing");
+  absorb(authorized);
   const checked = await call(
     reporter,
-    `security-submissions/${submissionId}/check`,
-    {},
+    `security-submissions/${draft.submission.id}/verify`,
+    { expectedRevision: 1 },
   );
-  if (checked === null) throw new Error("Submission check route missing");
+  expect(checked?.status).toBe(200);
+  if (checked === null) throw new Error("Submission verify route missing");
   const caseId = ((await checked.json()) as { submission: { caseId: string } })
     .submission.caseId;
   const recipients = Object.fromEntries(

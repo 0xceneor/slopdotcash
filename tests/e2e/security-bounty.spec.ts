@@ -586,29 +586,10 @@ test("private security bounty programs keep cases restricted from intake to awar
 
   let caseA = "";
   let caseB = "";
-  await test.step("a signed-in reporter reports privately; Slop confirms GitHub's receipt", async () => {
+  await test.step("GitHub reports are imported with verified author and receipt", async () => {
     const context = await browser.newContext();
     const page = await context.newPage();
     const errors = observe(page);
-    await signIn(page, TOKENS["reporter-a"]);
-    await page.goto(`/projects/${a.id}/security`, { waitUntil: "networkidle" });
-    await page.getByRole("button", { name: "Start a private report" }).click();
-    await expect(
-      page.getByRole("link", { name: "Open GitHub's private report form" }),
-    ).toHaveAttribute(
-      "href",
-      `https://github.com/${a.repository}/security/advisories/new`,
-    );
-    const confirm = page.getByRole("button", {
-      name: "I submitted it — confirm receipt",
-    });
-    // Nothing on GitHub yet: a complete answer, so the reporter may submit.
-    await confirm.click();
-    await expect(
-      page.getByText(/GitHub has no private report from your account/u),
-    ).toBeVisible();
-    await expectAccessible(page);
-    await page.screenshot({ path: test.info().outputPath("intake-start.png") });
     await githubReport(
       request,
       a.repository,
@@ -616,12 +597,21 @@ test("private security bounty programs keep cases restricted from intake to awar
       "reporter-a",
       afterOpen,
     );
-    // Repeated checks within ten seconds reuse the last answer.
-    await page.waitForTimeout(10_500);
-    await confirm.click();
-    await expect(page.getByRole("status")).toContainText(
-      "GitHub received your",
+    await signIn(page, TOKENS.security);
+    await page.goto("/security", { waitUntil: "networkidle" });
+    const section = page.locator('section[aria-labelledby="security-import"]');
+    const project = section.getByRole("combobox");
+    if (await project.count()) await project.selectOption(a.id);
+    await section
+      .getByRole("button", { name: "Bring in GitHub private reports" })
+      .click();
+    await expect(section.getByRole("status")).toHaveText(
+      "1 new private report recorded.",
     );
+    await expectAccessible(page);
+    await page.screenshot({
+      path: test.info().outputPath("intake-import.png"),
+    });
     expect(errors).toEqual([]);
     await context.close();
     const mine = await api(
@@ -630,35 +620,19 @@ test("private security bounty programs keep cases restricted from intake to awar
       "security-cases",
       TOKENS["reporter-a"],
     );
-    caseA = (mine.body.cases as { id: string; projectId: string }[]).find(
-      (entry) => entry.projectId === a.id,
-    )?.id as string;
+    caseA = (
+      mine.body.cases as { id: string; advisory?: { ghsa: string } }[]
+    ).find((entry) => entry.advisory?.ghsa === "GHSA-2c3f-4g5h-6j7m")
+      ?.id as string;
     expect(caseA).toMatch(/^sc_/u);
-    // Reporter B starts through the API and is confirmed the same way.
-    const started = await api(
+    caseB = await importCase(
       request,
-      "POST",
-      "security-submissions",
-      TOKENS["reporter-b"],
-      { projectId: a.id },
-    );
-    expect(started.status, JSON.stringify(started.body)).toBe(201);
-    await githubReport(
-      request,
+      a.id,
       a.repository,
       "GHSA-3c4f-5g6h-7j8m",
       "reporter-b",
       afterOpen,
     );
-    const checked = await api(
-      request,
-      "POST",
-      `security-submissions/${(started.body.submission as { id: string }).id}/check`,
-      TOKENS["reporter-b"],
-      {},
-    );
-    expect(checked.body.submission).toMatchObject({ state: "received" });
-    caseB = (checked.body.submission as { caseId: string }).caseId;
     for (const [role, id] of [
       ["reporter-a", caseA],
       ["reporter-b", caseB],
@@ -672,7 +646,7 @@ test("private security bounty programs keep cases restricted from intake to awar
       expect(read.body.case).toMatchObject({
         submissionState: "verified",
         receivedAt: afterOpen,
-        receivedAtSource: "github-advisory",
+        receivedAtSource: "github-verified",
         policyRevision: opened.revision,
         terms: {
           grossMinor: "1000000",
@@ -710,7 +684,7 @@ test("private security bounty programs keep cases restricted from intake to awar
     );
     expect(read.body.case).toMatchObject({
       submissionState: "verified",
-      receivedAtSource: "github-advisory",
+      receivedAtSource: "github-verified",
       reporter: { githubLogin: "e2e-reporter-b" },
     });
     // Importing again records nothing twice.
@@ -936,7 +910,7 @@ test("private security bounty programs keep cases restricted from intake to awar
     expect(funded.status, JSON.stringify(funded.body)).toBe(200);
     expect(funded.body.case).toMatchObject({
       awardState: "approved",
-      receivedAtSource: "github-advisory",
+      receivedAtSource: "github-verified",
       reservation: { grossMinor: "400000" },
     });
     const history = await api(
@@ -1847,7 +1821,7 @@ test("automatic private intake files as the reporter and verifies receipt @regis
       receivedAtSource: "github-verified",
       view: "reporter",
       // The automatic analysis never shows in fields the reporter sees.
-      nextAction: "Triage new private report",
+      nextStep: "Waiting for the project owner's response.",
     });
     // The maintainer's case needs no link check, only triage.
     const maintainer = await api(
@@ -1859,7 +1833,8 @@ test("automatic private intake files as the reporter and verifies receipt @regis
     expect(maintainer.body.case).toMatchObject({
       submissionState: "verified",
       receivedAtSource: "github-verified",
-      nextAction: "Triage new private report",
+      nextStep:
+        "Review the report and the AI summary, then decide or ask the reporter for information.",
     });
     expect(
       (maintainer.body.case as { allowedActions: string[] }).allowedActions,

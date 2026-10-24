@@ -49,14 +49,15 @@ no-store` and `noindex`. Errors never log case data.
 ## Automatic private intake
 
 PRD section 8 ("Private reporting is automatic"), SEC-07, SEC-10, SEC-17.
-Every `security-submissions` route returns 404 unless
+Submission writes return 404 unless
 `SLOP_PRIVATE_INTAKE_MODE=on` and all intake App secrets are set
 (`GITHUB_INTAKE_APP_CLIENT_ID`, `GITHUB_INTAKE_APP_CLIENT_SECRET`,
 `GITHUB_INTAKE_APP_ID`, `GITHUB_INTAKE_APP_PRIVATE_KEY`,
 `SLOP_INTAKE_GRANT_KEY`). The dedicated intake GitHub App (repository
 security advisories read and write, metadata read, no webhooks) still needs
 owner approval in the PRD and a maintainer installation on each program
-repository. Until then intake stays off and the manual flow below applies.
+repository. Until then intake stays off. Reporters can use GitHub's private
+form, and a security maintainer can import GitHub-verified receipts.
 
 - Authorization: a per-submission PKCE consent for the intake App. The
   callback checks that `/user` is the account that began the consent and
@@ -90,7 +91,7 @@ repository. Until then intake stays off and the manual flow below applies.
   (Slop origin) and have a past `created_at`. A direct report must also be
   a private vulnerability report (GitHub's `submission` object) in
   `triage`, `draft` or `published`; anything else fails as
-  `not-private-report` and uses the manual claim path. The verified case,
+  `not-private-report`; no case is created. The verified case,
   its `submit` or `submit-direct` event (the reporter's own action; the
   detail records `verifiedBy: "github"`), routing fields, the access log and the inbox rows commit with the
   submission transition. The receipt time is GitHub's `created_at`
@@ -99,14 +100,25 @@ repository. Until then intake stays off and the manual flow below applies.
   advisory fields GitHub returned.
 - Direct reports: "Already reported on GitHub? Verify it" runs the same
   receipt check on a GHSA the reporter filed themselves; GitHub's original
-  `created_at` is kept. Without the App installed, the manual claim and
-  verify-link path below remains the fallback.
+  `created_at` is kept. A security maintainer can also import direct reports
+  with the configured read-only advisory reader. An unreadable or incomplete
+  GitHub listing is unavailable, never evidence that no report exists.
 - Analysis: `report-analysis.ts` recommends only, from GitHub's structured
   severity and CVSS fields. Its result is in the restricted event detail
   only; the case's owner, neutral next action and due time (the published
   acknowledgement target) do not depend on it, because the reporter sees
-  them. It never sets severity, receipt, award or disclosure. No model sees
-  report content; none is approved.
+  them. It never sets severity, receipt, award or disclosure. The separate
+  configured private analysis described below runs after receipt commits;
+  without an approved provider configuration it stays unavailable.
+
+## Import direct GitHub reports
+
+`POST /api/v1/security-cases` with `mode: "import"` is limited to security
+maintainers of the program. `SECURITY_ADVISORY_READ_TOKEN` supplies read-only
+advisory access. Each private report binds GitHub's author and creation time;
+Slop preserves the terms in force at that time. Existing verified cases are
+not duplicated. Older unconfirmed links are checked against the complete
+GitHub listing. Missing reader configuration leaves import unavailable.
 
 ## Automatic private analysis
 
@@ -156,8 +168,9 @@ for a new decision.
 ## States
 
 Migration `0026_private_security_cases.sql` keeps independent receipt,
-remediation, award, payment and disclosure states; `0061` adds the receipt
-source, the chosen award amount, submissions and analyses. Triggers keep the
+remediation, award, payment and disclosure states. Migration `0059` adds
+the receipt source and reporter-authorized submissions; `0061` adds the
+chosen award amount and private analyses. Triggers keep the
 frozen receipt, events, reservations, membership history, submissions and
 finished analyses append-only.
 
