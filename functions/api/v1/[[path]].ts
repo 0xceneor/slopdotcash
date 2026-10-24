@@ -774,6 +774,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
   );
   if (emailPreferencesResponse !== null) return emailPreferencesResponse;
   const notificationsResponse = await handleNotificationsApi(context.request, {
+    moderatorGithubIds: githubIdSet(context.env.PROJECT_MODERATOR_GITHUB_IDS),
     db: context.env.SLOP_DB,
     sessionActor: (request) =>
       sessionGithubActor(

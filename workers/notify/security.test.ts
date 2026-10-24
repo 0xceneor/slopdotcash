@@ -27,13 +27,17 @@ const origin = "https://slop.test";
 async function setup(beforeMailMigration = false) {
   const { db: source, sqlite } = sqliteD1(
     readdirSync("migrations")
-      // The pre-pilot database lacks 0030 and 0063, which rebuilds the inbox
-      // table around 0030's trigger; the rollout test applies both later.
+      // Defer mail activation and the later inbox rebuilds; the rollout
+      // test applies them in order after creating pre-pilot history.
       .filter(
         (p) =>
           p.endsWith(".sql") &&
           (!beforeMailMigration ||
-            !(p.startsWith("0030") || p.startsWith("0063"))),
+            !(
+              p.startsWith("0030") ||
+              p.startsWith("0063") ||
+              p.startsWith("0065")
+            )),
       )
       .sort(),
   );
@@ -388,6 +392,10 @@ test("pre-pilot inbox history is not mailed and does not expose a dead acknowled
       "migrations/0063_account_closure_notification_events.sql",
       "utf8",
     ),
+  );
+  expect(h.rows()).toEqual([]);
+  h.sqlite.exec(
+    readFileSync("migrations/0065_slopbot_appeal_notifications.sql", "utf8"),
   );
   expect(h.rows()).toEqual([]);
   const response = await handleNotificationsApi(

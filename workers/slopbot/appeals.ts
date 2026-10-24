@@ -2,8 +2,10 @@
 // triages each appeal first and drafts a resolution. A moderator decides an
 // escalated appeal. Identifiers, the draft and the outcome only; no source,
 // prompt or model text is stored here.
+
+import { notifySlopbotAppeal } from "../../backend/notifications/events";
 import { type Category, CLOSE_CONFIDENCE, type Job } from "./contracts";
-import type { D1Database } from "./persistence";
+import type { D1Database, D1TransactionalDatabase } from "./persistence";
 
 export const APPEAL_RESOLUTION_DAYS = 7;
 export const ESCALATION_DEBIT_THIRDS = 24;
@@ -142,18 +144,22 @@ export async function recordDraft(
 
 /** Escalates once; the first reason is kept. */
 export async function escalateAppeal(
-  db: D1Database,
+  db: D1TransactionalDatabase,
   appealKey: string,
   reason: string,
+  moderators: ReadonlySet<string>,
 ): Promise<boolean> {
-  const result = await db
-    .prepare(
-      `UPDATE slopbot_appeals SET escalated_at = ?, escalation = ?
+  const at = new Date().toISOString();
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE slopbot_appeals SET escalated_at = ?, escalation = ?
        WHERE appeal_key = ? AND escalated_at IS NULL AND resolved_at IS NULL`,
-    )
-    .bind(new Date().toISOString(), reason.slice(0, 200), appealKey)
-    .run();
-  return (result.meta?.changes ?? 0) === 1;
+      )
+      .bind(at, reason.slice(0, 200), appealKey),
+    ...[...moderators].map((id) => notifySlopbotAppeal(db, appealKey, id, at)),
+  ]);
+  return (results[0].meta?.changes ?? 0) === 1;
 }
 
 /** Resolves once. Returns false when another path resolved it first. */

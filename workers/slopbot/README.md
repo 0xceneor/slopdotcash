@@ -1142,3 +1142,14 @@ reconciliation use the separately verified text to derive deletion lines and
 a deletion-only comparison. Commit totals must still reconcile. Existing blob
 and tree limits apply; exceeding them leaves an explicit evidence gap. This
 proof supplies review material, not a value tier or payment approval.
+
+### Escalated appeal notices
+
+Escalation writes one moderator Inbox notice in the same D1 transaction as
+its source decision. Repeated webhooks and scheduler runs keep the same event
+key. The appellant never receives a moderator notice for their own appeal.
+Inbox reads and the same-site GitHub redirect recheck the configured moderator
+identity. A resolved appeal remains in history with no decision requested.
+Optional activity email uses the existing consent-bound queue; dispatch
+suppresses a resolved appeal or a recipient who is no longer a moderator.
+Private security appeals keep their separate notice and acknowledgment path.

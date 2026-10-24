@@ -24,6 +24,7 @@ export interface NotificationsDependencies {
   };
   sessionActor(request: Request): Promise<{ githubId: string } | null>;
   now(): Date;
+  moderatorGithubIds?: ReadonlySet<string>;
 }
 
 export const NOTIFICATIONS_PATH = "/api/v1/notifications";
@@ -60,7 +61,13 @@ export async function handleNotificationsApi(
   deps: NotificationsDependencies,
 ): Promise<Response | null> {
   const url = new URL(request.url);
-  if (url.pathname !== NOTIFICATIONS_PATH && url.pathname !== READ_PATH)
+  const appealPrefix = `${NOTIFICATIONS_PATH}/appeals/`;
+  const appealRoute = url.pathname.startsWith(appealPrefix);
+  if (
+    !appealRoute &&
+    url.pathname !== NOTIFICATIONS_PATH &&
+    url.pathname !== READ_PATH
+  )
     return null;
   const write = url.pathname === READ_PATH;
   if (request.method !== (write ? "POST" : "GET"))
@@ -76,6 +83,43 @@ export async function handleNotificationsApi(
   try {
     const actor = await deps.sessionActor(request);
     if (actor === null) return json(401, { error: "not_signed_in" });
+    const moderator = deps.moderatorGithubIds?.has(actor.githubId) === true;
+    if (appealRoute) {
+      if (!moderator) return json(403, { error: "not_authorized" });
+      let key: string;
+      try {
+        key = decodeURIComponent(url.pathname.slice(appealPrefix.length));
+      } catch {
+        return json(400, { error: "invalid_request" });
+      }
+      const rows = await deps.db
+        .prepare(`SELECT a.job_json FROM slopbot_appeals a
+        JOIN notifications n ON n.event_key = 'slopbot-' || a.appeal_key
+        WHERE a.appeal_key = ? AND a.escalated_at IS NOT NULL
+          AND n.recipient_github_id = ? AND n.kind = 'slopbot_appeal_review'
+          AND a.appellant_github_id <> ?`)
+        .bind(key, actor.githubId, actor.githubId)
+        .all<{ job_json: string }>();
+      if (!rows.results[0]) return json(404, { error: "not_found" });
+      const job = JSON.parse(rows.results[0].job_json);
+      if (
+        typeof job.owner !== "string" ||
+        typeof job.repo !== "string" ||
+        !/^[A-Za-z0-9_.-]+$/u.test(job.owner) ||
+        !/^[A-Za-z0-9_.-]+$/u.test(job.repo) ||
+        !Number.isSafeInteger(job.number) ||
+        job.number < 1 ||
+        !["pull_request", "issue"].includes(job.itemKind)
+      )
+        throw new Error("Invalid stored appeal target");
+      return new Response(null, {
+        status: 302,
+        headers: {
+          ...headers,
+          location: `https://github.com/${job.owner}/${job.repo}/${job.itemKind === "pull_request" ? "pull" : "issues"}/${job.number}`,
+        },
+      });
+    }
     if (!write) {
       let cursor: [string, string] | null = null;
       const rawCursor = url.searchParams.get("cursor");
@@ -89,7 +133,11 @@ export async function handleNotificationsApi(
       const [rows, unread] = await Promise.all([
         deps.db
           .prepare(
-            `SELECT event_key, kind, subject, detail, action_path, source_at,
+            `SELECT event_key,
+                    CASE WHEN kind = 'slopbot_appeal_review' AND EXISTS (
+                      SELECT 1 FROM slopbot_appeals a WHERE 'slopbot-' || a.appeal_key = notifications.event_key AND a.resolved_at IS NOT NULL
+                    ) THEN 'slopbot_appeal_resolved' ELSE kind END AS kind,
+                    subject, detail, action_path, source_at,
                     created_at, read_at,
                     (SELECT id FROM security_notification_outbox s
                       WHERE s.event_key = notifications.event_key AND s.recipient_github_id = notifications.recipient_github_id
@@ -98,11 +146,13 @@ export async function handleNotificationsApi(
                       WHERE s.event_key = notifications.event_key AND s.recipient_github_id = notifications.recipient_github_id
                         AND s.template_version = 'security-inbox-v1') AS acknowledged_at
                FROM notifications WHERE recipient_github_id = ?
+                AND (kind <> 'slopbot_appeal_review' OR ? = 1)
                 ${cursor ? "AND (source_at < ? OR (source_at = ? AND event_key > ?))" : ""}
               ORDER BY source_at DESC, event_key LIMIT ?`,
           )
           .bind(
             actor.githubId,
+            moderator ? 1 : 0,
             ...(cursor ? [cursor[0], cursor[0], cursor[1]] : []),
             LIST_LIMIT + 1,
           )
@@ -110,9 +160,10 @@ export async function handleNotificationsApi(
         deps.db
           .prepare(
             `SELECT COUNT(*) AS count FROM notifications
-              WHERE recipient_github_id = ? AND read_at IS NULL`,
+              WHERE recipient_github_id = ? AND read_at IS NULL
+                AND (kind <> 'slopbot_appeal_review' OR ? = 1)`,
           )
-          .bind(actor.githubId)
+          .bind(actor.githubId, moderator ? 1 : 0)
           .all<{ count: number }>(),
       ]);
       const page = rows.results.slice(0, LIST_LIMIT);

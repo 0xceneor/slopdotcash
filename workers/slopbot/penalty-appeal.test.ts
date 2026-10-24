@@ -6,8 +6,14 @@
 import { afterEach, expect, setSystemTime, test } from "bun:test";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { readdirSync } from "node:fs";
+import { handleNotificationsApi } from "../../backend/notifications/handler";
+import { parseNotificationsResponse } from "../../src/lib/notifications";
 import { findProject } from "../../src/lib/projects.mjs";
 import { sqliteD1 } from "../../tests/sqlite-d1";
+import {
+  activityMailEligibility,
+  dispatchActivityMail,
+} from "../notify/activity";
 import type { Category, Job } from "./contracts";
 import worker from "./index";
 import type { D1TransactionalDatabase } from "./persistence";
@@ -28,6 +34,9 @@ const MODERATOR = 50;
 const BODY = "Buy cheap followers today at our shop.";
 
 type Run = {
+  inbox(actor: number, moderators?: string, path?: string): Promise<Response>;
+  enableMail(): Promise<void>;
+  mail(moderators?: string): Promise<string[]>;
   review: () => Promise<string>;
   deliver: (job: Job) => Promise<string>;
   tick: () => Promise<Job[]>;
@@ -303,8 +312,66 @@ async function closedItem(cb: (run: Run) => Promise<void>) {
       log(line);
     }
   };
+  const mailConfig = {
+    inboxUrl: "https://slop.cash/inbox",
+    recipients: {
+      [String(MODERATOR)]: {
+        email: "moderator@example.com",
+        verifiedAt: at,
+        evidenceReference: "local-fixture",
+      },
+    },
+  };
   try {
     await cb({
+      inbox: async (
+        actor,
+        moderators = String(MODERATOR),
+        path = "/api/v1/notifications",
+      ) => {
+        const response = await handleNotificationsApi(
+          new Request(`https://slop.cash${path}`),
+          {
+            db: db as never,
+            sessionActor: async () => ({ githubId: String(actor) }),
+            now: () => new Date(),
+            moderatorGithubIds: new Set(moderators.split(",")),
+          },
+        );
+        if (!response) throw new Error("Inbox route missing");
+        return response;
+      },
+      enableMail: async () => {
+        const eligibility = await activityMailEligibility(
+          mailConfig,
+          String(MODERATOR),
+          new Date(),
+        );
+        if (!eligibility.available)
+          throw new Error("Fixture email is unavailable");
+        sqlite.run(
+          "INSERT INTO notification_email_preferences(github_id,enabled,destination_version,updated_at) VALUES (?,1,?,?)",
+          [
+            String(MODERATOR),
+            eligibility.destinationVersion,
+            new Date().toISOString(),
+          ],
+        );
+      },
+      mail: async (moderators = String(MODERATOR)) => {
+        const sent: string[] = [];
+        await dispatchActivityMail({
+          db,
+          config: mailConfig,
+          fromAddress: "notices@slop.cash",
+          moderatorGithubIds: new Set(moderators.split(",")),
+          now: () => new Date(),
+          sendEmail: async (_from, to) => {
+            sent.push(to);
+          },
+        });
+        return sent;
+      },
       closeByMaintainer: () => {
         state = "closed";
       },
@@ -629,3 +696,61 @@ test("a retry after an uncertain reopen completes the recorded appeal decision",
     expect(run.comments.at(-1)).toContain("**Appeal upheld**");
   });
 });
+
+// Exercise the actual worker event, Inbox route and existing email dispatcher.
+// Local transport acceptance is distinct from provider delivery.
+for (const state of ["active", "revoked", "resolved", "opted-out"] as const) {
+  test(`an escalated appeal reaches the moderator Inbox and respects ${state} delivery state`, async () => {
+    await closedItem(async (run) => {
+      await run.enableMail();
+      run.model("scam", 0.97);
+      expect(await run.review()).toBe("closed (scam)");
+      await run.deliver(run.job("appeal", { senderId: AUTHOR }));
+      await run.deliver(run.job("appeal", { senderId: AUTHOR }));
+      const first = parseNotificationsResponse(
+        await (await run.inbox(MODERATOR)).json(),
+      );
+      expect(first.notifications).toHaveLength(1);
+      expect(first.notifications[0].kind).toBe("slopbot_appeal_review");
+      const path = first.notifications[0].actionPath;
+      const target = await run.inbox(MODERATOR, String(MODERATOR), path);
+      expect(target.status).toBe(302);
+      expect(target.headers.get("location")).toMatch(
+        /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/5$/u,
+      );
+      expect((await run.inbox(OUTSIDER, String(MODERATOR), path)).status).toBe(
+        403,
+      );
+      expect(
+        parseNotificationsResponse(await (await run.inbox(OUTSIDER)).json())
+          .notifications,
+      ).toHaveLength(0);
+      if (state === "revoked") {
+        expect(
+          parseNotificationsResponse(
+            await (await run.inbox(MODERATOR, "")).json(),
+          ),
+        ).toMatchObject({ notifications: [], unread: 0 });
+        expect((await run.inbox(MODERATOR, "", path)).status).toBe(403);
+      }
+      if (state === "resolved") {
+        await run.deliver(
+          run.job("appeal_command", { command: "deny", senderId: MODERATOR }),
+        );
+        expect(
+          parseNotificationsResponse(await (await run.inbox(MODERATOR)).json())
+            .notifications[0].kind,
+        ).toBe("slopbot_appeal_resolved");
+      }
+      if (state === "opted-out")
+        run.sql("UPDATE notification_email_preferences SET enabled=0");
+      expect(
+        await run.mail(state === "revoked" ? "" : String(MODERATOR)),
+      ).toEqual(state === "active" ? ["moderator@example.com"] : []);
+      expect(await run.mail()).toEqual([]);
+      expect(
+        run.sql("SELECT COUNT(*) AS total FROM activity_notification_outbox"),
+      ).toEqual([{ total: 1 }]);
+    });
+  });
+}

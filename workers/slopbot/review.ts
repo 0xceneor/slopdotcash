@@ -84,7 +84,7 @@ import { route } from "./routing";
 
 export type ReviewEnv = ModelEnv &
   QualityTrust & {
-    SLOPBOT_DB: store.D1Database;
+    SLOPBOT_DB: store.D1TransactionalDatabase;
     SLOPBOT_APP_ID: string;
     SLOPBOT_APP_PRIVATE_KEY: string;
     SLOPBOT_APP_USER_ID: string;
@@ -1678,7 +1678,13 @@ async function triageAppeal(
     moderatorReview: penalty?.moderator_review === 1,
     draftConfidence: current.draft_confidence,
   });
-  if (reason !== null) await escalateAppeal(db, appeal.appeal_key, reason);
+  if (reason !== null)
+    await escalateAppeal(
+      db,
+      appeal.appeal_key,
+      reason,
+      moderatorIds(env.PROJECT_MODERATOR_GITHUB_IDS),
+    );
   current = (await appealByKey(db, appeal.appeal_key)) ?? current;
   await publishAppealState(env, job, session, current, "draft");
   return current.escalation === null
@@ -1936,6 +1942,7 @@ export async function applyAppealCommand(
         db,
         appeal.appeal_key,
         `the ${by} rejected the draft`,
+        moderatorIds(env.PROJECT_MODERATOR_GITHUB_IDS),
       );
       const current = await appealByKey(db, appeal.appeal_key);
       if (current === null) throw new Error("Appeal is missing");
@@ -2047,6 +2054,7 @@ export async function escalateDueAppeal(
       db,
       job.appealKey,
       `the appeal is unresolved ${APPEAL_RESOLUTION_DAYS} days after it opened`,
+      moderatorIds(env.PROJECT_MODERATOR_GITHUB_IDS),
     );
   }
   const current = await appealByKey(db, job.appealKey);

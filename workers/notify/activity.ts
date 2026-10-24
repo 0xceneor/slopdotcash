@@ -14,6 +14,7 @@ export type ActivityMailConfig = {
 };
 export type ActivityMailDependencies = {
   db: SecurityD1Database;
+  moderatorGithubIds?: ReadonlySet<string>;
   config: ActivityMailConfig;
   fromAddress: string;
   now(): Date;
@@ -85,6 +86,7 @@ export async function activityMailEligibility(
 
 type Delivery = {
   id: string;
+  event_key: string;
   recipient_github_id: string;
   essential: number;
   destination_version: string | null;
@@ -117,6 +119,23 @@ export async function dispatchActivityMail(
       .bind(at, at, row.id, at)
       .run();
     if (claim.meta?.changes !== 1) continue;
+    if (row.event_key.startsWith("slopbot-appeal:")) {
+      const appeal = await deps.db
+        .prepare(
+          "SELECT appellant_github_id, resolved_at FROM slopbot_appeals WHERE appeal_key = ? AND escalated_at IS NOT NULL",
+        )
+        .bind(row.event_key.slice("slopbot-".length))
+        .first<{ appellant_github_id: string; resolved_at: string | null }>();
+      if (
+        !deps.moderatorGithubIds?.has(row.recipient_github_id) ||
+        !appeal ||
+        appeal.resolved_at !== null ||
+        appeal.appellant_github_id === row.recipient_github_id
+      ) {
+        await recordDelivery(deps, row, "suppressed", null, "activity");
+        continue;
+      }
+    }
     const destination = await activityMailEligibility(
       deps.config,
       row.recipient_github_id,

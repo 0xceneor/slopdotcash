@@ -26,6 +26,8 @@ export const NOTIFICATION_KINDS = [
   "payout_exception",
   "security_case",
   "security_report_received",
+  "slopbot_appeal_review",
+  "slopbot_appeal_resolved",
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
@@ -167,6 +169,10 @@ export function notificationTitle(n: Notification): string {
       return n.eventKey.startsWith("monthly-underfunded:")
         ? `The ${n.subject} monthly awards are underfunded.`
         : `A payout from ${n.subject} is held and needs attention.`;
+    case "slopbot_appeal_review":
+      return "A contribution appeal needs your decision on GitHub.";
+    case "slopbot_appeal_resolved":
+      return "The contribution appeal was resolved. No decision is needed.";
     case "security_case":
       return `Private security case ${n.subject} changed.`;
     case "security_report_received":
@@ -197,6 +203,9 @@ export function notificationAction(n: Notification): string {
     case "project_scan_failed":
     case "project_installation_lost":
       return "Open project";
+    case "slopbot_appeal_review":
+    case "slopbot_appeal_resolved":
+      return "Open appeal on GitHub";
     case "security_case":
     case "security_report_received":
       return "Open security cases";

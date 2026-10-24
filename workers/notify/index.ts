@@ -60,6 +60,12 @@ function activityDependencies(env: Env): ActivityMailDependencies | null {
   return {
     db: env.SLOP_DB,
     config,
+    moderatorGithubIds: new Set(
+      (env.PROJECT_MODERATOR_GITHUB_IDS ?? "")
+        .split(",")
+        .map((id) => id.trim())
+        .filter((id) => /^[1-9][0-9]{0,19}$/u.test(id)),
+    ),
     fromAddress: env.NOTIFY_FROM_ADDRESS,
     now: () => new Date(),
     sendEmail: (from, to, mime) =>

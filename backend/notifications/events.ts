@@ -479,3 +479,27 @@ export function notifySecurityReportReceived<S>(
     )
     .bind(caseId);
 }
+
+/** Escalation and its moderator notices commit together. Replays use one key. */
+export function notifySlopbotAppeal<S>(
+  db: Preparer<S>,
+  appealKey: string,
+  recipient: string,
+  at: string,
+): S {
+  return db
+    .prepare(`${INSERT}
+    SELECT 'slopbot-' || a.appeal_key, ?2, 'slopbot_appeal_review',
+           a.item_node_id, NULL, ?4, a.escalated_at, ?3
+      FROM slopbot_appeals a
+     WHERE a.appeal_key = ?1 AND a.escalated_at IS NOT NULL
+       AND a.resolved_at IS NULL AND a.appellant_github_id <> ?2
+       AND ${GITHUB_ID("?2")}
+    ${ONCE}`)
+    .bind(
+      appealKey,
+      recipient,
+      at,
+      `/api/v1/notifications/appeals/${encodeURIComponent(appealKey)}`,
+    );
+}

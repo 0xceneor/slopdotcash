@@ -407,6 +407,9 @@ test("shadow qualification requires real review rows, elapsed time, the same ver
     ),
   );
   const db = {
+    async batch() {
+      throw new Error("Unexpected transaction in shadow qualification");
+    },
     prepare(query: string) {
       let args: unknown[] = [];
       const statement = {
