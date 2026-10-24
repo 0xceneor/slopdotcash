@@ -1003,7 +1003,7 @@ test("owner creates, recovers, registers and funds a Solana vault through the AP
       setup.getByRole("button", { name: "Review vault creation", exact: true }),
     ).toBeDisabled();
     await setup
-      .getByLabel("Automatic monthly payment", { exact: true })
+      .getByRole("combobox", { name: "Automatic monthly payment", exact: true })
       .selectOption(automatic ? "on" : "off");
     await setup.getByRole("button", { name: "Review vault creation" }).click();
     await expect(
