@@ -413,8 +413,8 @@ async function refreshQueue(
     if (!flagPaused && project.manifest.listingTier === "retired") continue;
     let reason: string | null = null;
     if (flagPaused) {
-      // One fresh scan per live pin after the pause: a new commit gets a new
-      // scan, but an incomplete result is not retried on unchanged content.
+      // A fresh scan must cover the live pin and every active flag. New
+      // evidence queues another scan even when the source did not change.
       const since = restriction.since ?? "";
       let live: VettingPin;
       try {
@@ -424,15 +424,17 @@ async function refreshQueue(
         continue;
       }
       const assessments = await deps.vetting.projectAssessments(project.id);
-      if (
-        !assessments.some(
-          (assessment) =>
+      const fresh = await Promise.all(
+        assessments.map(
+          async (assessment) =>
             assessment.revision === project.revision &&
             assessment.requestedAt >= since &&
             assessment.commitSha === live.commitSha &&
-            assessment.templateSha256 === live.templateSha256,
-        )
-      )
+            assessment.templateSha256 === live.templateSha256 &&
+            (await deps.vetting.assessmentCoversActiveFlags(assessment.id)),
+        ),
+      );
+      if (!fresh.some(Boolean))
         reason =
           "Automatic fresh scan after two contributor flags paused the project";
     } else {
