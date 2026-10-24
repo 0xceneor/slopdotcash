@@ -1492,7 +1492,7 @@ test("two contributors flag through the form, pause the project and notify moder
   const suffix = test.info().project.name.replace(/-chromium$/u, "");
   const project = {
     id: `flag-flow-${suffix}`,
-    repository: `example/flag-flow-${suffix}`,
+    repository: `e2e-applicant/flag-flow-${suffix}`,
     name: `Flag flow ${suffix}`,
   };
   const firstContext = await browser.newContext(walkthroughOptions());
@@ -1514,6 +1514,8 @@ test("two contributors flag through the form, pause the project and notify moder
     .poll(async () => (await listedProject(admin, project.id))?.status)
     .toBe("paused");
 
+  // The creator cannot flag their own project. Use a separate member.
+  await signIn(first, MODERATOR_TOKEN);
   const firstEvidence =
     "Synthetic fixture: install.js requests credentials before starting.";
   await first.goto(`/projects/${project.id}`, { waitUntil: "networkidle" });
