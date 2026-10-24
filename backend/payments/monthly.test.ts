@@ -203,8 +203,9 @@ const owner = () =>
   });
 const actor = { githubId: OWNER, githubLogin: "owner" };
 function vault(free: string, observedAt = afterCutoff.toISOString()) {
-  const selected = project.manifest.escrow?.deployments[0];
-  if (!selected) throw new Error("Missing fixture deployment");
+  const escrow = project.manifest.escrow;
+  const selected = escrow?.deployments[0];
+  if (!escrow || !selected) throw new Error("Missing fixture deployment");
   sqlite
     .prepare(
       "INSERT INTO vault_snapshots(project_id,network,chain,vault,asset_address,asset_decimals,total_deposited,total_paid,total_payout_fees,total_gross_withdrawn,total_withdrawal_fees,total_service_fees,free_balance,reserved_principal,reserved_fees,accrued_fees,reserved,block_number,block_time,observed_at) VALUES(?,?,?,?,?,6,'5000','0','0','0','0','0',?,'0','0','0','0','100',?,?) ON CONFLICT(project_id,network,vault) DO UPDATE SET free_balance=excluded.free_balance,observed_at=excluded.observed_at,block_number=CAST(CAST(block_number AS INTEGER)+1 AS TEXT)",
@@ -212,7 +213,7 @@ function vault(free: string, observedAt = afterCutoff.toISOString()) {
     .run(
       project.id,
       selected.network,
-      project.manifest.escrow?.chain,
+      escrow.chain,
       selected.vault,
       selected.asset,
       free,
