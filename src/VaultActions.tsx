@@ -77,12 +77,14 @@ export function VaultActions({
   deployment,
   connectedWallet,
   payoutPolicy = "ordinary",
+  canDeposit = true,
   onFinalized,
 }: {
   projectId: string;
   deployment: EscrowDeployment;
   connectedWallet?: VaultConnection;
   payoutPolicy?: PayoutPolicy;
+  canDeposit?: boolean;
   onFinalized: () => void;
 }) {
   const solana = ESCROW_NETWORKS[deployment.network].family === "solana";
@@ -103,7 +105,7 @@ export function VaultActions({
     connectedWallet ?? null,
   );
   const [operation, setOperation] = useState<VaultOperation>(
-    saved.pending?.operation ?? "deposit",
+    saved.pending?.operation ?? (canDeposit ? "deposit" : "withdraw"),
   );
   const [amount, setAmount] = useState(saved.pending?.amount ?? "");
   const [review, setReview] = useState<Review | null>(null);
@@ -139,6 +141,14 @@ export function VaultActions({
         throw new Error(
           `Reconnect the wallet that submitted this action: ${pending.wallet}`,
         );
+      if (
+        !canDeposit &&
+        !pending &&
+        !sameWallet(connection.address, deployment.owner)
+      )
+        throw new Error(
+          "Connect the vault owner's wallet to withdraw free funds.",
+        );
       setWallet(connection);
       setReview(null);
       // Only the owner may withdraw; any other wallet can only deposit.
@@ -148,6 +158,10 @@ export function VaultActions({
   const inspect = () =>
     run(async () => {
       if (!wallet) throw new Error("Choose a wallet first.");
+      if (!canDeposit && operation === "deposit")
+        throw new Error(
+          "New deposits are disabled while this project is restricted.",
+        );
       setReview(
         solana
           ? await reviewSolanaVaultAction(
@@ -169,6 +183,10 @@ export function VaultActions({
   const send = (step: Step) =>
     run(async () => {
       if (!wallet || !review || pending || storageError) return;
+      if (!canDeposit && operation === "deposit")
+        throw new Error(
+          "New deposits are disabled while this project is restricted.",
+        );
       const current = solana
         ? await reviewSolanaVaultAction(
             projectId,
@@ -437,7 +455,9 @@ export function VaultActions({
             <fieldset className="vault-operation">
               <legend>Action</legend>
               {(isOwner
-                ? (["deposit", "withdraw"] as const)
+                ? canDeposit
+                  ? (["deposit", "withdraw"] as const)
+                  : (["withdraw"] as const)
                 : (["deposit"] as const)
               ).map((choice) => (
                 <label key={choice}>

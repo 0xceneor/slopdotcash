@@ -116,6 +116,7 @@ export function OwnerBountyVault({
                 projectId={project.id}
                 deployment={deployment}
                 payoutPolicy="security-bounty"
+                canDeposit={state.canSetup}
                 connectedWallet={wallet ?? undefined}
                 onFinalized={() => setReload((value) => value + 1)}
               />
