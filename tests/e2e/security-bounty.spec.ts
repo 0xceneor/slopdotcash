@@ -1679,6 +1679,265 @@ test("private settlement requires visibility consent and produces an unsigned re
 });
 
 /**
+ * PRD section 10, Continuity: an approved award and its reservation stay
+ * owed through role loss, a project transfer, a quarantine, and a ban. Case
+ * roles come from the current revision on each request, so a replaced
+ * approver loses access at once, the new owner gets it, and the reporter
+ * keeps the case. A restricted project takes no new reports.
+ */
+test("private bounty obligations continue through role loss, project transfer, and a ban @registry", async ({
+  request,
+}) => {
+  test.setTimeout(180_000);
+  const suffix = test.info().project.name.replace(/-chromium$/u, "");
+  const id = `bounty-move-${suffix}`;
+  const repository = `e2e-security/${id}`;
+  const deployment = bountyDeployment(repository);
+  const terms = bountyTerms(repository);
+  // Bounty-only needs no monthly pool: the application pledges $0.
+  await listProject(request, TOKENS.security, repository, id, {
+    reward: {
+      ...(applicationManifest(id, repository).reward as object),
+      monthlyCapMinor: "0",
+      monthlyCapDisplay: "$0",
+    },
+    securityBounty: terms,
+  });
+  expect(
+    (
+      await revise(request, id, (m) => ({
+        ...m,
+        securityBounty: openTerms(terms),
+      }))
+    ).status,
+  ).toBe(200);
+  const caseId = await importCase(
+    request,
+    id,
+    repository,
+    "GHSA-4567-89cf-ghjm",
+    "reporter-a",
+    new Date().toISOString(),
+  );
+  await vaultSnapshot(id, deployment, "10000000000");
+  expect(
+    (await act(request, "security", caseId, "decide", decision())).status,
+  ).toBe(200);
+  expect((await award(request, "security", caseId, "10000000000")).status).toBe(
+    200,
+  );
+  expect(
+    (
+      await act(
+        request,
+        "security",
+        caseId,
+        "assign-triager",
+        account("triager"),
+      )
+    ).status,
+  ).toBe(200);
+
+  const read = (role: Role) =>
+    api(request, "GET", `security-cases/${caseId}`, TOKENS[role]);
+  const listed = async (role: Role) =>
+    (
+      (await api(request, "GET", "security-cases", TOKENS[role])).body
+        .cases as { id: string }[]
+    ).some((entry) => entry.id === caseId);
+  // The obligation: the decision, the award, and its reservation.
+  const obligation = (body: Record<string, unknown>) => {
+    const view = body.case as Record<string, unknown>;
+    return {
+      receiptState: view.receiptState,
+      awardState: view.awardState,
+      award: view.award,
+      reservation: view.reservation,
+    };
+  };
+  const owed = obligation((await read("security")).body);
+  expect(owed).toMatchObject({
+    receiptState: "confirmed",
+    awardState: "approved",
+    award: {
+      grossMinor: "10000000000",
+      researcherMinor: "7500000000",
+      slopMinor: "2500000000",
+    },
+    reservation: {
+      rootCauseKey: "vault-share-rounding",
+      grossMinor: "10000000000",
+    },
+  });
+  // The reporter sees the award; reservations stay internal.
+  const reporterOwed = { ...owed, reservation: undefined };
+  const reporterStart = (await read("reporter-a")).body.case as Record<
+    string,
+    unknown
+  >;
+  expect(obligation({ case: reporterStart })).toEqual(reporterOwed);
+  expect(reporterStart).toMatchObject({
+    awardState: "approved",
+    allowedActions: expect.arrayContaining(["consent-payment"]),
+  });
+  expect((await read("finance")).status).toBe(200);
+  expect((await read("security-b")).status).toBe(404);
+
+  await test.step("a revision that replaces the approvers moves access at once", async () => {
+    const before = (await read("security")).body.case as { revision: number };
+    const transferred = await revise(request, id, (m) => ({
+      ...m,
+      securityBounty: {
+        ...(m.securityBounty as Record<string, unknown>),
+        approvers: {
+          technical: [account("security-b")],
+          financial: [account("security-b")],
+          dispute: [account("dispute")],
+        },
+      },
+    }));
+    expect(transferred.status, JSON.stringify(transferred.body)).toBe(200);
+    // The replaced technical and financial approvers lose every route.
+    for (const role of ["security", "finance"] as const) {
+      expect((await read(role)).status, `${role} reads`).toBe(404);
+      expect(await listed(role), `${role} lists`).toBe(false);
+    }
+    expect(
+      (
+        await act(
+          request,
+          "security",
+          caseId,
+          "remediation",
+          {
+            remediationState: "resolved",
+            evidenceReference: "private exact-head test log 2",
+          },
+          before.revision,
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await act(
+          request,
+          "finance",
+          caseId,
+          "prepare-payment",
+          { network: deployment.network, confirmation: true },
+          before.revision,
+        )
+      ).status,
+    ).toBe(404);
+    // The new owner holds both roles and the same obligation.
+    const owner = await read("security-b");
+    expect(owner.status).toBe(200);
+    expect(owner.body.case).toMatchObject({
+      viewerRoles: ["financial", "security-maintainer"],
+      allowedActions: expect.arrayContaining(["prepare-payment"]),
+    });
+    expect(obligation(owner.body)).toEqual(owed);
+    expect(await listed("security-b")).toBe(true);
+    // A transfer is not a change to the case: its revision did not move.
+    expect((owner.body.case as { revision: number }).revision).toBe(
+      before.revision,
+    );
+    // The reporter keeps the case and the award.
+    expect(obligation((await read("reporter-a")).body)).toEqual(reporterOwed);
+    // The new owner controls who else reads the case.
+    expect(
+      (
+        await act(request, "security-b", caseId, "revoke-triager", {
+          githubId: account("triager").githubId,
+        })
+      ).status,
+    ).toBe(200);
+    expect((await read("triager")).status).toBe(404);
+  });
+
+  const enforce = async (action: "quarantine" | "ban") => {
+    const project = (await adminProject(request, id)) as unknown as {
+      revision: number;
+      enforcement: { nextSequence: number };
+    };
+    return api(
+      request,
+      "POST",
+      `admin/projects/${id}/enforcement`,
+      ADMIN_TOKEN,
+      {
+        action,
+        reason: `Synthetic ${action} for the continuity check`,
+        evidenceReference: `private moderation note E2E-${action}`,
+        expectedRevision: project.revision,
+        expectedSequence: project.enforcement.nextSequence,
+      },
+    );
+  };
+
+  for (const action of ["quarantine", "ban"] as const) {
+    await test.step(`a ${action} stops new reports and keeps the obligation`, async () => {
+      const restricted = await enforce(action);
+      expect(restricted.status, JSON.stringify(restricted.body)).toBe(200);
+      const manifest = (await adminProject(request, id)).manifest;
+      expect(manifest).toMatchObject({
+        status: "paused",
+        listingTier: "retired",
+      });
+      // No new report enters a restricted program, and there is no
+      // public fallback.
+      const readiness = await api(
+        request,
+        "GET",
+        `security-programs/${id}/intake?after=${action}`,
+        null,
+      );
+      expect(readiness.status).toBe(404);
+      expect(
+        (
+          await api(request, "POST", "security-cases", TOKENS["security-b"], {
+            mode: "import",
+            projectId: id,
+          })
+        ).status,
+      ).toBe(404);
+      // The reporter and the current owner keep the case and its award;
+      // the replaced approvers stay out.
+      expect(obligation((await read("reporter-a")).body)).toEqual(reporterOwed);
+      expect(obligation((await read("security-b")).body)).toEqual(owed);
+      expect((await read("security")).status).toBe(404);
+      expect((await read("finance")).status).toBe(404);
+    });
+  }
+
+  await test.step("the banned program still pays the owed award", async () => {
+    expect(
+      (
+        await act(request, "reporter-a", caseId, "consent-payment", {
+          network: deployment.network,
+          confirmation: true,
+        })
+      ).status,
+    ).toBe(200);
+    await vaultSnapshot(id, deployment, "10000000000");
+    const prepared = await act(
+      request,
+      "security-b",
+      caseId,
+      "prepare-payment",
+      { network: deployment.network, confirmation: true },
+    );
+    expect(prepared.status, JSON.stringify(prepared.body)).toBe(200);
+    // An unsigned owner request only: nothing is paid.
+    expect(prepared.body.case).toMatchObject({
+      awardState: "approved",
+      reservation: owed.reservation,
+    });
+    expect(prepared.body.case).not.toMatchObject({ paymentState: "paid" });
+  });
+});
+
+/**
  * Automatic private intake (PRD section 8 "Private reporting is automatic",
  * SEC-07, SEC-17). Runs only with SLOP_E2E_PRIVATE_INTAKE=1, which turns on
  * the intake bindings against the loopback GitHub fixture; the default
