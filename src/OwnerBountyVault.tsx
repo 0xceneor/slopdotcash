@@ -73,6 +73,12 @@ export function OwnerBountyVault({
       {state.status === "error" ? <p role="alert">{state.message}</p> : null}
       {state.status === "ready" ? (
         <>
+          {!state.canSetup ? (
+            <p>
+              This project is restricted. New setup and deposits are disabled.
+              The owner can still check transactions and withdraw free funds.
+            </p>
+          ) : null}
           {state.funds ? (
             <>
               <p>
