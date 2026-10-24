@@ -131,6 +131,10 @@ test("closing an account ends every session, removes optional connections and ke
     expect(closed.status).toBe(200);
     expect(closed.body).toEqual({ closed: true, closedAt: NOW });
     expect(closed.cookie).toContain("Max-Age=0");
+    // A repeated attempt has no session left to act with.
+    expect(
+      (await call("account/close", tokens.me, { login: ME.login })).status,
+    ).toBe(401);
     // Both of this account's sessions end; another account keeps its own.
     expect((await call("sessions", tokens.me)).status).toBe(401);
     expect((await call("sessions", tokens.meOther)).status).toBe(401);
@@ -265,8 +269,8 @@ test("a closed account signs in again only through an explicit reopen", async ()
   }
 });
 
-test("closure needs a signed-in session and a same-origin JSON request", async () => {
-  const { sqlite, tokens, call } = await harness();
+test("closure needs a signed-in session and a same-origin JSON request, and a repeat is safe", async () => {
+  const { sqlite, tokens, call, count, setClock } = await harness();
   try {
     expect(
       (await call("account/close", null, { login: ME.login })).status,
@@ -291,6 +295,25 @@ test("closure needs a signed-in session and a same-origin JSON request", async (
       },
     );
     expect(crossSite.status).toBe(403);
+    // A second request that read its session before a concurrent closure
+    // committed reports that same closure instead of failing.
+    sqlite.exec(
+      `UPDATE points_members SET closed_at='${NOW}', public=0 WHERE actor_id='${ME.actor}'`,
+    );
+    setClock(LATER);
+    const raced = await call("account/close", tokens.meOther, {
+      login: ME.login,
+    });
+    expect(raced).toMatchObject({
+      status: 200,
+      body: { closed: true, closedAt: NOW },
+    });
+    expect(
+      count(
+        "SELECT count(*) n FROM points_sessions WHERE actor_id=?",
+        ME.actor,
+      ),
+    ).toBe(0);
   } finally {
     sqlite.close();
   }
