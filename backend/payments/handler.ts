@@ -997,9 +997,11 @@ export async function handlePaymentsApi(
       });
     }
     if (path === "/me" && request.method === "GET") {
+      // A proved wallet is eligible at once (PRD section 11). The removed
+      // one-day successor hold must not remain in this account status.
       const walletRows = await deps.db
         .prepare(
-          "SELECT json_group_array(json_object('chain',w.chain,'claimId',w.id,'address',w.wallet_address,'authorized',json(CASE WHEN a.claim_id IS NULL THEN 'false' ELSE 'true' END),'activationEligibleAt',CASE WHEN w.supersedes_claim_id IS NOT NULL AND a.authorized_at IS NOT NULL THEN strftime('%Y-%m-%dT%H:%M:%fZ',max(w.created_at,a.authorized_at),'+1 day') ELSE NULL END)) items FROM wallet_claims w LEFT JOIN payment_wallet_authorizations a ON a.claim_id=w.id WHERE w.github_user_id=? AND NOT EXISTS(SELECT 1 FROM wallet_claims n WHERE n.supersedes_claim_id=w.id)",
+          "SELECT json_group_array(json_object('chain',w.chain,'claimId',w.id,'address',w.wallet_address,'authorized',json(CASE WHEN a.claim_id IS NULL THEN 'false' ELSE 'true' END),'activationEligibleAt',NULL)) items FROM wallet_claims w LEFT JOIN payment_wallet_authorizations a ON a.claim_id=w.id WHERE w.github_user_id=? AND NOT EXISTS(SELECT 1 FROM wallet_claims n WHERE n.supersedes_claim_id=w.id)",
         )
         .bind(member.github_id)
         .first<{ items: string }>();
