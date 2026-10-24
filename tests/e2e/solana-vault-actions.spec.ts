@@ -18,11 +18,19 @@ import AxeBuilder from "@axe-core/playwright";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { expect, test } from "@playwright/test";
 import { handlePaymentsApi } from "../../backend/payments/handler";
-import type { SolanaEscrowConfig } from "../../contracts/solana/adapter";
+import {
+  type SolanaEscrowConfig,
+  solanaBase58,
+  verifySolanaDeployment,
+} from "../../contracts/solana/adapter";
+import { verifySolanaVaultCreation } from "../../contracts/solana/owner-creation";
+import { buildInitializeVaultInstructions } from "../../contracts/solana/owner-instructions";
+import { message } from "../../contracts/solana/transactions";
 import { decodeBase58Bytes } from "../../src/lib/base58";
 import type { EscrowDeployment } from "../../src/lib/escrow-policy.mjs";
 import { formatAssetAmount } from "../../src/lib/project-schema.mjs";
 import { PROJECTS } from "../../src/lib/projects.mjs";
+import { registryProjectDigest } from "../../src/lib/vault-setup";
 import { CONTRIBUTION } from "../project-application-manifest";
 
 // Dependencies are installed by the existing Solana contract test command.
@@ -925,6 +933,20 @@ test("owner creates, recovers, registers and funds a Solana vault through the AP
         ),
       ).toString("base64"),
     });
+    const reviewed = await api(`project-vaults/${project.id}`, {
+      step: "review",
+      expectedRevision: 1,
+      network: "solana-devnet",
+      claimId: claim.claimId,
+      automatic,
+    });
+    expect(
+      await verifySolanaVaultCreation(
+        config,
+        reviewed.review.creation,
+        solanaBase58(new Uint8Array(64)),
+      ),
+    ).toBeNull();
     await page.exposeFunction("localSolanaAccount", () => ({
       address: donor.publicKey.toBase58(),
       publicKey: [...donor.publicKey.toBytes()],
@@ -977,11 +999,12 @@ test("owner creates, recovers, registers and funds a Solana vault through the AP
     await setup
       .getByRole("button", { name: "Connect Local Solana wallet" })
       .click();
+    await expect(
+      setup.getByRole("button", { name: "Review vault creation", exact: true }),
+    ).toBeDisabled();
     await setup
-      .getByRole("checkbox", {
-        name: "Automatically pay the monthly allocation",
-      })
-      .setChecked(automatic);
+      .getByLabel("Automatic monthly payment", { exact: true })
+      .selectOption(automatic ? "on" : "off");
     await setup.getByRole("button", { name: "Review vault creation" }).click();
     await expect(
       setup.getByRole("button", { name: "Create vault in wallet" }),
@@ -1049,6 +1072,59 @@ test("owner creates, recovers, registers and funds a Solana vault through the AP
     );
     expect(account.monthlyEnabled).toBe(automatic);
     expect(account.monthlyCap.toString()).toBe("1000000000");
+    const createdConfig = { ...config, ...created, mint: created.asset };
+    const digest = registryProjectDigest(project.id);
+    await expect(
+      verifySolanaDeployment(createdConfig, "f".repeat(64)),
+    ).rejects.toThrow("different registry project");
+    await expect(
+      verifySolanaDeployment(
+        { ...createdConfig, projectPda: deployment.projectPda },
+        digest,
+      ),
+    ).rejects.toThrow("different registry project");
+    await expect(
+      verifySolanaDeployment(
+        { ...createdConfig, owner: owner.publicKey.toBase58() },
+        digest,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      verifySolanaDeployment(
+        { ...createdConfig, mint: owner.publicKey.toBase58() },
+        digest,
+      ),
+    ).rejects.toThrow("asset mismatch");
+    // A real duplicate initialize fails. Only its exact signed message qualifies as failed.
+    const duplicatePlan = buildInitializeVaultInstructions(
+      reviewed.review.creation,
+    );
+    const duplicateBlock = await connection.getLatestBlockhash("finalized");
+    const duplicateTx = web3.Transaction.from(
+      Buffer.concat([
+        Buffer.from([1]),
+        Buffer.alloc(64),
+        message(
+          donor.publicKey.toBase58(),
+          duplicateBlock.blockhash,
+          duplicatePlan.instructions,
+        ),
+      ]),
+    );
+    duplicateTx.sign(donor);
+    const failedCreation = await connection.sendRawTransaction(
+      duplicateTx.serialize(),
+      { skipPreflight: true, maxRetries: 0 },
+    );
+    await connection.confirmTransaction(failedCreation, "finalized");
+    await expect(
+      verifySolanaVaultCreation(
+        config,
+        reviewed.review.creation,
+        failedCreation,
+      ),
+    ).rejects.toThrow("exact vault creation transaction failed");
+
     await api(`project-vaults/${project.id}`, {
       step: "register",
       expectedRevision: 1,
