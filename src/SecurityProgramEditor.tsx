@@ -76,6 +76,8 @@ export function SecurityProgramEditor({
   onPublished: (result: RevisionResult) => void;
 }) {
   const existing = project.securityBounty;
+  // Session metadata (such as admin) is not part of a public contact record.
+  const owner = { githubId: actor.githubId, githubLogin: actor.githubLogin };
   const [expanded, setExpanded] = useState(false);
   const [status, setStatus] = useState<SecurityBountyTerms["status"]>(
     existing?.status ?? "paused",
@@ -165,9 +167,9 @@ export function SecurityProgramEditor({
         },
         responseTargets: response,
         approvers: existing?.approvers ?? {
-          technical: [actor],
-          financial: [actor],
-          dispute: [actor],
+          technical: [owner],
+          financial: [owner],
+          dispute: [owner],
         },
         dispute: {
           authority: existing?.dispute.authority ?? "advisory",
