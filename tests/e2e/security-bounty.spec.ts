@@ -1023,7 +1023,7 @@ test("private security bounty programs keep cases restricted from intake to awar
         name: new RegExp(`${b.id} GHSA-8c9f-2g3h-4j5m`, "u"),
       })
       .click();
-    const detail = page.locator(".security-case");
+    const detail = page.locator(`[aria-labelledby="case-${declared}"]`);
     await expect(detail).toContainText("Waiting for an independent reviewer");
     await expect(detail.getByText(/\(verified from GitHub\)/u)).toBeVisible();
     const form = detail.getByRole("form", {
@@ -1413,7 +1413,7 @@ test("private security bounty programs keep cases restricted from intake to awar
         name: new RegExp(`${a.id} GHSA-2c3f-4g5h-6j7m`, "u"),
       })
       .click();
-    const detail = page.locator(".security-case");
+    const detail = page.locator(`[aria-labelledby="case-${caseA}"]`);
     await expect(detail).toContainText(
       "$7,500 to the researcher · $2,500 to Slop · $10,000 gross",
     );
