@@ -12,6 +12,7 @@ import {
 import { createHash } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { sqliteD1 } from "../../tests/sqlite-d1";
+import type { SecurityAnalysisInput, SecurityAnalyzer } from "./analysis";
 import { FAKE_OAUTH, fakeGithub } from "./github-advisories.fake";
 import { handleSecurityApi, type SecurityD1Database } from "./handler";
 import { githubIntakeOAuth, type IntakeConfig } from "./intake-grant";
@@ -193,6 +194,7 @@ function setup(options: { mode?: "on" | "off"; pvr?: boolean } = {}) {
           apiOrigin: "https://api.github.invalid",
         },
         intake,
+        analyzer,
       },
     )) as Response;
     if (as) absorb(as, response.headers.getSetCookie());
@@ -211,6 +213,23 @@ function setup(options: { mode?: "on" | "off"; pvr?: boolean } = {}) {
     path: string,
     body?: unknown,
   ) => raw(as, method, path, body);
+  // The owner's private AI analysis; it receives the content in memory.
+  const analyzed: SecurityAnalysisInput[] = [];
+  const analyzer: SecurityAnalyzer = {
+    provider: "fixture",
+    model: "fixture-model",
+    analyze: async (input) => {
+      analyzed.push(input);
+      return {
+        summary: "A synthetic proposal for the owner.",
+        severity: "high",
+        potentialLoss: "unclear",
+        duplicateCaseIds: [],
+        rootCauseKey: null,
+        remediation: "Synthetic remediation.",
+      };
+    },
+  };
   let keys = 0;
   const key = () => {
     keys += 1;
@@ -296,6 +315,7 @@ function setup(options: { mode?: "on" | "off"; pvr?: boolean } = {}) {
     sqlite,
     github,
     intake,
+    analyzed,
     call,
     raw,
     key,
@@ -572,6 +592,20 @@ describe("private intake: send outcomes", () => {
       grossMinor: "1000000",
       researcherMinor: "750000",
     });
+    // The private AI analysis read the content GitHub returned, in memory;
+    // D1 keeps only its proposal and digest.
+    expect(t.analyzed.map((input) => input.report.summary)).toEqual([
+      advisory.advisory.summary,
+    ]);
+    const analyses = t.sqlite
+      .query("SELECT state, summary FROM security_case_analyses")
+      .all();
+    expect(analyses).toEqual([
+      { state: "complete", summary: "A synthetic proposal for the owner." },
+    ]);
+    expect(JSON.stringify(analyses)).not.toContain(
+      advisory.advisory.description,
+    );
     // The published 24 hour acknowledgement target, whatever the priority.
     expect(verified.next_action_due_at).toBe("2026-10-24T10:00:00.000Z");
     const event = t.sqlite
@@ -615,7 +649,7 @@ describe("private intake: send outcomes", () => {
     expect(restricted.body.case).toMatchObject({
       receivedAtSource: "github-verified",
       receiptEvidenceDigest: verified.receipt_evidence_digest,
-      analysis: { state: "unavailable", retryable: true },
+      analysis: { state: "complete", retryable: false },
     });
   });
 

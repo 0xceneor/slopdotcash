@@ -11,7 +11,7 @@
  * advisory text it read.
  */
 import type { D1Database, D1QueryStatement } from "../d1";
-import type { AdvisoryReader, GithubPrivateReport } from "./advisories";
+import type { AdvisoryReader } from "./advisories";
 
 export const ANALYSIS_PROMPT_REVISION = "slop-security-case-analysis-1";
 /**
@@ -35,8 +35,21 @@ const SEVERITIES = [
 const LOSS = ["likely", "unlikely", "unclear"] as const;
 const ROOT_CAUSE = /^[a-z0-9][a-z0-9-]{1,78}[a-z0-9]$/u;
 
+/**
+ * The advisory content the analysis reads. It comes from GitHub, stays in
+ * memory and is never stored; the receipt check already bound its author.
+ */
+export type SecurityAnalysisReport = {
+  summary: string;
+  description: string;
+  severity: string | null;
+  cvss: string | null;
+  cweIds: string[];
+  packages: string[];
+};
+
 export type SecurityAnalysisInput = {
-  report: GithubPrivateReport;
+  report: SecurityAnalysisReport;
   scope: {
     includedAssets: string[];
     severityRubric: string;
@@ -122,6 +135,7 @@ function analysisMessage(input: SecurityAnalysisInput): string {
       summary: input.report.summary,
       description: input.report.description,
       reporterSeverity: input.report.severity,
+      cvss: input.report.cvss,
       cweIds: input.report.cweIds,
       packages: input.report.packages,
     },
@@ -135,12 +149,15 @@ export type AnalysisProfile = {
   model: string;
   apiKey: string;
   maxOutputTokens: number;
+  endpoint: string;
 };
 
-const ENDPOINTS: Record<AnalysisProfile["transport"], string> = {
-  "anthropic-messages": "https://api.anthropic.com/v1/messages",
-  "openai-responses": "https://api.openai.com/v1/responses",
+const ENDPOINTS: Record<AnalysisProfile["transport"], URL> = {
+  "anthropic-messages": new URL("https://api.anthropic.com/v1/messages"),
+  "openai-responses": new URL("https://api.openai.com/v1/responses"),
 };
+/** Local browser tests only: a loopback provider fixture on 127.0.0.1. */
+const LOOPBACK_ORIGIN = /^http:\/\/127\.0\.0\.1:[1-9][0-9]{3,4}$/u;
 
 /**
  * Reads the operator's explicit provider choice. Without a complete profile
@@ -149,6 +166,7 @@ const ENDPOINTS: Record<AnalysisProfile["transport"], string> = {
 export function analysisProfileFromEnv(
   profileJson: string | undefined,
   apiKey: string | undefined,
+  loopbackOrigin?: string,
 ): AnalysisProfile | null {
   if (!profileJson || !apiKey) return null;
   try {
@@ -166,11 +184,17 @@ export function analysisProfileFromEnv(
       Number(maxOutputTokens) > 16384
     )
       return null;
+    const endpoint = ENDPOINTS[transport];
     return {
       transport,
       model,
       apiKey,
       maxOutputTokens: Number(maxOutputTokens),
+      // Only a loopback origin replaces the provider's fixed origin.
+      endpoint:
+        loopbackOrigin !== undefined && LOOPBACK_ORIGIN.test(loopbackOrigin)
+          ? `${loopbackOrigin}${endpoint.pathname}`
+          : endpoint.href,
     };
   } catch {
     return null;
@@ -187,7 +211,7 @@ export function providerSecurityAnalyzer(
     provider: anthropic ? "anthropic" : "openai",
     model: profile.model,
     async analyze(input) {
-      const response = await fetcher(ENDPOINTS[profile.transport], {
+      const response = await fetcher(profile.endpoint, {
         method: "POST",
         // Workers support only "follow" and "manual"; a redirect is not ok.
         redirect: "manual",
@@ -356,14 +380,16 @@ export async function analysisMayStart(
 
 /**
  * Runs one analysis attempt for a verified case. The attempt row is claimed
- * first, so concurrent triggers run it once. Every outcome is recorded:
- * `unavailable` when no provider or GitHub reader is configured or GitHub
- * cannot be read, `failed` when the provider or its output fails. Errors
- * never carry report content.
+ * first, so concurrent triggers run it once. `received` is the content that
+ * receipt verification read from GitHub; without it the analysis reads the
+ * advisory again. Every outcome is recorded: `unavailable` when no provider
+ * is configured or the advisory cannot be read, `failed` when the provider
+ * or its output fails. Errors never carry report content.
  */
 export async function runCaseAnalysis(
   deps: AnalysisDependencies,
   caseId: string,
+  received: SecurityAnalysisReport | null,
 ): Promise<void> {
   const row = await deps.db
     .prepare(
@@ -417,22 +443,39 @@ export async function runCaseAnalysis(
       )
       .bind(state, advisoryDigest, deps.now().toISOString(), caseId, attempt)
       .run();
-  if (deps.analyzer === null || deps.advisories === null) {
+  if (deps.analyzer === null) {
     await finish("unavailable");
     return;
   }
-  const lookup = await deps.advisories.privateReport(
-    row.advisory_repository,
-    row.advisory_ghsa,
-  );
-  if (lookup.state !== "found") {
-    await finish("unavailable");
-    return;
+  let report = received;
+  if (report === null) {
+    const lookup = deps.advisories
+      ? await deps.advisories.privateReport(
+          row.advisory_repository,
+          row.advisory_ghsa,
+        )
+      : ({ state: "unavailable" } as const);
+    if (lookup.state !== "found") {
+      await finish("unavailable");
+      return;
+    }
+    // The advisory must still be the reporter's own private report.
+    if (lookup.report.author.githubId !== row.reporter_github_id) {
+      await finish("failed");
+      return;
+    }
+    report = {
+      summary: lookup.report.summary,
+      description: lookup.report.description,
+      severity: lookup.report.severity,
+      cvss: null,
+      cweIds: lookup.report.cweIds,
+      packages: lookup.report.packages,
+    };
   }
-  const report = lookup.report;
   const advisoryDigest = await sha256Hex(
     JSON.stringify([
-      report.ghsa,
+      row.advisory_ghsa,
       report.summary,
       report.description,
       report.severity,
@@ -440,11 +483,6 @@ export async function runCaseAnalysis(
       report.packages,
     ]),
   );
-  // The advisory must still be the reporter's own private report.
-  if (report.author.githubId !== row.reporter_github_id) {
-    await finish("failed", advisoryDigest);
-    return;
-  }
   const manifest = JSON.parse(row.manifest) as {
     securityBounty?: {
       scope?: {
