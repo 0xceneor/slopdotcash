@@ -127,7 +127,7 @@ export async function verifySolanaVaultCreation(
     const current = solanaMonthlyCommitmentState(account);
     if (
       current.cap !== input.monthlyCap ||
-      current.enabled !== (input.automaticMonthly ?? true)
+      current.enabled !== input.automaticMonthly
     )
       throw new SolanaWalletActionError(
         "The vault monthly setting differs from the creation request.",

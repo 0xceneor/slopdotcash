@@ -48,9 +48,9 @@ export function buildInitializeVaultInstructions(input: SolanaVaultCreation) {
     (input.monthlyCap !== undefined || input.automaticMonthly !== undefined)
   )
     throw new Error("Private bounty awards have no automatic monthly policy");
-  const automaticMonthly = input.automaticMonthly ?? true;
-  if (typeof automaticMonthly !== "boolean")
-    throw new Error("Invalid automatic monthly choice");
+  const automaticMonthly = input.automaticMonthly;
+  if (!bounty && typeof automaticMonthly !== "boolean")
+    throw new Error("Choose the monthly payment setting explicitly");
   let cap: Uint8Array | null = null;
   if (!bounty) {
     if (

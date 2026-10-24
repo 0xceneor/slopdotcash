@@ -64,9 +64,21 @@ test("edge owner instructions create distinct vaults with atomic monthly choice 
     bindingDelaySeconds: "3600",
     rotationDelaySeconds: "604800",
   };
-  assert.throws(() => buildInitializeVaultInstructions(base), /valid cap/);
   assert.throws(
-    () => buildInitializeVaultInstructions({ ...base, monthlyCap: "0" }),
+    () => buildInitializeVaultInstructions({ ...base, monthlyCap: "20" }),
+    /setting explicitly/,
+  );
+  assert.throws(
+    () => buildInitializeVaultInstructions({ ...base, automaticMonthly: true }),
+    /valid cap/,
+  );
+  assert.throws(
+    () =>
+      buildInitializeVaultInstructions({
+        ...base,
+        monthlyCap: "0",
+        automaticMonthly: true,
+      }),
     /valid cap/,
   );
   assert.throws(
@@ -80,7 +92,7 @@ test("edge owner instructions create distinct vaults with atomic monthly choice 
   );
   const vaults = new Set();
   for (const choice of [
-    { name: "default", monthlyCap: "20" },
+    { name: "on", monthlyCap: "20", automaticMonthly: true },
     {
       name: "opt-out",
       projectId: "edge-owner-opt-out",
