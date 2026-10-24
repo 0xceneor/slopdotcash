@@ -1494,6 +1494,7 @@ test("owner funds a separate bounty vault with private balances and no monthly r
   delete zeroReward.cycleCaps;
   const contact = { githubId: "900000071", githubLogin: "vault-owner" };
   const target = applicationManifest(id, repository, {
+    status: "active",
     reward: zeroReward,
     rewardAsset: project.rewardAsset,
     escrow: { ...project.escrow, deployments: [] },
