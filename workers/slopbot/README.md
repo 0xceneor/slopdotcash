@@ -701,7 +701,9 @@ state, including `COMMENTED`, on every page. Eligibility and assessed value
 determine credit; collection does not discard a finding because the reviewer
 did not select approve or request changes. Review awards use their submission
 time within the scoring window. A later merge or closure does not move an old
-review into the current month. Assessment history still retains that review.
+review into the current month, and that old review does not take a reviewer
+slot or a share from a review inside the window. Assessment history still
+retains that review.
 
 The source collector does not call a model. A failed feed prevents snapshot
 publication; legacy scoring is not a failure fallback.
