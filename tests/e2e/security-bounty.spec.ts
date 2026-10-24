@@ -1805,7 +1805,8 @@ test("automatic private intake files as the reporter and verifies receipt @regis
     expect(maintainer.body.case).toMatchObject({
       submissionState: "verified",
       receivedAtSource: "github-verified",
-      nextStep: "Waiting for the project owner's response.",
+      nextStep:
+        "Review the report and the AI summary, then decide or ask the reporter for information.",
     });
     expect(
       (maintainer.body.case as { allowedActions: string[] }).allowedActions,
