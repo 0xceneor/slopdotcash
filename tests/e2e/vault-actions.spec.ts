@@ -1652,9 +1652,14 @@ test("owner funds a separate bounty vault with private balances and no monthly r
     }, initial.token);
     const errors: string[] = [];
     const failed: string[] = [];
+    const privateUrl = `${origin}/api/v1/project-vaults/${id}?purpose=security-bounty`;
+    let expectedUnavailableErrors = 0;
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (event) => {
-      if (event.type() === "error") errors.push(event.text());
+      if (event.type() !== "error") return;
+      if (event.location().url === privateUrl && /503/.test(event.text()))
+        expectedUnavailableErrors++;
+      else errors.push(event.text());
     });
     page.on("response", (response) => {
       if (response.url().startsWith(origin) && response.status() >= 400)
@@ -1734,6 +1739,44 @@ test("owner funds a separate bounty vault with private balances and no monthly r
       page.getByRole("region", { name: "Bounty funds", exact: true }),
     ).toContainText("Available for new awards: 10 USDC");
     await expect(funding.getByRole("status")).toContainText("finalized");
+    await page.request.post(`${origin}/__fixture`, {
+      data: { privateReadUnavailable: true },
+    });
+    const unavailable = page.waitForResponse(
+      (response) => response.url() === privateUrl && response.status() === 503,
+    );
+    await page.getByRole("button", { name: "Refresh bounty funds" }).click();
+    await unavailable;
+    const bountyFunds = page.getByRole("region", {
+      name: "Bounty funds",
+      exact: true,
+    });
+    await expect(bountyFunds.getByRole("alert")).toContainText(
+      "Private balance read is unavailable.",
+    );
+    // A failed refresh must retain funded withdrawal and transaction recovery.
+    await expect(funding).toBeVisible();
+    await expect(funding.getByRole("status")).toContainText("finalized");
+    await expect(bountyFunds).toContainText("Last verified balance");
+    await expect(bountyFunds).toContainText(
+      "Available for new awards: 10 USDC",
+    );
+    await expect(funding.getByLabel("Deposit tokens")).toHaveCount(0);
+    await funding.getByLabel("Withdraw free funds").check();
+    await expect(
+      funding.getByRole("button", { name: "Review withdrawal", exact: true }),
+    ).toBeEnabled();
+    await page.screenshot({
+      path: info.outputPath("bounty-vault-stale-funds.png"),
+      fullPage: true,
+    });
+    await page.request.post(`${origin}/__fixture`, {
+      data: { privateReadUnavailable: false },
+    });
+    await page.getByRole("button", { name: "Refresh bounty funds" }).click();
+    await expect(bountyFunds.getByRole("alert")).toHaveCount(0);
+    await expect(funding.getByLabel("Deposit tokens")).toBeVisible();
+    await expect(funding.getByRole("status")).toContainText("finalized");
     await page.getByRole("button", { name: "Edit bounty settings" }).click();
     await page.getByLabel("Status", { exact: true }).selectOption("open");
     await page.getByRole("button", { name: "Publish bounty terms" }).click();
@@ -1749,7 +1792,8 @@ test("owner funds a separate bounty vault with private balances and no monthly r
     ).text();
     expect(publicProject).not.toMatch(/availableMinor|freeMinor|snapshotAt/);
     expect(errors).toEqual([]);
-    expect(failed).toEqual([]);
+    expect(failed).toEqual([`503 ${privateUrl}`]);
+    expect(expectedUnavailableErrors).toBe(1);
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth <= innerWidth,
@@ -1786,7 +1830,8 @@ test("owner funds a separate bounty vault with private balances and no monthly r
     ).toContainText("Available for new awards: 10 USDC");
     await expect(funding.getByRole("status")).toHaveCount(0);
     expect(errors).toEqual([]);
-    expect(failed).toEqual([]);
+    expect(failed).toEqual([`503 ${privateUrl}`]);
+    expect(expectedUnavailableErrors).toBe(1);
   } finally {
     server.kill("SIGTERM");
     rmSync(temporary, { recursive: true, force: true });

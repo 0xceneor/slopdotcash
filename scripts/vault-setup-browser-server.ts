@@ -70,6 +70,7 @@ sqlite
   );
 let permitted = true;
 let templatesEnabled = true;
+let privateReadUnavailable = false;
 let scanReads = 0;
 const deps: ProjectApiDependencies = {
   persistence,
@@ -119,12 +120,20 @@ Bun.serve({
           if (typeof body.permitted === "boolean") permitted = body.permitted;
           if (typeof body.templatesEnabled === "boolean")
             templatesEnabled = body.templatesEnabled;
+          if (typeof body.privateReadUnavailable === "boolean")
+            privateReadUnavailable = body.privateReadUnavailable;
           if (body.scanSecurity === true)
             await securityPayments.scheduled(null, {
               PAYMENTS_DB: db,
               REGISTRY_DB: db,
               PAYMENT_NETWORKS: JSON.stringify(["base-sepolia"]),
               PAYMENT_RPC_URLS: JSON.stringify({ "base-sepolia": rpcUrl }),
+              // This zero-award fixture exercises the real scanner, not payouts.
+              EVM_PAYMENT_EXECUTOR: {
+                fetch: async () => {
+                  throw new Error("Unexpected payment in zero-award fixture");
+                },
+              },
             });
         }
         return Response.json({
@@ -154,6 +163,19 @@ Bun.serve({
         url.pathname === "/data/fixture-project-registry.json"
           ? new Request(`${origin}/api/v1/projects`, request)
           : request;
+      if (
+        privateReadUnavailable &&
+        request.method === "GET" &&
+        url.pathname === `/api/v1/project-vaults/${input.project.id}` &&
+        url.searchParams.get("purpose") === "security-bounty"
+      )
+        return Response.json(
+          {
+            error: "unavailable",
+            message: "Private balance read is unavailable.",
+          },
+          { status: 503 },
+        );
       const projectResponse = await handleProjectApi(projectRequest, deps);
       if (projectResponse) return projectResponse;
       if (url.pathname.startsWith("/api/v1/payments"))
