@@ -440,6 +440,9 @@ test("an owner creates and revises a project before an admin delists it @registr
   const adminErrors = observe(admin);
   await signIn(admin, ADMIN_TOKEN);
   await admin.goto("/admin", { waitUntil: "networkidle" });
+  await admin
+    .getByRole("button", { name: `Open ${project.name}`, exact: true })
+    .click();
   const card = admin.locator(".admin-card", {
     has: admin.getByText(project.id, { exact: true }),
   });
@@ -472,9 +475,9 @@ test("an owner creates and revises a project before an admin delists it @registr
     .getByLabel("Revision note", { exact: true })
     .fill("Clarify the project scope for contributors");
   await returningOwner.getByRole("button", { name: "Publish changes" }).click();
-  await expect(returningOwner.getByRole("status")).toContainText(
-    "Published revision 2",
-  );
+  await expect(
+    returningOwner.getByRole("status").filter({ hasText: "Published revision 2" }),
+  ).toBeVisible();
   await admin.reload({ waitUntil: "networkidle" });
   await expect(card).toContainText("2 · updated");
   expect(
@@ -526,6 +529,9 @@ test("an admin cannot activate or publish skills without canonical scan closure 
 
   // An incomplete scan quarantines the revision, and it cannot activate.
   await admin.goto("/admin", { waitUntil: "networkidle" });
+  await admin
+    .getByRole("button", { name: `Open ${project.name}`, exact: true })
+    .click();
   let vettingCard = admin.getByRole("article", {
     name: `Security vetting for ${project.id}`,
   });
@@ -848,7 +854,7 @@ test("moderators restrict a project and refuse reinstatement without canonical s
   await panel()
     .getByText(/Enforcement history/u)
     .click();
-  await expect(panel()).toContainText("project-applicant, owner-request");
+  await expect(panel()).toContainText("project-steward, owner-request");
 
   // The moderator who placed the restriction cannot decide the appeal. The
   // request API keeps the expected 403 out of the page console.
