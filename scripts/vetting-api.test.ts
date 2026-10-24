@@ -513,6 +513,16 @@ describe("community security vetting", () => {
       state: "quarantined",
       assessment: { state: "incomplete", heldArtifacts: 1 },
     });
+    // The owners get one failed-check notice for this assessment.
+    expect(
+      sqlite
+        .query(
+          "SELECT DISTINCT kind, action_path AS path FROM notifications WHERE event_key = ?",
+        )
+        .all(`project-scan:${id}`),
+    ).toEqual([
+      { kind: "project_scan_failed", path: "/projects/open-registry" },
+    ]);
     const refused = await activate();
     expect(refused.status).toBe(422);
     expect((await refused.json()).error).toBe("vetting_required");

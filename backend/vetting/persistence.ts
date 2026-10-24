@@ -13,6 +13,7 @@ import type {
 } from "../../src/lib/vetting-contracts";
 import {
   notifyProjectEnforcement,
+  notifyProjectScanFailed,
   notifyVettingBanAudience,
 } from "../notifications/events";
 import {
@@ -339,6 +340,10 @@ export class CloudflareVettingPersistence {
                 input.operatorGithubIds ?? [],
               ),
             ]
+          : []),
+        // A scan that could not establish clearance tells the owners once.
+        ...(result.disposition === "incomplete"
+          ? [notifyProjectScanFailed(this.db, result.assessmentId)]
           : []),
         ...result.artifacts.map((artifact, ordinal) =>
           this.db
