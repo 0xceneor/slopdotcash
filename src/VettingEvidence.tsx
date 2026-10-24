@@ -16,7 +16,7 @@ type Run = {
   assessmentId: string;
   runId: string;
   manifestSha256: string;
-  expiresAt: string;
+  expiresAt: string | null;
   assembly?: {
     retained: boolean;
     state: string;
@@ -120,7 +120,10 @@ export default function VettingEvidencePage() {
                 Storage inventory SHA-256: {run.manifestSha256}
               </p>
               <p>
-                Access expires: {run.expiresAt}. Policy: {run.policy.version}.
+                {run.expiresAt === null
+                  ? "Case open. Evidence remains available until 90 days after closure."
+                  : `Access expires: ${run.expiresAt}.`}{" "}
+                Policy: {run.policy.version}.
               </p>
               <p>
                 External controls were attested by GitHub actor{" "}

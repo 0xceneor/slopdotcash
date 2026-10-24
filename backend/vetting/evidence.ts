@@ -49,7 +49,8 @@ export type EvidencePolicy = {
   version: string;
   policyAuthorityGithubId: string;
   operatorGithubIds: string[];
-  accessDurationSeconds: number;
+  postClosureRetentionSeconds: number;
+  readGrantDurationSeconds: number;
   maxObjectBytes: number;
   maxRunBytes: number;
   maxObjects: number;
@@ -83,7 +84,8 @@ export function evidencePolicy(
       "version",
       "policyAuthorityGithubId",
       "operatorGithubIds",
-      "accessDurationSeconds",
+      "postClosureRetentionSeconds",
+      "readGrantDurationSeconds",
       "maxObjectBytes",
       "maxRunBytes",
       "maxObjects",
@@ -113,13 +115,16 @@ export function evidencePolicy(
     )
       return null;
     for (const key of [
-      "accessDurationSeconds",
+      "postClosureRetentionSeconds",
+      "readGrantDurationSeconds",
       "maxObjectBytes",
       "maxRunBytes",
       "maxObjects",
     ])
       if (!Number.isSafeInteger(p[key]) || Number(p[key]) < 1) return null;
     if (
+      Number(p.postClosureRetentionSeconds) !== 90 * 86400 ||
+      Number(p.readGrantDurationSeconds) > 900 ||
       Number(p.maxObjectBytes) > MAX_EVIDENCE_OBJECT_BYTES ||
       Number(p.maxRunBytes) > 64 * 1024 * 1024 ||
       Number(p.maxObjects) > 1024 ||
@@ -149,7 +154,7 @@ export function evidencePolicy(
     if (
       !Number.isFinite(
         new Date(
-          now.getTime() + Number(p.accessDurationSeconds) * 1000,
+          now.getTime() + Number(p.postClosureRetentionSeconds) * 1000,
         ).getTime(),
       )
     )
@@ -180,7 +185,7 @@ type Run = {
   manifest: string;
   policy: string;
   created_at: string;
-  expires_at: string;
+  expires_at: string | null;
 };
 type ObjectRow = {
   assessment_id: string;
@@ -263,12 +268,79 @@ export class VettingEvidence {
   async run(assessment: string, run: string): Promise<Run> {
     const row = await this.deps.db
       .prepare(
-        "SELECT * FROM vetting_evidence_runs WHERE assessment_id=? AND run_id=?",
+        "SELECT r.*, c.closed_at AS case_closed_at FROM vetting_evidence_runs r LEFT JOIN vetting_evidence_case_closures c ON c.assessment_id=r.assessment_id WHERE r.assessment_id=? AND r.run_id=?",
       )
       .bind(assessment, run)
-      .first<Run>();
+      .first<Run & { case_closed_at: string | null }>();
     if (!row) fail(404, "evidence_missing", "Evidence run is missing");
+    // The old upload-based expiry remains in the immutable manifest history.
+    // The approved case lifecycle now determines access for retained evidence.
+    row.expires_at =
+      row.case_closed_at === null
+        ? null
+        : new Date(
+            Date.parse(row.case_closed_at) + 90 * 86400_000,
+          ).toISOString();
     return row;
+  }
+  async closeCase(request: Request, assessment: string) {
+    const actor = await this.operator(request);
+    const { policy } = this.configuration();
+    if (actor.githubId !== policy.policyAuthorityGithubId)
+      fail(
+        403,
+        "forbidden",
+        "Only the evidence policy owner may close an exception case",
+      );
+    const body = await readJsonObject(request);
+    exact(body, ["reason"]);
+    const reason = text(body.reason, 1000);
+    const state = await this.deps.db
+      .prepare("SELECT state FROM vetting_assessments WHERE id=?")
+      .bind(assessment)
+      .first<{ state: string }>();
+    if (!state) fail(404, "not_found", "Assessment not found");
+    if (state.state !== "incomplete" && state.state !== "malicious")
+      fail(
+        409,
+        "case_not_exception",
+        "Only a finished exception case can be closed manually",
+      );
+    const at = this.deps.now().toISOString();
+    await this.deps.db.batch([
+      this.deps.db
+        .prepare(
+          "INSERT INTO vetting_evidence_case_closures(assessment_id,closed_at,closed_by,reason) VALUES(?,?,?,?) ON CONFLICT(assessment_id) DO NOTHING",
+        )
+        .bind(assessment, at, actor.githubId, reason),
+      this.deps.db
+        .prepare(
+          "INSERT INTO vetting_evidence_audit(id,actor,action,assessment_id,reason,created_at) VALUES(?,?,?,?,?,?)",
+        )
+        .bind(
+          this.deps.randomId(),
+          actor.githubId,
+          "close-case",
+          assessment,
+          reason,
+          at,
+        ),
+    ]);
+    const closure = await this.deps.db
+      .prepare(
+        "SELECT closed_at FROM vetting_evidence_case_closures WHERE assessment_id=?",
+      )
+      .bind(assessment)
+      .first<{ closed_at: string }>();
+    if (!closure)
+      fail(500, "evidence_failure", "Case closure was not recorded");
+    return json(200, {
+      assessmentId: assessment,
+      closedAt: closure.closed_at,
+      expiresAt: new Date(
+        Date.parse(closure.closed_at) + 90 * 86400_000,
+      ).toISOString(),
+    });
   }
   async object(
     assessment: string,
@@ -286,7 +358,10 @@ export class VettingEvidence {
   }
   private readable(row: ObjectRow, run: Run) {
     const { policy, bucket } = this.configuration();
-    if (Date.parse(run.expires_at) <= this.deps.now().getTime())
+    if (
+      run.expires_at !== null &&
+      Date.parse(run.expires_at) <= this.deps.now().getTime()
+    )
       fail(
         410,
         "evidence_expired",
@@ -984,7 +1059,7 @@ export class VettingEvidence {
           JSON.stringify(policy),
           at.toISOString(),
           new Date(
-            at.getTime() + policy.accessDurationSeconds * 1000,
+            at.getTime() + policy.postClosureRetentionSeconds * 1000,
           ).toISOString(),
           input.assemblySha256 ?? null,
         ),
@@ -1033,7 +1108,10 @@ export class VettingEvidence {
     );
     const run = await this.run(assessment, runId),
       object = await this.object(assessment, runId, sha);
-    if (Date.parse(run.expires_at) <= this.deps.now().getTime())
+    if (
+      run.expires_at !== null &&
+      Date.parse(run.expires_at) <= this.deps.now().getTime()
+    )
       fail(410, "evidence_expired", "Evidence upload expired");
     if (
       body.byteLength !== object.size_bytes ||
@@ -1188,6 +1266,7 @@ export class VettingEvidence {
               .first<{ completed_at: string }>()
           : await bucket.head(row.object_key);
         const state =
+          run.expires_at !== null &&
           Date.parse(run.expires_at) <= this.deps.now().getTime()
             ? "expired"
             : row.size_bytes > policy.maxObjectBytes
@@ -1297,6 +1376,7 @@ export class VettingEvidence {
       );
     // Do not grant access to absent, expired, oversized or changed evidence.
     await this.verify(object, run);
+    const { readGrantDurationSeconds } = this.configuration().policy;
     const token = crypto.randomUUID() + crypto.randomUUID(),
       hash = await sha256Hex(new TextEncoder().encode(token));
     await this.deps.db.batch([
@@ -1311,7 +1391,9 @@ export class VettingEvidence {
           sha,
           actor.githubId,
           reason,
-          new Date(this.deps.now().getTime() + 60_000).toISOString(),
+          new Date(
+            this.deps.now().getTime() + readGrantDurationSeconds * 1000,
+          ).toISOString(),
         ),
       this.deps.db
         .prepare(
@@ -1329,14 +1411,25 @@ export class VettingEvidence {
         ),
     ]);
     if (download) {
-      const response = json(201, { expiresInSeconds: 60 });
+      const response = json(201, {
+        expiresInSeconds: readGrantDurationSeconds,
+      });
       response.headers.set(
         "set-cookie",
-        this.downloadCookie(assessment, runId, sha, token),
+        this.downloadCookie(
+          assessment,
+          runId,
+          sha,
+          token,
+          readGrantDurationSeconds,
+        ),
       );
       return response;
     }
-    return json(201, { grant: token, expiresInSeconds: 60 });
+    return json(201, {
+      grant: token,
+      expiresInSeconds: readGrantDurationSeconds,
+    });
   }
   private async consume(
     request: Request,
@@ -1398,9 +1491,10 @@ export class VettingEvidence {
     runId: string,
     sha: string,
     token = "",
+    maxAge = 0,
   ) {
     const path = `/api/v1/operator/vetting-evidence/${assessment}/${runId}/${sha}/download`;
-    return `__Secure-vetting-read-grant=${token}; Path=${path}; Max-Age=${token ? 60 : 0}; Secure; HttpOnly; SameSite=Strict`;
+    return `__Secure-vetting-read-grant=${token}; Path=${path}; Max-Age=${token ? maxAge : 0}; Secure; HttpOnly; SameSite=Strict`;
   }
   async download(
     request: Request,
@@ -1530,6 +1624,14 @@ export class VettingEvidence {
       if (operator && path.length === 2 && request.method === "GET")
         return await this.overview(request);
       const [, , assessment, run, sha, action] = path;
+      if (
+        operator &&
+        path.length === 4 &&
+        run === "close" &&
+        request.method === "POST" &&
+        ID.test(assessment ?? "")
+      )
+        return await this.closeCase(request, assessment);
       if (!ID.test(assessment ?? "") || !ID.test(run ?? ""))
         fail(404, "not_found", "Evidence route not found");
       if (service && path.length === 4 && request.method === "POST")

@@ -478,6 +478,13 @@ describe("automatic scan and activation", () => {
 
     const recorded = await postResult(await scanFixture(queued[0], "clean"));
     expect(recorded.status).toBe(200);
+    expect(
+      sqlite
+        .query(
+          "SELECT closed_at, closed_by FROM vetting_evidence_case_closures WHERE assessment_id=?",
+        )
+        .get(queued[0]),
+    ).toEqual({ closed_at: NOW.toISOString(), closed_by: "automatic" });
     expect((await recorded.json()).assessment).toMatchObject({
       state: "clean",
       modelRuns: [
