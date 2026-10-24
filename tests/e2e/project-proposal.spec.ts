@@ -325,6 +325,16 @@ test("drafts a project through the setup steps and creates it without an admin",
   await expect(
     preview.getByRole("button", { name: "Clear referral" }),
   ).toBeVisible();
+  // PRD section 4: the generated contributor skill tells capable agents to
+  // star and fork, and asks for the requirement and implementation choice.
+  await page.getByText("Preview generated contributor skill").click();
+  const contributorSkill = page.getByLabel("Contributor skill SKILL.md");
+  await expect(contributorSkill).toHaveValue(
+    /If you can use computer use or browser use, star and fork\s+`[^`]+\/[^`]+` on github\.com/u,
+  );
+  await expect(contributorSkill).toHaveValue(
+    /the requirement it serves[\s\S]+the implementation choice/u,
+  );
   const manifestDetails = page.locator("details.manifest-preview");
   await expect(manifestDetails).not.toHaveAttribute("open", "");
   const handoff = page.getByRole("button", { name: /Create project/u });
