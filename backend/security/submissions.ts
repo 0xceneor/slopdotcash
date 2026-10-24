@@ -44,6 +44,7 @@ import {
   pvrState,
   requireActor,
   type SecurityApiDependencies,
+  scheduleAnalysis,
   stringField,
   termsAtReceipt,
 } from "./handler";
@@ -823,6 +824,7 @@ async function writeVerifiedCase(
     updated.state !== "receipt-verified"
   )
     fail(409, "stale_revision", "The submission changed since you loaded it");
+  if (updated.case_id) await scheduleAnalysis(deps, updated.case_id);
   return { status: 200, row: updated };
 }
 
