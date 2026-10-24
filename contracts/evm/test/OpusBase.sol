@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 
 import {ProjectEscrow, EscrowFactory, IERC20, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
@@ -72,7 +73,7 @@ abstract contract OpusBase {
         walletKeys[vm.addr(OpusWallets.NEW_WALLET_KEY)] = OpusWallets.NEW_WALLET_KEY;
         usdc = new TestDollar();
         vm.prank(REGISTRAR);
-        factory = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, delay);
+        factory = DeployFactory.create(REGISTRAR, FEE, AUTHORITY, delay);
         vm.prank(OWNER);
         escrow = ProjectEscrow(factory.create(keccak256("project"), IERC20(address(usdc)), Purpose.Ordinary));
         usdc.mint(OWNER, 1_000_000e6);

@@ -3,7 +3,13 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import anchor from "@coral-xyz/anchor";
-import { createMint, TOKEN_PROGRAM_ID } from "@solana/spl-token";
+import {
+  createAccount,
+  createMint,
+  getAccount,
+  mintTo,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 import {
   Keypair,
   PublicKey,
@@ -121,7 +127,7 @@ test("only the upgrade authority initializes the Config, exactly once", async ()
   );
 });
 
-test("the deployable build rejects a binding delay below one hour", async () => {
+test("the deployable build permits immediate payment and rotation and rejects invalid delay bounds", async () => {
   const mint = await createMint(
     provider.connection,
     payer,
@@ -158,10 +164,172 @@ test("the deployable build rejects a binding delay below one hour", async () => 
       })
       .rpc();
   };
-  await assert.rejects(initialize(1), /InvalidDelay/);
-  await assert.rejects(initialize(3599), /InvalidDelay/);
-  // The identity authority rotation delay has the same one-hour floor.
-  await assert.rejects(initialize(3600, 1), /InvalidDelay/);
-  await assert.rejects(initialize(3600, 3599), /InvalidDelay/);
-  await initialize(3600);
+  await assert.rejects(initialize(-1), /InvalidDelay/);
+  await assert.rejects(initialize(30 * 86400 + 1), /InvalidDelay/);
+  await assert.rejects(initialize(0, -1), /InvalidDelay/);
+  await assert.rejects(initialize(0, 90 * 86400 + 1), /InvalidDelay/);
+  await initialize(0, 0);
+  const project = pda(
+    Buffer.from("project"),
+    payer.publicKey.toBuffer(),
+    Buffer.from(hash("production-delay:0:0")),
+    Buffer.from([0]),
+  );
+  const vault = pda(Buffer.from("vault"), project.toBuffer());
+  const wallet = Keypair.generate();
+  const source = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    payer.publicKey,
+  );
+  const destination = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    wallet.publicKey,
+  );
+  const feeAccount = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    configFees.publicKey,
+  );
+  await mintTo(provider.connection, payer, mint, source, payer, 1000n);
+  await program.methods
+    .deposit(new BN(1000))
+    .accountsStrict({
+      depositor: payer.publicKey,
+      project,
+      mint,
+      source,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+  const origin = Buffer.from(hash("immediate-payment"));
+  const awardId = createHash("sha256")
+    .update(
+      Buffer.concat([
+        Buffer.from("slop-escrow-award"),
+        project.toBuffer(),
+        origin,
+      ]),
+    )
+    .digest();
+  const actorSeed = new BN(101).toArrayLike(Buffer, "le", 8);
+  const obligation = pda(Buffer.from("award"), project.toBuffer(), awardId);
+  const binding = pda(Buffer.from("wallet"), project.toBuffer(), actorSeed);
+  const commit = await program.methods
+    .commit([...awardId], [...origin], new BN(101), new BN(1000))
+    .accountsStrict({
+      owner: payer.publicKey,
+      project,
+      vault,
+      obligation,
+      origin: pda(Buffer.from("origin"), project.toBuffer(), origin),
+      systemProgram: SystemProgram.programId,
+    })
+    .instruction();
+  const bind = await program.methods
+    .bindWallet(
+      new BN(101),
+      hash("solana:localnet:escrow-v2"),
+      new BN(0),
+      hash("immediate-claim"),
+      new BN(Math.floor(Date.now() / 1000) + 3600),
+    )
+    .accountsStrict({
+      payer: payer.publicKey,
+      identityAuthority: configIdentity.publicKey,
+      destination: wallet.publicKey,
+      project,
+      binding,
+      systemProgram: SystemProgram.programId,
+    })
+    .instruction();
+  const payAccounts = {
+    project,
+    obligation,
+    binding,
+    mint,
+    vault,
+    destination,
+    tokenProgram: TOKEN_PROGRAM_ID,
+    veto: pda(
+      Buffer.from("veto"),
+      project.toBuffer(),
+      actorSeed,
+      new BN(1).toArrayLike(Buffer, "le", 8),
+    ),
+  };
+  const pay = await program.methods
+    .pay(new BN(1))
+    .accountsStrict(payAccounts)
+    .instruction();
+  // Same transaction: no slot or time can pass between commitment, binding and payment.
+  await sendAndConfirmTransaction(
+    provider.connection,
+    new Transaction().add(commit, bind, pay),
+    [payer, configIdentity, wallet],
+  );
+  assert.equal(
+    (await getAccount(provider.connection, destination)).amount,
+    980n,
+  );
+  // The fee accrues in the vault; anyone moves it to the fee recipient's account.
+  assert.equal(
+    (await program.account.project.fetch(project)).accruedFees.toString(),
+    "20",
+  );
+  assert.equal((await getAccount(provider.connection, feeAccount)).amount, 0n);
+  await program.methods
+    .claimFees()
+    .accountsStrict({
+      project,
+      mint,
+      vault,
+      feeAccount,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+  assert.equal((await getAccount(provider.connection, feeAccount)).amount, 20n);
+  assert.equal(
+    (await program.account.project.fetch(project)).reserved.toString(),
+    "0",
+  );
+  await assert.rejects(
+    program.methods.pay(new BN(1)).accountsStrict(payAccounts).rpc(),
+    /AlreadyPaid/,
+  );
+  const next = Keypair.generate().publicKey;
+  const propose = await program.methods
+    .proposeAuthorityRotation(next)
+    .accountsStrict({
+      owner: payer.publicKey,
+      project,
+      config: configAddress(program.programId),
+    })
+    .instruction();
+  const confirm = await program.methods
+    .confirmAuthorityRotation()
+    .accountsStrict({
+      rotationAuthority: configRotation.publicKey,
+      project,
+      config: configAddress(program.programId),
+    })
+    .instruction();
+  const execute = await program.methods
+    .executeAuthorityRotation()
+    .accountsStrict({ project })
+    .instruction();
+  await sendAndConfirmTransaction(
+    provider.connection,
+    new Transaction().add(propose, confirm, execute),
+    [payer, configRotation],
+  );
+  assert.equal(
+    (await program.account.project.fetch(project)).identityAuthority.toBase58(),
+    next.toBase58(),
+  );
 });

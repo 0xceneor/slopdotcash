@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 
 import "./OpusBase.sol";
 
@@ -168,13 +169,13 @@ contract BindingLifecycleTest is OpusBase {
     /// L-1: the factory bounds the delay to [1 hour, 30 days]; vaults are created only by the factory,
     /// so the vault constructor cannot be reached with any other delay.
     function test_delayBounds() public {
-        uint64[4] memory bad = [uint64(0), 1 hours - 1, 30 days + 1, type(uint64).max];
+        uint64[2] memory bad = [uint64(30 days + 1), type(uint64).max];
         for (uint256 i = 0; i < bad.length; i++) {
             vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-            new EscrowFactory(REGISTRAR, FEE, AUTHORITY, bad[i]);
+            DeployFactory.create(REGISTRAR, FEE, AUTHORITY, bad[i]);
         }
         vm.expectRevert();
-        new ProjectEscrow(keccak256("p"), IERC20(address(usdc)), OWNER, Purpose.Ordinary, FEE, 1 hours);
+        escrow.initialize(keccak256("p"), IERC20(address(usdc)), OWNER, Purpose.Ordinary, FEE, 1 hours);
         deployWithDelay(1 hours);
         ProjectEscrow low = escrow;
         deployWithDelay(30 days);

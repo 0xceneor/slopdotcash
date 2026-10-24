@@ -2,13 +2,13 @@
  * Proves the acceptance runner end to end on local chains with throwaway keys:
  * an Anvil fork of each EVM test network (real chain id and real test
  * stablecoin, funded with anvil_dealERC20) and a local Solana validator with
- * the test-delay build of the escrow program. Nothing is broadcast to a public
+ * the production build of the escrow program. Nothing is broadcast to a public
  * network; the forks only read public state.
  *
  *   bun scripts/escrow-acceptance/local.ts [network ...]
  *
- * Solana needs `SLOP_ESCROW_FEATURES=short-delay-for-tests bun run
- * build:contracts:solana` first, so the binding delay can be seconds.
+ * Solana needs `bun run build:contracts:solana` first. The production build
+ * accepts the short delays configured by this local workflow.
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { deployUpgradeableFactory } from "../../contracts/evm/integration/upgrade";
 import { solanaBase58 } from "../../contracts/solana/adapter";
 import { ESCROW_NETWORKS } from "../../src/lib/escrow-policy.mjs";
 import {
@@ -150,7 +151,7 @@ async function evmFork(network: string, port: number) {
       "ESCROW_ACCEPTANCE_RELAYER_KEY",
     ] as const)
       await rpc("anvil_setBalance", [address(name), "0x8ac7230489e80000"]);
-    const create = (contract: string, args: string[]) =>
+    const create = (contract: string, args: string[] = []) =>
       JSON.parse(
         Bun.spawnSync(
           [
@@ -166,13 +167,12 @@ async function evmFork(network: string, port: number) {
             address("ESCROW_ACCEPTANCE_REGISTRAR_KEY"),
             "--broadcast",
             "--json",
-            "--constructor-args",
-            ...args,
+            ...(args.length ? ["--constructor-args", ...args] : []),
           ],
           { stderr: "inherit" },
         ).stdout.toString(),
       ).deployedTo as string;
-    const factory = create("src/ProjectEscrow.sol:EscrowFactory", [
+    const factory = deployUpgradeableFactory(create, [
       address("ESCROW_ACCEPTANCE_REGISTRAR_KEY"),
       feeRecipient,
       address("ESCROW_ACCEPTANCE_IDENTITY_KEY"),
@@ -235,7 +235,12 @@ async function solanaLocalnet() {
     "deploy",
     "slop_escrow.so",
   );
-  const programId = "4hXeYxsTKbwVKRRn8P1emGNDmVUSx13VMykfUAsbPnnj";
+  const programId: string = JSON.parse(
+    readFileSync(
+      join(root, "contracts", "solana", "idl", "slop_escrow.json"),
+      "utf8",
+    ),
+  ).address;
   const seed = () =>
     Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("hex");
   const pubkey = (hex: string) =>

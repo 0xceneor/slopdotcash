@@ -235,7 +235,6 @@ function escrow(programId: PublicKey) {
       mint: PublicKey;
       vault: PublicKey;
       destination: PublicKey;
-      feeAccount: PublicKey;
       gross: bigint;
     }) =>
       ix(
@@ -246,11 +245,23 @@ function escrow(programId: PublicKey) {
           meta(input.mint),
           meta(input.vault, true),
           meta(input.destination, true),
-          meta(input.feeAccount, true),
           meta(TOKEN_PROGRAM_ID),
         ],
         u64(input.gross),
       ),
+    claimFees: (input: {
+      project: PublicKey;
+      mint: PublicKey;
+      vault: PublicKey;
+      feeAccount: PublicKey;
+    }) =>
+      ix("claim_fees", [
+        meta(input.project, true),
+        meta(input.mint),
+        meta(input.vault, true),
+        meta(input.feeAccount, true),
+        meta(TOKEN_PROGRAM_ID),
+      ]),
     pay: (input: {
       project: PublicKey;
       awardId: Buffer;
@@ -259,7 +270,6 @@ function escrow(programId: PublicKey) {
       mint: PublicKey;
       vault: PublicKey;
       destination: PublicKey;
-      feeAccount: PublicKey;
     }) =>
       ix(
         "pay",
@@ -280,7 +290,6 @@ function escrow(programId: PublicKey) {
           meta(input.mint),
           meta(input.vault, true),
           meta(input.destination, true),
-          meta(input.feeAccount, true),
           meta(TOKEN_PROGRAM_ID),
           meta(
             pda(
@@ -567,14 +576,14 @@ export async function runSolana(
   if (new Set(addresses).size !== addresses.length)
     throw new Error("Every test role needs its own key");
   const bindingDelay = BigInt(
-    process.env.ESCROW_ACCEPTANCE_BINDING_DELAY_SECONDS ?? "3600",
+    process.env.ESCROW_ACCEPTANCE_BINDING_DELAY_SECONDS ?? "0",
   );
   const rotationDelay = BigInt(
-    process.env.ESCROW_ACCEPTANCE_ROTATION_DELAY_SECONDS ?? "7200",
+    process.env.ESCROW_ACCEPTANCE_ROTATION_DELAY_SECONDS ?? "0",
   );
   // The project registry refuses a Solana deployment whose rotation notice
   // reaches four binding delays (assertEscrowPolicy), so stop before signing.
-  if (rotationDelay >= 4n * bindingDelay)
+  if (bindingDelay > 0n && rotationDelay >= 4n * bindingDelay)
     throw new Error(
       "ESCROW_ACCEPTANCE_ROTATION_DELAY_SECONDS must be shorter than four binding delays",
     );
@@ -1030,7 +1039,6 @@ export async function runSolana(
         mint,
         vault,
         destination: ata(keys.owner.publicKey),
-        feeAccount,
         gross,
       });
     if (!entry.checks.reservedNotWithdrawable)
@@ -1051,7 +1059,7 @@ export async function runSolana(
         awards[role],
         project,
         mint,
-        feeAccount,
+        vault,
       );
 
     // 6. Replay dispatch: no second attempt, no second transfer.
@@ -1122,7 +1130,6 @@ export async function runSolana(
         mint,
         vault,
         destination: ata(keys.registered.publicKey),
-        feeAccount,
       });
       const simulated = await chain.mustFail(keys.depositor, [payIx]);
       const mined = await send(
@@ -1152,7 +1159,8 @@ export async function runSolana(
       await persist();
     }
 
-    // 7. Withdraw the 850 free units: 2% to the fee account, the rest to the owner.
+    // 7. Withdraw the 850 free units: the rest to the owner, 2% kept in the vault as
+    // an accrued fee.
     const withdrawal = await send(
       "withdraw-unused",
       [keys.owner],
@@ -1161,18 +1169,18 @@ export async function runSolana(
     if (!entry.checks.withdrawal) {
       const deltas = await chain.tokenDeltas(withdrawal.transactionId);
       const ownerDelta = deltas.get(ata(keys.owner.publicKey).toBase58());
-      const feeDelta = deltas.get(feeAccount.toBase58());
+      const vaultDelta = deltas.get(vault.toBase58());
       entry.checks.withdrawal = {
         gross: amounts.withdrawGross.toString(),
-        fee: String(feeDelta),
+        fee: String(amounts.withdrawGross + (vaultDelta ?? 0n)),
         net: String(ownerDelta),
         destination: ata(keys.owner.publicKey).toBase58(),
       };
       if (
         ownerDelta !== amounts.withdrawGross - amounts.withdrawFee ||
-        feeDelta !== amounts.withdrawFee
+        vaultDelta !== -ownerDelta
       )
-        throw new Error("Withdrawal did not pay floor(gross / 50) as the fee");
+        throw new Error("Withdrawal did not keep floor(gross / 50) as the fee");
       await persist();
     }
     if (!entry.checks.overWithdrawal)
@@ -1181,8 +1189,27 @@ export async function runSolana(
         ...(await chain.mustFail(keys.owner, [withdrawIx(1n)])),
       };
 
-    // 8. The cached vault_snapshots row equals the finalized chain counters.
-    await ready(() => chain.waitFinalized(withdrawal.transactionId));
+    // 8. Anyone claims the accrued payout and withdrawal fees to the fee recipient.
+    const accrued = amounts.feeA + amounts.feeB + amounts.withdrawFee;
+    const claim = await send(
+      "claim-fees",
+      [keys.depositor],
+      [program.claimFees({ project, mint, vault, feeAccount })],
+    );
+    if (!entry.checks.feeClaim) {
+      const deltas = await chain.tokenDeltas(claim.transactionId);
+      const feeDelta = deltas.get(feeAccount.toBase58());
+      entry.checks.feeClaim = {
+        amount: String(feeDelta),
+        feeAccount: feeAccount.toBase58(),
+      };
+      if (feeDelta !== accrued || deltas.get(vault.toBase58()) !== -accrued)
+        throw new Error(`Fee claim moved ${feeDelta}, not ${accrued}`);
+      await persist();
+    }
+
+    // 9. The cached vault_snapshots row equals the finalized chain counters.
+    await ready(() => chain.waitFinalized(claim.transactionId));
     for (let tick = 0; tick < 3; tick++) await runPaymentsCron(env);
     const totals = await readVaultTotals({
       rpcUrl,
@@ -1200,7 +1227,7 @@ export async function runSolana(
       freeBalance: "0",
       reservedPrincipal: null,
       reservedFees: null,
-      accruedFees: null,
+      accruedFees: "0",
       reserved: "0",
     });
     entry.checks.reconciliation = {
@@ -1222,7 +1249,7 @@ export async function runSolana(
     award: { id: string; net: bigint; fee: bigint },
     project: PublicKey,
     mint: PublicKey,
-    feeAccount: PublicKey,
+    vault: PublicKey,
   ) {
     const key = `paid-${role}`;
     if (entry.checks[key]) return;
@@ -1294,12 +1321,13 @@ export async function runSolana(
       mint,
       wallet.publicKey,
     ).toBase58();
+    // The fee stays in the vault until claim_fees: only the net leaves it.
     if (
       deltas.get(destination) !== award.net ||
-      deltas.get(feeAccount.toBase58()) !== award.fee
+      deltas.get(vault.toBase58()) !== -award.net
     )
       throw new Error(
-        `${role}: payment moved ${deltas.get(destination)} + ${deltas.get(feeAccount.toBase58())}, not ${award.net} + ${award.fee}`,
+        `${role}: payment moved ${deltas.get(destination)} from ${deltas.get(vault.toBase58())}, not ${award.net}`,
       );
     const binding = await connection.getAccountInfo(
       program.binding(project, BigInt(actor.githubUserId)),
@@ -1332,7 +1360,7 @@ export async function runSolana(
       net: award.net.toString(),
       fee: award.fee.toString(),
       destinationDelta: String(deltas.get(destination)),
-      feeDelta: String(deltas.get(feeAccount.toBase58())),
+      vaultDelta: String(deltas.get(vault.toBase58())),
       ledgerState: obligation.state,
       outbox: projection.outbox(award.id),
     };

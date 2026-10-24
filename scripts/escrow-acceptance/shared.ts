@@ -201,7 +201,10 @@ export interface AssetEvidence {
   projectId: string;
   onchainProjectId: string;
   vault: string | null;
-  deployment: Record<string, string | null>;
+  deployment: Record<
+    string,
+    string | null | import("../../contracts/evm/adapter").EvmUpgrade
+  >;
   steps: Record<string, StepRecord>;
   checks: Record<string, unknown>;
   status: "pending" | "passed";

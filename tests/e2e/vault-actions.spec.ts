@@ -9,6 +9,10 @@ import {
   EVM_ESCROW_EVENT_TOPICS,
   evmVaultKey,
 } from "../../contracts/evm/adapter";
+import {
+  captureUpgrade,
+  deployUpgradeableFactory,
+} from "../../contracts/evm/integration/upgrade";
 import type { EscrowDeployment } from "../../src/lib/escrow-policy.mjs";
 import { formatAssetAmount } from "../../src/lib/project-schema.mjs";
 import { PROJECTS } from "../../src/lib/projects.mjs";
@@ -102,12 +106,10 @@ test.beforeAll(async () => {
   const token = deploy(
     "integration/TestDollar.sol:TestDollar",
   ).deployedTo.toLowerCase() as `0x${string}`;
-  const factory = deploy("src/ProjectEscrow.sol:EscrowFactory", [
-    registrar,
-    fee,
-    attester,
-    "3600",
-  ]).deployedTo.toLowerCase() as `0x${string}`;
+  const factory = deployUpgradeableFactory(
+    (contract, args) => deploy(contract, args).deployedTo,
+    [registrar, fee, attester, "3600"],
+  ).toLowerCase() as `0x${string}`;
   const projectDigest = `0x${"a".repeat(64)}` as `0x${string}`;
   const createHashId = await rpc("eth_sendTransaction", [
     {
@@ -168,6 +170,7 @@ test.beforeAll(async () => {
       )
       .digest("hex");
   deployment = {
+    evmUpgrade: await captureUpgrade(rpc, factory, vault),
     network: "base-sepolia",
     vault,
     asset: token,

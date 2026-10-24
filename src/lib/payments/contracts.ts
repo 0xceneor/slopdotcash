@@ -22,14 +22,33 @@ export interface AccountPayment extends PaymentAsset {
   netBase: string;
   feeBase: string;
   state: "reserved" | "paid";
-  deliveryState:
-    | "needs_wallet"
-    | "awaiting_binding"
-    | "submitted"
-    | "held"
-    | "paid";
+  /** PRD section 6 payment states of a reserved award. */
+  deliveryState: "needs_wallet" | "ready" | "submitted" | "held" | "paid";
   submittedTransactionId: string | null;
   transactionId: string | null;
+}
+/**
+ * A monthly award's state before and after its vault reservation. Owners and
+ * contributors read the same value; a reserved or paid state comes only from
+ * the finalized chain projection.
+ */
+export type MonthlyAwardState =
+  | "underfunded"
+  | "awaiting-reservation"
+  | "reserved"
+  | "paid";
+/**
+ * An approved monthly award that is frozen but not yet reserved in the vault
+ * (PRD sections 3 and 6). Once reserved it is an AccountPayment instead.
+ */
+export interface AccountMonthlyAward extends PaymentAsset {
+  projectId: string;
+  period: string;
+  chain: PaymentChain;
+  grossBase: string;
+  feeBase: string;
+  netBase: string;
+  state: Extract<MonthlyAwardState, "underfunded" | "awaiting-reservation">;
 }
 export interface PaymentsAccount {
   githubUserId: string;
@@ -41,6 +60,8 @@ export interface PaymentsAccount {
     activationEligibleAt: string | null;
   }[];
   payments: AccountPayment[];
+  /** Approved monthly awards not yet reserved; never counted in `balances`. */
+  monthlyAwards: AccountMonthlyAward[];
   /** Unpaid net per network and asset; never summed across networks or assets. */
   balances: (PaymentAsset & { chain: PaymentChain; netBase: string })[];
   /** Imported from reviewed disclosures; never an escrow `paid` state. */

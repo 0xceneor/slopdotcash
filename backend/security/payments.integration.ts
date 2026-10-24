@@ -12,6 +12,10 @@ import {
   evmBindingTypedData,
   evmVaultKey,
 } from "../../contracts/evm/adapter";
+import {
+  captureUpgrade,
+  deployUpgradeableFactory,
+} from "../../contracts/evm/integration/upgrade";
 import { sqliteD1 } from "../../tests/sqlite-d1";
 import {
   createEvmExecutor,
@@ -83,6 +87,9 @@ async function send(
   return tx as string;
 }
 function deploy(contract: string, args: string[] = []) {
+  if (contract === "src/ProjectEscrow.sol:EscrowFactory" && args.length)
+    return deployUpgradeableFactory(deploy, args);
+
   return JSON.parse(
     execFileSync(
       "forge",
@@ -215,6 +222,7 @@ try {
     .trim()
     .toLowerCase();
   const deployment = {
+    evmUpgrade: await captureUpgrade(rpc, factory, vault),
     network: "base-sepolia",
     vault,
     asset: token,

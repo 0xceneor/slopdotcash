@@ -20,7 +20,7 @@ import {
 } from "./lib/payments/contracts";
 import { isDirectTransfer } from "./lib/use-direct-transfers";
 import { type PayoutWallet, usePayoutWallets } from "./lib/use-payout-wallets";
-import { formatDate, formatDateTime } from "./Presentation";
+import { formatCycleMonth, formatDate, formatDateTime } from "./Presentation";
 
 const networkName: Record<EscrowChain, string> = {
   base: "Base",
@@ -121,13 +121,24 @@ function account(value: unknown): PaymentsAccount {
         !isBaseUnits(p.feeBase) ||
         BigInt(p.grossBase) !== BigInt(p.netBase) + BigInt(p.feeBase) ||
         !["reserved", "paid"].includes(p.state) ||
-        ![
-          "needs_wallet",
-          "awaiting_binding",
-          "submitted",
-          "held",
-          "paid",
-        ].includes(p.deliveryState),
+        !["needs_wallet", "ready", "submitted", "held", "paid"].includes(
+          p.deliveryState,
+        ),
+    ) ||
+    !Array.isArray(data.monthlyAwards) ||
+    data.monthlyAwards.some(
+      (m) =>
+        !m ||
+        !ESCROW_CHAINS.includes(m.chain) ||
+        typeof m.projectId !== "string" ||
+        typeof m.network !== "string" ||
+        !/^\d{4}-(?:0[1-9]|1[0-2])$/u.test(m.period) ||
+        !asset(m) ||
+        !isBaseUnits(m.grossBase) ||
+        !isBaseUnits(m.netBase) ||
+        !isBaseUnits(m.feeBase) ||
+        BigInt(m.grossBase) !== BigInt(m.netBase) + BigInt(m.feeBase) ||
+        !["underfunded", "awaiting-reservation"].includes(m.state),
     ) ||
     data.balances.some(
       (b) =>
@@ -683,7 +694,8 @@ export function EarningsPage({
                 >
                   Refresh payments
                 </button>
-                {data.payments.length === 0 ? (
+                {data.payments.length === 0 &&
+                data.monthlyAwards.length === 0 ? (
                   <p>
                     No funded escrow awards yet. Proposed rewards appear on
                     project pages until they are approved and funded.
@@ -696,9 +708,7 @@ export function EarningsPage({
                     tabIndex={0}
                   >
                     <table>
-                      <caption>
-                        Approved, funded awards and verified payments
-                      </caption>
+                      <caption>Approved awards and verified payments</caption>
                       <thead>
                         <tr>
                           <th>Project</th>
@@ -710,6 +720,29 @@ export function EarningsPage({
                         </tr>
                       </thead>
                       <tbody>
+                        {data.monthlyAwards.map((award) => (
+                          <tr key={`${award.projectId}/${award.period}`}>
+                            <td>
+                              <a
+                                href={`/projects/${encodeURIComponent(award.projectId)}`}
+                              >
+                                {award.projectId}
+                              </a>{" "}
+                              ({formatCycleMonth(award.period)})
+                            </td>
+                            <td>
+                              {networkLabels[award.network] ?? award.network}
+                            </td>
+                            <td>{formatAssetAmount(award.grossBase, award)}</td>
+                            <td>{formatAssetAmount(award.feeBase, award)}</td>
+                            <td>{formatAssetAmount(award.netBase, award)}</td>
+                            <td>
+                              {award.state === "underfunded"
+                                ? "Approved, underfunded: waiting for the project to add funds"
+                                : "Approved and funded, waiting for the vault reservation"}
+                            </td>
+                          </tr>
+                        ))}
                         {data.payments.map((payment) => (
                           <tr key={payment.id}>
                             <td>
@@ -737,8 +770,7 @@ export function EarningsPage({
                                 {
                                   paid: "Paid, verified on chain",
                                   needs_wallet: `Add or confirm ${networkName[payment.chain]} wallet`,
-                                  awaiting_binding:
-                                    "Funded, awaiting wallet binding",
+                                  ready: "Ready, payment queued",
                                   submitted:
                                     "Submitted, waiting for chain verification",
                                   held: "Payment held, funds remain reserved",

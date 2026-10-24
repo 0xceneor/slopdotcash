@@ -677,14 +677,16 @@ test("durable executor verifies SQLite consent, binds, creates ATAs, pays and re
     ).amount,
     98_000_000n,
   );
+  // The fee accrues in the vault; the executor no longer touches a fee account.
   assert.equal(
-    (
-      await getAccount(
-        provider.connection,
-        getAssociatedTokenAddressSync(mint, fee.publicKey),
-      )
-    ).amount,
-    2_000_000n,
+    (await program.account.project.fetch(project)).accruedFees.toString(),
+    "2000000",
+  );
+  assert.equal(
+    await provider.connection.getAccountInfo(
+      getAssociatedTokenAddressSync(mint, fee.publicKey),
+    ),
+    null,
   );
   const [{ index: eventIndex }] = escrowInvocations(
     await parsedTransaction(sent.transactionId),

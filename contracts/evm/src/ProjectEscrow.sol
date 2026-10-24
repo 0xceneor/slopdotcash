@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
+import {ERC1967Proxy} from "../vendor/openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {UUPSUpgradeable} from "../vendor/openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
+import {Initializable} from "../vendor/openzeppelin/contracts/proxy/utils/Initializable.sol";
+
 interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
     function transfer(address to, uint256 value) external returns (bool);
@@ -9,7 +13,7 @@ interface IERC20 {
 }
 
 /// @dev Bounds on award-commit and unpaid-binding review periods. Wallet activation is immediate.
-uint64 constant MIN_BINDING_DELAY = 1 hours;
+uint64 constant MIN_BINDING_DELAY = 0;
 uint64 constant MAX_BINDING_DELAY = 30 days;
 
 /// @dev A monthly allocation for calendar UTC month M can be committed from MONTHLY_CUTOFF_DELAY after M ends
@@ -23,22 +27,21 @@ enum Purpose {
     Bounty
 }
 
-/// @notice Version 5, immutable single-project, single-asset, single-purpose escrow for any standard ERC-20.
+/// @notice Version 5 signatures, upgradeable single-project, single-asset, single-purpose escrow for any standard ERC-20.
 /// @dev A binding needs the identity authority's transaction and the destination wallet's EIP-712 signature.
 /// The latest verified binding activates immediately; earlier versions never pay. An award still waits
 /// bindingDelay after commitment. The owner may cancel an unpaid binding during its review window or an
 /// award's commit window, subject to MAX_CANCELS_BETWEEN_PAYMENTS. Payment and cancellation may race:
 /// cancellation is effective only if mined first. It cannot guarantee recovery from a compromised
-/// identity authority that also controls the destination key. Factory authority rotation retains its
-/// public seven-day delay. Fees accrue separately, so a blocked fee recipient cannot stop payouts.
+/// identity authority that also controls the destination key. Factory authority rotation has no mandatory delay. Fees accrue separately, so a blocked fee recipient cannot stop payouts.
 /// Anyone may deposit; deposits join one free balance that only the owner commits or refunds to itself. An
 /// ordinary vault also accepts one monthly allocation per calendar month from anyone, when the owner has
 /// turned it on, the identity authority signed it, and its total is within the owner's monthly cap.
 /// The payout fee and the unused-fund withdrawal fee are both 2% (floor(gross / 50)), so awarding
 /// free funds to oneself costs the same as withdrawing them (#907); each fee rounds down once per award or
 /// withdrawal. Tokens must have exact transfers: a fee-on-transfer deposit or payout reverts. Decimals are stored for display only; amounts are
-/// token base units. No upgrade or reserve rescue exists.
-contract ProjectEscrow {
+/// token base units. The factory upgrade authority may replace vault logic without a timelock.
+contract ProjectEscrow is Initializable, UUPSUpgradeable {
     struct Award {
         uint64 actorId;
         uint128 gross;
@@ -77,16 +80,16 @@ contract ProjectEscrow {
     /// @dev Upper bound on s for a canonical secp256k1 signature (EIP-2).
     bytes32 private constant MAX_S = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
-    IERC20 public immutable token;
+    IERC20 public token;
     /// @notice The token's decimals at vault creation, for display only. The vault never scales amounts.
-    uint8 public immutable decimals;
-    bytes32 public immutable projectId;
-    address public immutable owner;
-    Purpose public immutable purpose;
-    address public immutable feeRecipient;
+    uint8 public decimals;
+    bytes32 public projectId;
+    address public owner;
+    Purpose public purpose;
+    address public feeRecipient;
     /// @notice The factory that created this vault and holds the identity authority in force.
-    EscrowFactory public immutable factory;
-    uint64 public immutable bindingDelay;
+    EscrowFactory public factory;
+    uint64 public bindingDelay;
     uint128 public freeBalance;
     uint128 public reservedPrincipal;
     uint128 public reservedFees;
@@ -162,14 +165,22 @@ contract ProjectEscrow {
 
     /// @dev Only the factory creates vaults: the deployer is the factory, and reading its authority here
     /// reverts for any other deployer.
-    constructor(
+    constructor() {
+        _disableInitializers();
+    }
+
+    function _authorizeUpgrade(address) internal view override {
+        if (msg.sender != factory.upgradeAuthority()) revert Unauthorized();
+    }
+
+    function initialize(
         bytes32 projectId_,
         IERC20 token_,
         address owner_,
         Purpose purpose_,
         address feeRecipient_,
         uint64 bindingDelay_
-    ) {
+    ) external initializer {
         EscrowFactory factory_ = EscrowFactory(msg.sender);
         address identityAuthority_ = factory_.identityAuthority();
         // Free funds are refunded only to the owner, whoever deposited them.
@@ -375,8 +386,8 @@ contract ProjectEscrow {
 
     /// @notice Anyone may commit one period's allocation inside its window, once per period, while the owner
     /// has monthly commitments on. The identity authority must have signed monthlyDigest(period, root) for
-    /// exactly these awards, and their gross total must be within monthlyCap and the free balance. Each award
-    /// takes the ordinary payout fee and pays through the ordinary binding and delay rules.
+    /// exactly these awards, and their gross total must be within monthlyCap. The free balance covers new
+    /// awards only; matching existing awards retain their payment state and are never reserved twice.
     function commitMonthly(uint32 period, MonthlyAward[] calldata entries, bytes calldata attestation) external {
         if (purpose != Purpose.Ordinary) revert WrongPurpose();
         if (!monthlyEnabled) revert MonthlyDisabled();
@@ -388,14 +399,28 @@ contract ProjectEscrow {
             revert InvalidAttestation();
         }
         uint256 total;
+        bool[] memory alreadyCommitted = new bool[](entries.length);
         for (uint256 i; i < entries.length; ++i) {
             total += entries[i].gross;
+            alreadyCommitted[i] = awards[awardId(entries[i].sourceDigest)].actorId != 0;
         }
         if (total > monthlyCap) revert MonthlyCapExceeded();
         monthlyRoots[period] = root;
         for (uint256 i; i < entries.length; ++i) {
             MonthlyAward calldata entry = entries[i];
-            commit(awardId(entry.sourceDigest), entry.actorId, entry.gross, entry.sourceDigest, payoutFee(entry.gross));
+            bytes32 id = awardId(entry.sourceDigest);
+            Award storage existing = awards[id];
+            uint128 fee = payoutFee(entry.gross);
+            if (alreadyCommitted[i]) {
+                // An owner can reserve or pay an award while this signed allocation is in transit.
+                // Count the exact same obligation once; a changed award must still fail closed.
+                if (
+                    existing.actorId != entry.actorId || existing.gross != entry.gross
+                        || existing.sourceDigest != entry.sourceDigest || existing.fee != fee
+                ) revert DuplicateAward();
+            } else {
+                commit(id, entry.actorId, entry.gross, entry.sourceDigest, fee);
+            }
         }
         emit MonthlyCommitted(period, root, uint128(total), entries.length);
     }
@@ -550,15 +575,16 @@ contract ProjectEscrow {
 /// project ID, token, purpose) in this deployment. The token is a per-vault parameter, so one factory serves
 /// every standard ERC-20 on its chain. A vault proves only who created it; the project registry decides
 /// which owner's vault a project uses.
-/// The registrar is not a money authority and creates no vaults. It holds the only mutable authority: the
-/// identity authority every vault reads, replaced through a public 7-day timelock that the registrar
-/// proposes and may cancel, and that the current authority cannot block.
-/// The registrar, fee recipient and identity authority are explicit constructor parameters.
-contract EscrowFactory {
-    uint64 public constant AUTHORITY_ROTATION_DELAY = 7 days;
-    address public immutable registrar;
-    address public immutable feeRecipient;
-    uint64 public immutable bindingDelay;
+/// The registrar rotates the identity authority without a mandatory waiting period. The separate
+/// upgrade authority controls factory and vault upgrades and may change logic governing deposited funds.
+contract EscrowFactory is Initializable, UUPSUpgradeable {
+    uint64 public constant AUTHORITY_ROTATION_DELAY = 0;
+    address public upgradeAuthority;
+    address public pendingUpgradeAuthority;
+    address public vaultImplementation;
+    address public registrar;
+    address public feeRecipient;
+    uint64 public bindingDelay;
     address public identityAuthority;
     address public pendingIdentityAuthority;
     uint64 public identityAuthorityEffectiveAt;
@@ -587,7 +613,37 @@ contract EscrowFactory {
         _;
     }
 
-    constructor(address registrar_, address feeRecipient_, address identityAuthority_, uint64 bindingDelay_) {
+    event UpgradeAuthorityProposed(address indexed authority);
+    event UpgradeAuthorityTransferred(address indexed previous, address indexed authority);
+    event VaultImplementationSet(address indexed implementation);
+
+    modifier onlyUpgradeAuthority() {
+        if (msg.sender != upgradeAuthority) revert ProjectEscrow.Unauthorized();
+        _;
+    }
+
+    constructor() {
+        _disableInitializers();
+    }
+
+    function _authorizeUpgrade(address) internal view override onlyUpgradeAuthority {}
+
+    function initialize(
+        address registrar_,
+        address feeRecipient_,
+        address identityAuthority_,
+        uint64 bindingDelay_,
+        address upgradeAuthority_,
+        address vaultImplementation_
+    ) external initializer {
+        if (
+            upgradeAuthority_ == address(0) || upgradeAuthority_ == feeRecipient_
+                || upgradeAuthority_ == identityAuthority_
+        ) {
+            revert ProjectEscrow.InvalidInput();
+        }
+        upgradeAuthority = upgradeAuthority_;
+        _setVaultImplementation(vaultImplementation_);
         if (
             registrar_ == address(0) || feeRecipient_ == address(0) || identityAuthority_ == address(0)
                 || identityAuthority_ == registrar_ || bindingDelay_ < MIN_BINDING_DELAY
@@ -599,6 +655,40 @@ contract EscrowFactory {
         bindingDelay = bindingDelay_;
     }
 
+    /// @notice Transfer upgrade control with recipient acceptance; no time delay applies.
+    function proposeUpgradeAuthority(address next) external onlyUpgradeAuthority {
+        if (next == address(0) || next == feeRecipient || next == identityAuthority || next == pendingIdentityAuthority)
+        {
+            revert ProjectEscrow.InvalidInput();
+        }
+        pendingUpgradeAuthority = next;
+        emit UpgradeAuthorityProposed(next);
+    }
+
+    function acceptUpgradeAuthority() external {
+        if (msg.sender != pendingUpgradeAuthority) revert ProjectEscrow.Unauthorized();
+        address previous = upgradeAuthority;
+        upgradeAuthority = msg.sender;
+        delete pendingUpgradeAuthority;
+        emit UpgradeAuthorityTransferred(previous, msg.sender);
+    }
+
+    /// @notice Select the implementation for future vaults. Existing vaults require individual upgrades.
+    function setVaultImplementation(address implementation_) external onlyUpgradeAuthority {
+        _setVaultImplementation(implementation_);
+    }
+
+    function _setVaultImplementation(address implementation_) private {
+        if (
+            UUPSUpgradeable(implementation_).proxiableUUID()
+                != 0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc
+        ) {
+            revert ProjectEscrow.InvalidInput();
+        }
+        vaultImplementation = implementation_;
+        emit VaultImplementationSet(implementation_);
+    }
+
     /// @notice The mapping key and CREATE2 salt of an owner's vault for a project, token and purpose.
     function vaultKey(address owner, bytes32 projectId, IERC20 token, Purpose purpose) public pure returns (bytes32) {
         return keccak256(abi.encode(owner, projectId, token, purpose));
@@ -608,16 +698,25 @@ contract EscrowFactory {
     function create(bytes32 projectId, IERC20 token, Purpose purpose) external returns (address vault) {
         bytes32 key = vaultKey(msg.sender, projectId, token, purpose);
         if (vaults[key] != address(0)) revert DuplicateVault();
-        ProjectEscrow created =
-            new ProjectEscrow{salt: key}(projectId, token, msg.sender, purpose, feeRecipient, bindingDelay);
-        vault = address(created);
+        vault = address(
+            new ERC1967Proxy{salt: key}(
+                vaultImplementation,
+                abi.encodeCall(
+                    ProjectEscrow.initialize, (projectId, token, msg.sender, purpose, feeRecipient, bindingDelay)
+                )
+            )
+        );
+        ProjectEscrow created = ProjectEscrow(vault);
         vaults[key] = vault;
         emit VaultCreated(projectId, address(token), vault, msg.sender, purpose, created.decimals());
     }
 
     /// @notice Starts the public notice period for a replacement identity authority. One proposal at a time.
     function proposeIdentityAuthority(address next) external onlyRegistrar {
-        if (next == address(0) || next == identityAuthority || next == registrar) revert ProjectEscrow.InvalidInput();
+        if (
+            next == address(0) || next == identityAuthority || next == registrar || next == upgradeAuthority
+                || next == pendingUpgradeAuthority
+        ) revert ProjectEscrow.InvalidInput();
         if (pendingIdentityAuthority != address(0)) revert RotationPending();
         uint64 effectiveAt = uint64(block.timestamp) + AUTHORITY_ROTATION_DELAY;
         pendingIdentityAuthority = next;

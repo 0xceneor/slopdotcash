@@ -8,6 +8,9 @@
  *     upgrade authority signs once, before the upgrade authority is revoked.
  *   node scripts/config-plan.mjs projects reviewed-config-input.json
  *     Lists every Project account of the program and whether the Config pins it.
+ *   node scripts/config-plan.mjs migrate reviewed-config-input.json
+ *     Builds one unsigned `migrate_project` transaction per 316-byte Project,
+ *     paid by `payer`. Any key may sign it; it only grows the account.
  *
  * The input file holds `programId`, `upgradeAuthority`, `codeSha256`,
  * `identityAuthority`, `feeRecipient` and `rotationAuthority`. RPC URL, expected genesis and a fresh
@@ -26,6 +29,9 @@ import {
 import { verifyProgram } from "./owner-plan.mjs";
 
 const PROJECT_DISCRIMINATOR = "cda8bdcab5f78e13";
+/** Project sizes before and after accrued fees and the monthly gate were appended. */
+const LEGACY_PROJECT_SIZE = 316;
+const PROJECT_SIZE = 332;
 const UPGRADEABLE_LOADER = new PublicKey(
   "BPFLoaderUpgradeab1e11111111111111111111111",
 );
@@ -152,19 +158,60 @@ export async function listProjects(input, runtime) {
           mint: base58(data.subarray(168, 200)),
           pinned:
             pinned !== null &&
-            data.length === 316 &&
+            data.length === PROJECT_SIZE &&
             feeRecipient === pinned.feeRecipient.toBase58(),
+          migrationRequired: data.length === LEGACY_PROJECT_SIZE,
         };
       })
       .sort((a, b) => a.address.localeCompare(b.address)),
   };
 }
 
+/** Unsigned migrate_project transactions for every Project of the 316-byte layout. */
+export async function migratePlan(input, runtime) {
+  if (typeof input.payer !== "string")
+    throw new Error("migrate_project needs a payer for the added rent");
+  const { connection, program } = await connect(input, runtime);
+  await verifyProgram(connection, program.programId, input);
+  const payer = new PublicKey(input.payer);
+  const blockhash = new PublicKey(runtime.recentBlockhash).toBase58();
+  const { projects } = await listProjects(input, runtime);
+  const transactions = [];
+  for (const project of projects.filter((row) => row.migrationRequired)) {
+    const instruction = await program.methods
+      .migrateProject()
+      .accountsStrict({
+        payer,
+        project: new PublicKey(project.address),
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    transactions.push({
+      project: project.address,
+      transactionBase64: new Transaction({
+        feePayer: payer,
+        recentBlockhash: blockhash,
+      })
+        .add(instruction)
+        .serialize({ requireAllSignatures: false, verifySignatures: false })
+        .toString("base64"),
+    });
+  }
+  return {
+    format: "solana-unsigned-legacy-transaction-v1",
+    programId: input.programId,
+    operation: "migrate-project",
+    requiredSigner: payer.toBase58(),
+    recentBlockhash: blockhash,
+    transactions,
+  };
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const [mode, file] = process.argv.slice(2);
-  if (!["plan", "projects"].includes(mode) || !file)
+  if (!["plan", "projects", "migrate"].includes(mode) || !file)
     throw new Error(
-      "Usage: node config-plan.mjs plan|projects reviewed-config-input.json",
+      "Usage: node config-plan.mjs plan|projects|migrate reviewed-config-input.json",
     );
   const input = JSON.parse(readFileSync(file, "utf8"));
   const runtime = {
@@ -176,7 +223,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     JSON.stringify(
       mode === "plan"
         ? await configPlan(input, runtime)
-        : await listProjects(input, runtime),
+        : mode === "migrate"
+          ? await migratePlan(input, runtime)
+          : await listProjects(input, runtime),
       null,
       2,
     ),

@@ -209,7 +209,6 @@ async function payInstruction(id, actor, address, version = 1) {
     mint,
     vault,
     destination: address,
-    feeAccount,
     tokenProgram: TOKEN_PROGRAM_ID,
     veto: veto(actor, latest),
   });
@@ -261,11 +260,25 @@ function withdraw(amount) {
       mint,
       vault,
       destination: source,
-      feeAccount,
       tokenProgram: TOKEN_PROGRAM_ID,
     })
     .rpc();
 }
+// Permissionless: moves every accrued fee to a token account the fee recipient owns.
+function claimFees(to = feeAccount) {
+  return program.methods
+    .claimFees()
+    .accountsStrict({
+      project,
+      mint,
+      vault,
+      feeAccount: to,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+}
+const accrued = async () =>
+  BigInt((await program.account.project.fetch(project)).accruedFees.toString());
 const balance = async (address) =>
   (await getAccount(provider.connection, address)).amount;
 test("actual SPL escrow lifecycle, late wallet claim, reserve and authority attacks", async () => {
@@ -385,7 +398,9 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
   await thawAccount(provider.connection, payer, destination, mint, payer);
   const firstPayment = await pay("first", 101, destination);
   assert.equal(await balance(destination), 98_000_000n);
-  assert.equal(await balance(feeAccount), 2_000_000n);
+  // The fee accrues in the vault until claim_fees.
+  assert.equal(await accrued(), 2_000_000n);
+  assert.equal(await balance(feeAccount), 0n);
   await assert.rejects(pay("first", 101, destination), /AlreadyPaid/);
   await assert.rejects(commit("first", 101, 100_000_000));
   // An award ID that is not bound to this project and source is rejected.
@@ -402,7 +417,6 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
         mint,
         vault,
         destination: source,
-        feeAccount,
         tokenProgram: TOKEN_PROGRAM_ID,
       })
       .signers([authority])
@@ -434,10 +448,10 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
   await assert.rejects(withdraw(850_000_001), /InsufficientFreeBalance/);
   await withdraw(1);
   assert.equal(await balance(source), 1n);
-  assert.equal(await balance(feeAccount), 2_000_000n);
+  assert.equal(await accrued(), 2_000_000n);
   await withdraw(849_999_999);
   assert.equal(await balance(source), 833_000_001n);
-  assert.equal(await balance(feeAccount), 18_999_999n);
+  assert.equal(await accrued(), 18_999_999n);
   await assert.rejects(withdraw(1), /InsufficientFreeBalance/);
   // A stolen authority key rebinds actor 102 to a thief, who must expose a
   // wallet by co-signing. Only the owner can veto it, and only while it is
@@ -487,8 +501,9 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
     [payer],
   );
   assert.equal(await balance(destination), 147_000_001n);
-  assert.equal(await balance(feeAccount), 19_999_999n);
-  assert.equal(await balance(vault), 0n);
+  assert.equal(await accrued(), 19_999_999n);
+  assert.equal(await balance(feeAccount), 0n);
+  assert.equal(await balance(vault), 19_999_999n);
   const state = await program.account.project.fetch(project);
   assert.equal(state.reserved.toString(), "0");
   assert.equal(state.paid.toString(), "147000000");
@@ -612,7 +627,8 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
     assert.equal(totals[field], value.toString(), field);
   assert.equal(totals.freeBalance, "0");
   assert.equal(totals.reservedPrincipal, null);
-  assert.equal(totals.accruedFees, null);
+  assert.equal(totals.accruedFees, "19999999");
+  assert.equal(totals.accruedFees, counters.accruedFees.toString());
   assert.equal(
     BigInt(totals.totalDeposited),
     [
@@ -623,6 +639,12 @@ test("actual SPL escrow lifecycle, late wallet claim, reserve and authority atta
       totals.totalGrossWithdrawn,
     ].reduce((sum, value) => sum + BigInt(value), 0n),
   );
+  // Anyone moves the accrued fees once; nothing is left to claim.
+  await claimFees();
+  assert.equal(await balance(feeAccount), 19_999_999n);
+  assert.equal(await balance(vault), 0n);
+  assert.equal(await accrued(), 0n);
+  await assert.rejects(claimFees(), /InvalidAmount/);
   await mintTo(provider.connection, payer, mint, vault, payer, 1_000_000n);
   await assert.rejects(withdraw(1), /InsufficientFreeBalance/);
   await assert.rejects(
@@ -819,13 +841,11 @@ test("commit delay, rotation freezes the earlier wallet, veto cap, bounded delay
     bind(203, walletD, 0, network, { expiresAt: bn(1) }),
     /BindingExpired/,
   );
-  // L-2: a 49-unit award has a zero fee, so a frozen fee account does not stop it.
+  // A 49-unit award has a zero fee and pays in one transfer.
   await commit("zero-fee", 204, 49);
   await bind(204, walletD);
   await activate();
-  await freezeAccount(provider.connection, payer, feeAccount, mint, payer);
   const zeroFee = await pay("zero-fee", 204, ataD);
-  await thawAccount(provider.connection, payer, feeAccount, mint, payer);
   assert.equal(await balance(ataD), 49n);
   await provider.connection.confirmTransaction(zeroFee, "finalized");
   const [zeroFeePay] = escrowInvocations(
@@ -895,7 +915,7 @@ test("commit delay, rotation freezes the earlier wallet, veto cap, bounded delay
       })
       .rpc();
   };
-  await assert.rejects(initialize(0), /InvalidDelay/);
+  await assert.rejects(initialize(-1), /InvalidDelay/);
   await assert.rejects(initialize(30 * 86400 + 1), /InvalidDelay/);
   await assert.rejects(initialize(DELAY, payer.publicKey), /InvalidIdentity/);
   // L-3: the identity authority and the fee recipient must equal the pinned Config.
@@ -1159,7 +1179,6 @@ test("permissionless deposit, 18-, 9- and 0-decimal mints, 2% withdrawal fee, To
           mint,
           vault,
           destination: donorAccount,
-          feeAccount,
           tokenProgram: TOKEN_PROGRAM_ID,
         })
         .signers([donor])
@@ -1172,12 +1191,13 @@ test("permissionless deposit, 18-, 9- and 0-decimal mints, 2% withdrawal fee, To
     await activate();
     const paid = await pay(`decimals-${decimals}`, 301, contributorAccount);
     assert.equal(await balance(contributorAccount), gross - awardFee);
-    assert.equal(await balance(feeAccount), awardFee);
-    // The owner withdraws the donor's unused funds at the 2% fee.
+    assert.equal(await accrued(), awardFee);
+    // The owner withdraws the donor's unused funds at the 2% fee. Both fees stay in
+    // the vault until claim_fees.
     const withdrawn = await withdraw(unused);
     assert.equal(await balance(source), unused - withdrawalFee);
-    assert.equal(await balance(feeAccount), awardFee + withdrawalFee);
-    assert.equal(await balance(vault), 0n);
+    assert.equal(await accrued(), awardFee + withdrawalFee);
+    assert.equal(await balance(vault), awardFee + withdrawalFee);
     state = await program.account.project.fetch(project);
     assert.equal(state.withdrawalFees.toString(), withdrawalFee.toString());
     // The adapter checks the transfer decimals against the mint's decimals.
@@ -1223,7 +1243,11 @@ test("permissionless deposit, 18-, 9- and 0-decimal mints, 2% withdrawal fee, To
     assert.equal(totals.totalDeposited, total.toString());
     assert.equal(totals.totalGrossWithdrawn, unused.toString());
     assert.equal(totals.totalWithdrawalFees, withdrawalFee.toString());
+    assert.equal(totals.accruedFees, (awardFee + withdrawalFee).toString());
     assert.equal(totals.freeBalance, "0");
+    await claimFees();
+    assert.equal(await balance(feeAccount), awardFee + withdrawalFee);
+    assert.equal(await balance(vault), 0n);
   }
   // A Token-2022 mint is not a classic SPL mint.
   const mint2022 = await createMint(
@@ -1369,6 +1393,8 @@ test("private bounty pays exactly 75/25 from its own bounty project, and purpose
   assert.equal(verified.feeMicro, "25000000");
   await assert.rejects(solanaPaymentAdapter(config).verifyFinalized(evidence));
   assert.equal((await balance(destination)) - beforeNet, 75_000_000n);
+  assert.equal(await accrued(), 25_000_000n);
+  await claimFees();
   assert.equal((await balance(feeAccount)) - beforeFee, 25_000_000n);
   await assert.rejects(pay("private-bounty", actor, destination));
   // The ordinary project refuses a bounty award.
@@ -1545,6 +1571,11 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
           Buffer.from(entry.sourceDigest, "hex"),
         ),
         obligation: pda(seed("award"), key(project), award(entry)),
+        settled: pda(
+          seed("settled"),
+          key(month(period)),
+          Buffer.from(entry.sourceDigest, "hex"),
+        ),
         systemProgram: SystemProgram.programId,
       })
       .signers([stranger])
@@ -1728,7 +1759,6 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
       mint,
       vault,
       destination: walletAccount,
-      feeAccount,
       tokenProgram: TOKEN_PROGRAM_ID,
       veto: veto(401, 1),
     })
@@ -1796,5 +1826,291 @@ test("bounded monthly commitment: signed root, cap, one period, opt-out, proofs 
     }).verifyFinalized(paidEvidence),
     /purpose/,
     "a bounty policy refuses an ordinary project",
+  );
+});
+
+// Red-team review of 24 October 2026. Each test starts its own ordinary project.
+async function freshProject(label, amount) {
+  currentAuthority = authority;
+  const id = hash(`${label}${RUN}`);
+  project = pda(
+    seed("project"),
+    key(payer.publicKey),
+    Buffer.from(id),
+    purposeSeed(),
+  );
+  vault = pda(seed("vault"), key(project));
+  await program.methods
+    .initialize(
+      id,
+      network,
+      authority.publicKey,
+      feeOwner.publicKey,
+      bn(DELAY),
+      bn(ROTATION_DELAY),
+      ORDINARY,
+    )
+    .accountsStrict({
+      owner: payer.publicKey,
+      project,
+      mint,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+      config: configAddress(program.programId),
+    })
+    .rpc();
+  await mintTo(provider.connection, payer, mint, source, payer, amount);
+  await program.methods
+    .deposit(bn(amount))
+    .accountsStrict({
+      depositor: payer.publicKey,
+      project,
+      mint,
+      source,
+      vault,
+      tokenProgram: TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+}
+
+// L-2: the fee accrues in the vault, so a frozen fee recipient account stops neither a
+// payout nor a withdrawal; claim_fees then goes to any account the fee recipient owns.
+test("a frozen fee account stops no payout; claim_fees sends the exact accrued fees to a fee-recipient account", async () => {
+  mint = await createMint(
+    provider.connection,
+    payer,
+    payer.publicKey,
+    payer.publicKey,
+    6,
+  );
+  source = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    payer.publicKey,
+  );
+  feeAccount = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    feeOwner.publicKey,
+  );
+  await freshProject("frozen-fee", 100_000_000n);
+  const wallet = Keypair.generate();
+  const walletAccount = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    wallet.publicKey,
+  );
+  await commit("frozen-fee", 501, 10_000_000);
+  await bind(501, wallet);
+  await activate();
+  await freezeAccount(provider.connection, payer, feeAccount, mint, payer);
+  await pay("frozen-fee", 501, walletAccount);
+  assert.equal(await balance(walletAccount), 9_800_000n);
+  assert.equal(await accrued(), 200_000n);
+  await withdraw(50_000_000);
+  assert.equal(await balance(source), 49_000_000n);
+  assert.equal(await accrued(), 1_200_000n);
+  // The accrued fees are held: the owner cannot withdraw them as free balance.
+  await assert.rejects(withdraw(40_000_001), /InsufficientFreeBalance/);
+  await assert.rejects(claimFees(feeAccount), /frozen|0x11/);
+  const stranger = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    wallet.publicKey,
+    Keypair.generate(),
+  );
+  await assert.rejects(claimFees(stranger), /ConstraintRaw/);
+  const fresh = await createAccount(
+    provider.connection,
+    payer,
+    mint,
+    feeOwner.publicKey,
+    Keypair.generate(),
+  );
+  await claimFees(fresh);
+  assert.equal(await balance(fresh), 1_200_000n);
+  assert.equal(await accrued(), 0n);
+  assert.equal(await balance(vault), 40_000_000n);
+  await assert.rejects(claimFees(fresh), /InvalidAmount/);
+  await thawAccount(provider.connection, payer, feeAccount, mint, payer);
+});
+
+// An admitted month blocks the owner's direct commits until every leaf settles. A leaf
+// whose source the owner consumed before admission can never commit, so anyone releases
+// its reserve to free balance; each leaf settles once, by commit or by release.
+test("monthly outstanding blocks direct commits; a consumed leaf releases once and the rest commit", async () => {
+  await freshProject("monthly-release", 100_000_000n);
+  const stranger = Keypair.generate();
+  await sendAndConfirmTransaction(
+    provider.connection,
+    new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: stranger.publicKey,
+        lamports: 1_000_000_000,
+      }),
+    ),
+    [payer],
+  );
+  await program.methods
+    .setMonthlyCommitment(bn(100_000_000), true)
+    .accountsStrict({ owner: payer.publicKey, project })
+    .rpc();
+  const shifted = new Date(((await chainTime()) - 259_200) * 1000);
+  const open = new Date(
+    Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth() - 1, 1),
+  );
+  const period = `${open.getUTCFullYear()}-${String(open.getUTCMonth() + 1).padStart(2, "0")}`;
+  const n = Number(period.replace("-", ""));
+  const month = pda(
+    seed("month"),
+    key(project),
+    Buffer.from(new Uint32Array([n]).buffer),
+  );
+  // Each source digest equals the one `commit` derives from the same name.
+  const entries = ["leaf-a", "leaf-b", "leaf-c"].map((name, i) => ({
+    githubUserId: String(601 + i),
+    grossMicro: String((3 - i) * 10_000_000),
+    sourceDigest: Buffer.from(hash(`source:${name}`)).toString("hex"),
+  }));
+  // The owner consumes leaf B's source before the month is admitted.
+  await commit("leaf-b", 999, 1);
+  const root = solanaAllocationRoot(entries),
+    total = solanaAllocationTotal(entries);
+  await program.methods
+    .commitMonthly(n, [...Buffer.from(root, "hex")], bn(total))
+    .accountsStrict({
+      payer: stranger.publicKey,
+      project,
+      vault,
+      month,
+      instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
+      systemProgram: SystemProgram.programId,
+    })
+    .preInstructions([
+      Ed25519Program.createInstructionWithPrivateKey({
+        privateKey: authority.secretKey,
+        message: solanaMonthlyMessage(
+          program.programId.toBase58(),
+          project.toBase58(),
+          period,
+          root,
+          total,
+          Buffer.from(network).toString("hex"),
+        ),
+      }),
+    ])
+    .signers([stranger])
+    .rpc();
+  const leaf = (index, method) => {
+    const entry = entries[index],
+      digest = Buffer.from(entry.sourceDigest, "hex"),
+      award = Buffer.from(
+        solanaAwardId(project.toBase58(), entry.sourceDigest),
+        "hex",
+      ),
+      proof = solanaAllocationProof(entries, index).map((node) => ({
+        hash: [...Buffer.from(node.hash, "hex")],
+        total: bn(node.total),
+      })),
+      shared = {
+        payer: stranger.publicKey,
+        project,
+        month,
+        origin: pda(seed("origin"), key(project), digest),
+        settled: pda(seed("settled"), key(month), digest),
+        systemProgram: SystemProgram.programId,
+      },
+      tail = [bn(entry.githubUserId), bn(entry.grossMicro), index, 3, proof];
+    return (
+      method === "commit"
+        ? program.methods
+            .commitMonthlyAward(n, [...award], [...digest], ...tail)
+            .accountsStrict({
+              ...shared,
+              vault,
+              obligation: pda(seed("award"), key(project), award),
+            })
+        : program.methods
+            .releaseMonthlyAward(n, [...digest], ...tail)
+            .accountsStrict(shared)
+    )
+      .signers([stranger])
+      .rpc();
+  };
+  const read = () => program.account.project.fetch(project);
+  let state = await read();
+  assert.equal(state.monthlyOutstanding.toString(), "60000000");
+  assert.equal(state.reserved.toString(), "60000001");
+  // The owner cannot consume an admitted leaf's source by hand.
+  await assert.rejects(commit("leaf-c", 999, 1), /MonthlyOutstanding/);
+  await assert.rejects(commit("unrelated", 999, 1), /MonthlyOutstanding/);
+  // A leaf that can still commit cannot be released.
+  await assert.rejects(leaf(0, "release"), /AwardCommittable/);
+  await leaf(0, "commit");
+  // A committed leaf has settled: it cannot also be released.
+  await assert.rejects(leaf(0, "release"), /already in use/);
+  // Leaf B can never commit; anyone returns its reserve to free balance, once.
+  await assert.rejects(leaf(1, "commit"), /already in use/);
+  const before = await read();
+  await leaf(1, "release");
+  state = await read();
+  assert.equal(
+    state.reserved.toNumber(),
+    before.reserved.toNumber() - 20_000_000,
+  );
+  assert.equal(state.monthlyOutstanding.toString(), "10000000");
+  let recorded = await program.account.monthlyAllocation.fetch(month);
+  assert.equal(recorded.released.toString(), "20000000");
+  assert.equal(recorded.committed.toString(), "50000000");
+  await assert.rejects(leaf(1, "release"), /already in use/);
+  await assert.rejects(leaf(2, "release"), /AwardCommittable/);
+  await leaf(2, "commit");
+  recorded = await program.account.monthlyAllocation.fetch(month);
+  assert.equal(recorded.committed.toString(), total);
+  assert.equal(recorded.released.toString(), "20000000");
+  state = await read();
+  assert.equal(state.monthlyOutstanding.toString(), "0");
+  // Settled: direct commits work again, and the released gross is free to withdraw.
+  await commit("after-month", 999, 1);
+  state = await read();
+  assert.equal(state.reserved.toString(), "40000002");
+  const free = 100_000_000n - 40_000_002n;
+  await assert.rejects(withdraw(free + 1n), /InsufficientFreeBalance/);
+  const withdrawn = await withdraw(free);
+  await provider.connection.confirmTransaction(withdrawn, "finalized");
+  const totals = await readVaultTotals({
+    rpcUrl: provider.connection.rpcEndpoint,
+    network: "solana:localnet",
+    projectPda: project.toBase58(),
+    programId: program.programId.toBase58(),
+  });
+  assert.equal(totals.freeBalance, "0");
+  assert.equal(totals.accruedFees, String(free / 50n));
+  assert.equal(
+    BigInt(totals.totalDeposited),
+    [
+      totals.freeBalance,
+      totals.reserved,
+      totals.totalPaid,
+      totals.totalPayoutFees,
+      totals.totalGrossWithdrawn,
+    ].reduce((sum, value) => sum + BigInt(value), 0n),
+  );
+  // The vault holds exactly the reserves and the unclaimed fees.
+  assert.equal(
+    await balance(vault),
+    BigInt(totals.reserved) + BigInt(totals.accruedFees),
+  );
+  assert.equal(
+    (
+      await program.account.project.fetch(project, "finalized")
+    ).monthlyOutstanding.toString(),
+    "0",
   );
 });

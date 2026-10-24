@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 
 import {EscrowFactory, IERC20, ProjectEscrow, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
@@ -54,7 +55,7 @@ contract MonthlyCommitmentTest {
         vm.warp(NOVEMBER_OPENS - 30 days);
         authority = vm.addr(AUTHORITY_KEY);
         usdc = new TestDollar();
-        factory = new EscrowFactory(REGISTRAR, FEE, authority, DELAY);
+        factory = DeployFactory.create(REGISTRAR, FEE, authority, DELAY);
         vm.prank(OWNER);
         vault = ProjectEscrow(factory.create(PROJECT, IERC20(address(usdc)), Purpose.Ordinary));
         vm.prank(OWNER);
@@ -245,10 +246,24 @@ contract MonthlyCommitmentTest {
         vm.prank(OWNER);
         vault.commitAward(id, 12, 200e6, source);
         bytes memory signature = attest(AUTHORITY_KEY, vault, PERIOD, entries);
+        submit(PERIOD, entries, signature);
+        require(vault.monthlyRoots(PERIOD) == vault.allocationRoot(entries), "month completes");
+        require(vault.freeBalance() == 9_400e6, "each source reserved once");
+        require(vault.reservedPrincipal() + vault.reservedFees() == 600e6, "exact total reserved");
+    }
+
+    function test_monthlyRejectsAConflictingManualAward() public {
+        vm.warp(NOVEMBER_OPENS);
+        ProjectEscrow.MonthlyAward[] memory entries = allocation(100e6, 200e6, 300e6);
+        bytes32 source = entries[1].sourceDigest;
+        bytes32 id = vault.awardId(source);
+        vm.prank(OWNER);
+        vault.commitAward(id, 12, 199e6, source);
+        bytes memory signature = attest(AUTHORITY_KEY, vault, PERIOD, entries);
         vm.prank(SUBMITTER);
         vm.expectRevert(ProjectEscrow.DuplicateAward.selector);
         vault.commitMonthly(PERIOD, entries, signature);
-        require(vault.monthlyRoots(PERIOD) == bytes32(0), "the failed commit used nothing");
+        require(vault.monthlyRoots(PERIOD) == bytes32(0), "conflicting month stays uncommitted");
     }
 
     function test_emptyAllocationIsRejected() public {

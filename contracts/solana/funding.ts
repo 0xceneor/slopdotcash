@@ -85,8 +85,6 @@ function fundingInstructions(
       write: true,
     },
   ];
-  if (intent.operation === "withdraw")
-    accounts.push({ key: ata(config.mint, config.feeRecipient), write: true });
   accounts.push({ key: TOKEN, write: false });
   const action = {
     program: config.programId,
@@ -95,11 +93,7 @@ function fundingInstructions(
   };
   return intent.operation === "deposit"
     ? [action]
-    : [
-        createAta(intent.wallet, config.mint, config.owner),
-        createAta(intent.wallet, config.mint, config.feeRecipient),
-        action,
-      ];
+    : [createAta(intent.wallet, config.mint, config.owner), action];
 }
 export function solanaFundingMessage(
   config: SolanaFundingDeployment,
@@ -233,10 +227,10 @@ export async function checkSolanaFunding(
     add(config.vault, gross);
     add(ata(config.mint, intent.wallet), -gross);
   } else {
+    // The withdrawal fee stays in the vault until claim_fees.
     const fee = gross / 50n;
-    add(config.vault, -gross);
+    add(config.vault, fee - gross);
     add(ata(config.mint, config.owner), gross - fee);
-    add(ata(config.mint, config.feeRecipient), fee);
   }
   for (const [key, delta] of deltas) {
     if (

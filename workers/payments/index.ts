@@ -41,6 +41,7 @@ import { reconcileFailedAttempts } from "./reconcile";
 import { scanEvmPayments, scanSolanaPayments } from "./scanner";
 
 export interface PaymentDeployment {
+  evmUpgrade?: import("../../contracts/evm/adapter").EvmUpgrade;
   payoutPolicy?: PayoutPolicy;
   projectId: string;
   network: string;

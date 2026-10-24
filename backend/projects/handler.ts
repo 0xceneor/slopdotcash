@@ -278,12 +278,28 @@ function sameValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+/** Every UTC month from the reward start through `last`, in order. */
+function monthsThrough(rewardStartAt: string, last: string): string[] {
+  const months: string[] = [];
+  const month = new Date(`${rewardStartAt.slice(0, 7)}-01T00:00:00Z`);
+  for (
+    let id = month.toISOString().slice(0, 7);
+    id <= last;
+    month.setUTCMonth(month.getUTCMonth() + 1),
+      id = month.toISOString().slice(0, 7)
+  )
+    months.push(id);
+  return months;
+}
+
 /**
  * Applies an owner's financial change prospectively (PRD section 4:
  * "Economic changes are prospective"). The monthly amount, and for an
- * unfunded project its network and asset, may change. The open UTC cycle
- * keeps its previous amount through the existing `cycleCaps` override, so the
- * new amount starts with the next cycle. Funded money keeps its network,
+ * unfunded project its network and asset, may change. Every month from the
+ * reward start through the open UTC cycle keeps the amount it had through
+ * the existing `cycleCaps` override, so the new amount starts with the next
+ * cycle. A closed month waits up to three days for its proposal, which reads
+ * the newest revision, so the closed months need the override too. Funded money keeps its network,
  * asset, vault and routes, and no separate review budget can be added.
  */
 function prospectiveFinancialChange(
@@ -366,15 +382,10 @@ function prospectiveFinancialChange(
     // asset starts next month: every month from the reward start through
     // the open month has no pool in the new asset. The reward start, and
     // with it the accepted score history, does not move.
-    const zeroCaps: { cycleId: string; monthlyCapMinor: string }[] = [];
-    const month = new Date(`${before.rewardStartAt.slice(0, 7)}-01T00:00:00Z`);
-    for (
-      let id = month.toISOString().slice(0, 7);
-      id <= cycleId;
-      month.setUTCMonth(month.getUTCMonth() + 1),
-        id = month.toISOString().slice(0, 7)
-    )
-      zeroCaps.push({ cycleId: id, monthlyCapMinor: "0" });
+    const zeroCaps = monthsThrough(before.rewardStartAt, cycleId).map((id) => ({
+      cycleId: id,
+      monthlyCapMinor: "0",
+    }));
     const { cycleCaps: _none, ...reward } = after;
     return {
       ...next,
@@ -383,16 +394,20 @@ function prospectiveFinancialChange(
     };
   }
   if (before.monthlyCapMinor === after.monthlyCapMinor) return next;
+  // An unlisted month used the previous default amount; it keeps it.
   const caps = before.cycleCaps ?? [];
-  if (caps.some((cap) => cap.cycleId === cycleId)) return next;
+  const listed = new Set(caps.map((cap) => cap.cycleId));
+  const kept = monthsThrough(before.rewardStartAt, cycleId)
+    .filter((id) => !listed.has(id))
+    .map((id) => ({ cycleId: id, monthlyCapMinor: before.monthlyCapMinor }));
+  if (kept.length === 0) return next;
   return {
     ...next,
     reward: {
       ...after,
-      cycleCaps: [
-        ...caps,
-        { cycleId, monthlyCapMinor: before.monthlyCapMinor },
-      ].sort((left, right) => left.cycleId.localeCompare(right.cycleId)),
+      cycleCaps: [...caps, ...kept].sort((left, right) =>
+        left.cycleId.localeCompare(right.cycleId),
+      ),
     },
   };
 }

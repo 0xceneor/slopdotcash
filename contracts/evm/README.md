@@ -1,6 +1,22 @@
+> Replacement deployment policy, approved 24 October 2026: factory and vault
+> logic use OpenZeppelin v5.5.0 UUPS proxies. The deployment authority controls
+> upgrades without a timelock. Fee and identity keys cannot upgrade. New release
+> deployments use zero award delay and immediate identity-authority rotation.
+> Legacy delay examples below describe previous deployments; they do not set
+> the replacement deployment policy.
+>
+> `ESCROW_UPGRADE_AUTHORITY` is required. Implementations disable initialization;
+> proxies initialize atomically. `setVaultImplementation` selects logic for new
+> vaults only. Existing vaults upgrade individually with `upgradeToAndCall`.
+> Factory upgrade-authority transfer requires recipient acceptance and changes
+> who can upgrade every vault from that factory. It has no waiting period.
+> Verify the proxy code, ERC-1967 implementation address, implementation code
+> digest and upgrade authority, not only the proxy bytecode. Keep storage layout
+> compatible and prove funded lifecycle continuity before each upgrade.
+
 # EVM escrow v5
 
-This is an immutable escrow implementation for one project, one token and one
+This is an owner-upgradeable escrow implementation for one project, one token and one
 purpose. The token can be any standard ERC-20 with any decimals: Circle USDC,
 Paxos USDG or a project token. Anyone can call the factory to create a vault
 for itself. The caller is the owner, and the factory keeps one vault for each
@@ -11,7 +27,7 @@ ordinary and bounty vaults for the same token (owner decision D13, 24 October
 has no proxy, owner change, token approval, arbitrary call, rescue, claim
 expiry, or award cancellation entry point. An approved award remains reserved until it is paid. The owner can cancel only a wallet binding that has
 not paid yet, and only inside a bounded window. The only mutable authority is
-the factory's identity authority, replaced by a public 7-day timelock. This
+the factory's identity authority, replaced by a public registrar-authorized rotation. This
 code has local EVM execution evidence only. It has not received an independent
 security review or a public testnet deployment.
 
@@ -42,8 +58,8 @@ the owner. A vault proves only which account created it. The project registry
 decides which owner's vault a project uses, so a vault that another account
 creates for the same project ID never replaces or reaches the owner's vault.
 The registrar creates no vaults and holds no money power. The registrar, the
-fee recipient and the identity authority are explicit constructor parameters;
-the deploying account holds no role. Anyone can deposit. The project owner
+fee recipient, identity authority and upgrade authority are explicit initializer parameters.
+The deploying account holds an upgrade role only if selected as upgrade authority. Anyone can deposit. The project owner
 approves awards and withdraws free funds to itself. An ordinary vault also
 takes the bounded monthly commitment below. The identity authority
 is a factory-level address that every vault reads; it is Slop's attester key. A
@@ -82,8 +98,8 @@ change. Protect the identity authority and verify account and wallet proof
 before signing. A compromised authority with a colluding destination wallet
 can redirect an eligible payment. Authority rotation does not reverse payments.
 
-The constructor still bounds the award/review period to one hour through
-30 days. Production configuration retains its 48-hour minimum. The adapter
+The initializer bounds the award/review period to zero through
+30 days. New production deployments use zero. The adapter
 checks this parameter against the reviewed manifest. Use separate identities
 for the owner, attester, registrar, and gas sponsor.
 
@@ -91,9 +107,9 @@ for the owner, attester, registrar, and gas sponsor.
 
 The factory holds `identityAuthority` and one pending replacement. The
 registrar calls `proposeIdentityAuthority(next)`; the proposal is public in
-`IdentityAuthorityRotationProposed` with its effective time, 7 days after the
-proposal (`AUTHORITY_ROTATION_DELAY`). The registrar can cancel its own pending
-proposal with `cancelIdentityAuthorityRotation`. After the effective time
+`IdentityAuthorityRotationProposed` with its effective time, the proposal block time
+(`AUTHORITY_ROTATION_DELAY = 0`). The registrar can cancel its own pending
+proposal with `cancelIdentityAuthorityRotation`. Immediately after the proposal
 anyone can call `executeIdentityAuthorityRotation`, which emits
 `IdentityAuthorityRotated`; the current authority has no call that blocks or
 delays it. Until execution the current authority keeps binding; afterwards only
@@ -107,12 +123,12 @@ manifest pins the factory address, its runtime code digest
 created the vault under `vaultKey(owner, projectId, token, purpose)`, that the
 vault purpose matches the payout policy, and that the factory has the reviewed
 asset, fee recipient,
-binding delay and 7-day `AUTHORITY_ROTATION_DELAY`. A vault from a factory with
+binding delay and zero `AUTHORITY_ROTATION_DELAY`. A vault from a factory with
 other rotation rules therefore fails verification. The manifest's
 `identityAuthority` is the authority at activation; the adapter does not compare
 it with the authority in force, because after activation the authority changes
-only through this timelock. A rotation therefore never interrupts verification
-or payment, and the manifest stays immutable.
+through this rotation. An identity rotation preserves bindings and payment evidence.
+A code upgrade requires new implementation evidence in an appended manifest revision.
 
 ### Key recovery runbook
 
@@ -123,12 +139,12 @@ key and is never used for recovery.
 Attester key lost: the authority can no longer bind, so awards to actors
 without an active binding wait; nothing is lost and no reserve moves. The
 registrar proposes the replacement key, publishes the proposal transaction,
-and executes the rotation after 7 days. Existing bindings keep paying
+and executes the rotation immediately. Existing bindings keep paying
 throughout. A contributor whose binding was pending or missing signs nothing
 new unless the wallet signature already collected has expired.
 
 Attester key compromised: the registrar proposes a replacement immediately
-and executes it after the seven-day authority-rotation period. The owner may
+and executes it immediately. The owner may
 cancel unexpected unpaid bindings within their review windows. Such a cancel
 must execute before payment; it is not a guaranteed recovery mechanism.
 Pending rotation waives the cancellation count, but it does not pause payment
@@ -141,8 +157,8 @@ Registrar key lost or compromised: there is no second rotation path; the
 registrar is the recovery authority, so choose it at factory deployment and
 record its custody in the deployment evidence. A compromised registrar can
 propose a rotation to a key it controls, but still needs a wallet co-signature
-per binding; the public 7-day
-proposal is the notice to deploy a new factory for new projects.
+per binding. The separate upgrade authority can authorize a reviewed code change
+for recovery; that power can also change fund-handling logic.
 
 Project owner key lost: deposits, awards and withdrawals from that vault stop;
 reserved awards still pay to active bindings. There is no owner change in this
@@ -188,12 +204,14 @@ without the owner's wallet, an ordinary vault has one more path:
 - Anyone calls `commitMonthly(period, awards, signature)` inside the window.
   `awards` is the list of `(actorId, gross, sourceDigest)` in allocation order.
   The vault rebuilds `allocationRoot(awards)` and requires the authority's
-  signature over it. The gross total must be within `monthlyCap` and the free
-  balance. `monthlyRoots(period)` must be empty, so each period commits once.
-  Each award then commits as an ordinary award: it takes the 2% payout fee,
-  consumes its source digest, gets the ID `awardId(sourceDigest)`, and pays
-  through the ordinary binding and delay rules. A source digest that the owner
-  already committed by hand makes the whole call revert.
+  signature over it. The full gross total must be within `monthlyCap`; the free
+  balance must cover all awards that are not already reserved or paid.
+  `monthlyRoots(period)` must be empty, so each period commits once.
+  Each new award takes the 2% payout fee, consumes its source digest, gets the
+  ID `awardId(sourceDigest)`, and pays through the ordinary binding rules.
+  An award already committed by the owner is counted once when its actor,
+  gross amount, source digest and fee match. Its payment state and commitment
+  time stay unchanged. A conflicting award makes the whole call revert.
 - The allocation root is a Merkle tree over the awards in order. A leaf is
   `keccak256(0x00, actorId, gross, sourceDigest)` and a node is
   `keccak256(0x01, left, right)`, both packed. An odd last node moves up
@@ -234,7 +252,7 @@ gas. A one-unit award requires one unit of funding and has a zero fee; tiny
 award rounding is intentional.
 
 Payout and withdrawal fees accrue in the vault as `accruedFees`. Anyone can
-call `claimFees()` to move them to the immutable fee recipient. A blocked fee
+call `claimFees()` to move them to the configured fee recipient. A blocked fee
 recipient (for example, a USDC blacklist) stops only `claimFees`; payouts and
 refunds continue. Refunds go only to the owner.
 
@@ -293,7 +311,8 @@ factory (address, runtime code digest, registrar and rotation delay) against
 the reviewed manifest, that the vault purpose matches the payout policy, and
 that the factory indexed this vault under its owner, project ID, token and
 purpose. `codeSha256` hashes decoded `eth_getCode` bytes, including
-constructor immutables.
+the proxy runtime. `evmUpgrade` separately pins both implementation addresses,
+their code digests and the controlling authority.
 
 ## Events and ABI (v5)
 

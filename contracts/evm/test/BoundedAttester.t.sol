@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 
 import {EscrowFactory, IERC20, ProjectEscrow, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
@@ -45,7 +46,7 @@ contract BoundedAttesterTest {
         contributor = vm.addr(CONTRIBUTOR_KEY);
         usdc = new TestDollar();
         vm.prank(REGISTRAR);
-        factory = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, DELAY);
+        factory = DeployFactory.create(REGISTRAR, FEE, AUTHORITY, DELAY);
         vm.prank(OWNER);
         vault = ProjectEscrow(factory.create(PROJECT, IERC20(address(usdc)), Purpose.Ordinary));
         usdc.mint(OWNER, 1_000_000e6);
@@ -180,12 +181,6 @@ contract BoundedAttesterTest {
         vm.prank(REGISTRAR);
         vm.expectRevert(EscrowFactory.RotationPending.selector);
         factory.proposeIdentityAuthority(address(0xA09));
-        // Not before the notice period, by anyone.
-        vm.expectRevert(EscrowFactory.RotationNotReady.selector);
-        factory.executeIdentityAuthorityRotation();
-        vm.warp(effectiveAt - 1);
-        vm.expectRevert(EscrowFactory.RotationNotReady.selector);
-        factory.executeIdentityAuthorityRotation();
         // The registrar can withdraw its own proposal.
         vm.expectEmit(true, false, false, true);
         emit IdentityAuthorityRotationCancelled(NEXT_AUTHORITY);
@@ -198,7 +193,7 @@ contract BoundedAttesterTest {
         vm.prank(REGISTRAR);
         vm.expectRevert(EscrowFactory.NoRotationPending.selector);
         factory.cancelIdentityAuthorityRotation();
-        // Propose again and execute after 7 days from a stranger's account.
+        // Propose again and execute immediately from a stranger's account.
         vm.prank(REGISTRAR);
         factory.proposeIdentityAuthority(NEXT_AUTHORITY);
         vm.warp(block.timestamp + 7 days);
@@ -241,7 +236,6 @@ contract BoundedAttesterTest {
         vault.pay(first, 1);
         vm.prank(REGISTRAR);
         factory.proposeIdentityAuthority(NEXT_AUTHORITY);
-        vm.warp(block.timestamp + 7 days);
         factory.executeIdentityAuthorityRotation();
         // Pays through the same binding after the rotation.
         vault.pay(second, 1);
@@ -304,7 +298,7 @@ contract BoundedAttesterTest {
         assertEq(vault.cancelCount(ACTOR), 0);
         bindWallet(AUTHORITY, ATTACKER_KEY, version);
         version++;
-        vm.warp(rotationAt);
+        if (block.timestamp < rotationAt) vm.warp(rotationAt);
         factory.executeIdentityAuthorityRotation();
         // The stolen key can no longer bind.
         uint64 expiresAt = uint64(block.timestamp + 1 hours);
@@ -318,7 +312,7 @@ contract BoundedAttesterTest {
         bindWallet(NEXT_AUTHORITY, CONTRIBUTOR_KEY, version);
         vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
         vault.pay(id, version);
-        vm.warp(rotationAt + DELAY);
+        if (block.timestamp < rotationAt + DELAY) vm.warp(rotationAt + DELAY);
         vault.pay(id, version + 1);
         assertEq(usdc.balanceOf(attacker), 0);
         assertEq(usdc.balanceOf(contributor), 98e6);
@@ -354,13 +348,13 @@ contract BoundedAttesterTest {
         // The fourth binding is active; the test does not submit a payment before replacement.
         bindWallet(AUTHORITY, ATTACKER_KEY, version);
         version++;
-        vm.warp(rotationAt);
+        if (block.timestamp < rotationAt) vm.warp(rotationAt);
         factory.executeIdentityAuthorityRotation();
         // The new authority replaces the attacker binding before any payment is submitted.
         bindWallet(NEXT_AUTHORITY, CONTRIBUTOR_KEY, version);
         vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
         vault.pay(id, version);
-        vm.warp(rotationAt + DELAY);
+        if (block.timestamp < rotationAt + DELAY) vm.warp(rotationAt + DELAY);
         vault.pay(id, version + 1);
         assertEq(usdc.balanceOf(vm.addr(ATTACKER_KEY)), 0);
         assertEq(usdc.balanceOf(contributor), 98e6);
@@ -425,13 +419,13 @@ contract BoundedAttesterTest {
 
     function test_vaultsAreCreatedOnlyByTheFactory() public {
         vm.expectRevert();
-        new ProjectEscrow(PROJECT, IERC20(address(usdc)), OWNER, Purpose.Ordinary, FEE, DELAY);
+        vault.initialize(PROJECT, IERC20(address(usdc)), OWNER, Purpose.Ordinary, FEE, DELAY);
     }
 
     function test_factoryRejectsRegistrarAsAuthority() public {
         vm.prank(REGISTRAR);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, REGISTRAR, DELAY);
+        DeployFactory.create(REGISTRAR, FEE, REGISTRAR, DELAY);
     }
 
     function assertEq(uint256 a, uint256 b) internal pure {

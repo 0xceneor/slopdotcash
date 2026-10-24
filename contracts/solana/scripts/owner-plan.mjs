@@ -231,19 +231,12 @@ export async function ownerPlan(input, runtime) {
           .instruction(),
       );
     } else if (input.operation === "withdraw") {
-      // The fee recipient's account may not exist yet; creating it is idempotent.
-      const feeRecipient = new PublicKey(d.feeRecipient);
+      // The withdrawal fee accrues in the vault; only the owner's account receives tokens.
       instructions.push(
         createAssociatedTokenAccountIdempotentInstruction(
           owner,
           getAssociatedTokenAddressSync(mint, owner),
           owner,
-          mint,
-        ),
-        createAssociatedTokenAccountIdempotentInstruction(
-          owner,
-          getAssociatedTokenAddressSync(mint, feeRecipient, true),
-          feeRecipient,
           mint,
         ),
         await program.methods
@@ -254,11 +247,33 @@ export async function ownerPlan(input, runtime) {
             mint,
             vault,
             destination: getAssociatedTokenAddressSync(mint, owner),
-            feeAccount: getAssociatedTokenAddressSync(
-              mint,
-              new PublicKey(d.feeRecipient),
-              true,
-            ),
+            tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .instruction(),
+      );
+    } else if (input.operation === "claim-fees") {
+      // Permissionless: moves accrued fees to the fee recipient's associated account,
+      // which may not exist yet; creating it is idempotent.
+      const feeRecipient = new PublicKey(d.feeRecipient);
+      const feeAccount = getAssociatedTokenAddressSync(
+        mint,
+        feeRecipient,
+        true,
+      );
+      instructions.push(
+        createAssociatedTokenAccountIdempotentInstruction(
+          owner,
+          feeAccount,
+          feeRecipient,
+          mint,
+        ),
+        await program.methods
+          .claimFees()
+          .accountsStrict({
+            project,
+            mint,
+            vault,
+            feeAccount,
             tokenProgram: TOKEN_PROGRAM_ID,
           })
           .instruction(),

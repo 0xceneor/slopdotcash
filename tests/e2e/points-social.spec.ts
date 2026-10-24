@@ -64,6 +64,7 @@ test("social membership preserves past points and connection privacy without new
         githubUserId: "123",
         wallets: [],
         payments: [],
+        monthlyAwards: [],
         balances: [],
         directTransfers: [],
         walletObservations: [],

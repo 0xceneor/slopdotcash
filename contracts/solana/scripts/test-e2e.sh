@@ -11,11 +11,10 @@ export ANCHOR_WALLET="$PWD/.local/payer.json"
 validator_pid=""
 trap 'if [[ -n "$validator_pid" ]]; then kill "$validator_pid" 2>/dev/null || true; fi' EXIT
 # The program loads as upgradeable with the local payer as upgrade authority, so
-# ProgramData exists and the payer can sign initialize_config, as on mainnet before
-# the upgrade authority is revoked.
+# ProgramData exists and the payer can sign initialize_config, as on mainnet with the owner-controlled upgrade authority retained.
 upgrade_authority=$(solana-keygen pubkey "$ANCHOR_WALLET")
 start_validator() {
-  solana-test-validator --reset --quiet --ledger .local/ledger --rpc-port 18899 --faucet-port 18940 --dynamic-port-range 18901-18930 --upgradeable-program 4hXeYxsTKbwVKRRn8P1emGNDmVUSx13VMykfUAsbPnnj target/deploy/slop_escrow.so "$upgrade_authority" "$@" >.local/validator.log 2>&1 &
+  solana-test-validator --reset --quiet --ledger .local/ledger --rpc-port 18899 --faucet-port 18940 --dynamic-port-range 18901-18930 --upgradeable-program 7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ target/deploy/slop_escrow.so "$upgrade_authority" "$@" >.local/validator.log 2>&1 &
   validator_pid=$!
   for attempt in $(seq 1 40); do
     if solana --url "$ANCHOR_PROVIDER_URL" cluster-version >/dev/null 2>&1; then break; fi
@@ -28,14 +27,15 @@ stop_validator() {
   wait "$validator_pid" 2>/dev/null || true
   validator_pid=""
 }
-# The deployable build keeps the one-hour delay floor; prove it on the validator first.
+# Prove the production build accepts zero delay and rejects invalid bounds.
 bash scripts/build-local.sh
 start_validator
 node --test --test-force-exit --test-isolation=none integration/production-delay.e2e.mjs
 stop_validator
-# The main suite waits the binding delay out in seconds, so it builds with the test-only delay floor.
-SLOP_ESCROW_FEATURES=short-delay-for-tests bash scripts/build-local.sh
-start_validator
+# Reuse the same production build for the funded lifecycle suite. The validator also
+# preloads a Project of the earlier 316-byte layout for the migrate_project check.
+read -ra legacy_accounts <<<"$(node integration/legacy-project.mjs)"
+start_validator "${legacy_accounts[@]}"
 bun build adapter.ts --target=node --outfile=.local/adapter.mjs
 bun build funding.ts --target=node --outfile=.local/funding.mjs
 bun build commitment.ts --target=node --outfile=.local/commitment.mjs

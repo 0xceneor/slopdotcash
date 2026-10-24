@@ -28,7 +28,7 @@ export interface VaultTotals {
   reservedPrincipal: string | null;
   /** EVM only. */
   reservedFees: string | null;
-  /** EVM only: fees held in the vault until claimFees. Solana pays fees out at once. */
+  /** Fees held in the vault until claimFees (EVM) or claim_fees (Solana). */
   accruedFees: string | null;
   /** Solana combined reserve; null on EVM. */
   reserved: string | null;

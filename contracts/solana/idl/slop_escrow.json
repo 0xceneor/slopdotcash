@@ -1,5 +1,5 @@
 {
-  "address": "4hXeYxsTKbwVKRRn8P1emGNDmVUSx13VMykfUAsbPnnj",
+  "address": "7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ",
   "metadata": {
     "name": "slop_escrow",
     "version": "0.1.0",
@@ -94,6 +94,48 @@
         {
           "name": "project",
           "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "claim_fees",
+      "discriminator": [82, 251, 233, 156, 12, 52, 184, 202],
+      "accounts": [
+        {
+          "name": "project",
+          "writable": true
+        },
+        {
+          "name": "mint",
+          "relations": ["project"]
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [118, 97, 117, 108, 116]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              }
+            ]
+          }
+        },
+        {
+          "name": "fee_account",
+          "docs": [
+            "Any token account of the mint that the fee recipient owns."
+          ],
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         }
       ],
       "args": []
@@ -463,6 +505,29 @@
           }
         },
         {
+          "name": "settled",
+          "docs": [
+            "Exists once per source in a month, so a committed award cannot also be released."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [115, 101, 116, 116, 108, 101, 100]
+              },
+              {
+                "kind": "account",
+                "path": "month"
+              },
+              {
+                "kind": "arg",
+                "path": "source_digest"
+              }
+            ]
+          }
+        },
+        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }
@@ -720,7 +785,7 @@
         },
         {
           "name": "program",
-          "address": "4hXeYxsTKbwVKRRn8P1emGNDmVUSx13VMykfUAsbPnnj"
+          "address": "7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ"
         },
         {
           "name": "program_data"
@@ -744,6 +809,26 @@
           "type": "pubkey"
         }
       ]
+    },
+    {
+      "name": "migrate_project",
+      "discriminator": [1, 96, 78, 101, 244, 33, 203, 108],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "project",
+          "writable": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     },
     {
       "name": "pay",
@@ -804,10 +889,6 @@
           "docs": [
             "The handler requires this to be the associated token account of whichever binding pays."
           ],
-          "writable": true
-        },
-        {
-          "name": "fee_account",
           "writable": true
         },
         {
@@ -876,6 +957,127 @@
         {
           "name": "next",
           "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "release_monthly_award",
+      "discriminator": [251, 169, 31, 29, 244, 159, 21, 237],
+      "accounts": [
+        {
+          "name": "payer",
+          "docs": ["Anyone; pays the settlement marker's rent."],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "project",
+          "writable": true,
+          "relations": ["month"]
+        },
+        {
+          "name": "month",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [109, 111, 110, 116, 104]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              },
+              {
+                "kind": "arg",
+                "path": "period"
+              }
+            ]
+          }
+        },
+        {
+          "name": "origin",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [111, 114, 105, 103, 105, 110]
+              },
+              {
+                "kind": "account",
+                "path": "project"
+              },
+              {
+                "kind": "arg",
+                "path": "source_digest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "settled",
+          "docs": [
+            "The same marker as commit_monthly_award, so a source settles once per month."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [115, 101, 116, 116, 108, 101, 100]
+              },
+              {
+                "kind": "account",
+                "path": "month"
+              },
+              {
+                "kind": "arg",
+                "path": "source_digest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "period",
+          "type": "u32"
+        },
+        {
+          "name": "source_digest",
+          "type": {
+            "array": ["u8", 32]
+          }
+        },
+        {
+          "name": "actor_id",
+          "type": "u64"
+        },
+        {
+          "name": "gross",
+          "type": "u64"
+        },
+        {
+          "name": "index",
+          "type": "u32"
+        },
+        {
+          "name": "count",
+          "type": "u32"
+        },
+        {
+          "name": "proof",
+          "type": {
+            "vec": {
+              "defined": {
+                "name": "AllocationNode"
+              }
+            }
+          }
         }
       ]
     },
@@ -1023,10 +1225,6 @@
           "writable": true
         },
         {
-          "name": "fee_account",
-          "writable": true
-        },
-        {
           "name": "token_program",
           "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
         }
@@ -1107,12 +1305,24 @@
       "discriminator": [111, 141, 26, 45, 161, 35, 100, 57]
     },
     {
+      "name": "FeesClaimed",
+      "discriminator": [22, 104, 110, 222, 38, 157, 14, 62]
+    },
+    {
+      "name": "MonthlyAwardReleased",
+      "discriminator": [88, 216, 156, 225, 0, 33, 175, 167]
+    },
+    {
       "name": "MonthlyCommitmentSet",
       "discriminator": [112, 110, 71, 120, 110, 200, 48, 232]
     },
     {
       "name": "MonthlyCommitted",
       "discriminator": [21, 90, 254, 60, 119, 79, 65, 193]
+    },
+    {
+      "name": "ProjectMigrated",
+      "discriminator": [120, 121, 121, 187, 64, 18, 169, 152]
     },
     {
       "name": "UnusedWithdrawn",
@@ -1202,7 +1412,7 @@
     {
       "code": 6015,
       "name": "InvalidDelay",
-      "msg": "Binding delay must be 1 hour to 30 days; rotation delay 1 hour to 90 days"
+      "msg": "Binding delay must be 0 to 30 days; rotation delay 0 to 90 days"
     },
     {
       "code": 6016,
@@ -1278,6 +1488,21 @@
       "code": 6030,
       "name": "MonthlyCapExceeded",
       "msg": "Monthly awards would exceed the owner's monthly cap"
+    },
+    {
+      "code": 6031,
+      "name": "MonthlyOutstanding",
+      "msg": "An admitted monthly allocation still has uncommitted awards"
+    },
+    {
+      "code": 6032,
+      "name": "AwardCommittable",
+      "msg": "This monthly award can still be committed"
+    },
+    {
+      "code": 6033,
+      "name": "NotLegacyProject",
+      "msg": "Account is not a Project of the 316-byte layout"
     }
   ],
   "types": [
@@ -1552,6 +1777,26 @@
       }
     },
     {
+      "name": "FeesClaimed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "project",
+            "type": "pubkey"
+          },
+          {
+            "name": "fee_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
       "name": "MonthlyAllocation",
       "docs": [
         "One period's recorded allocation root and the gross committed from it so far."
@@ -1575,10 +1820,52 @@
           },
           {
             "name": "committed",
+            "docs": [
+              "Gross settled so far: committed awards plus released awards."
+            ],
             "type": "u64"
           },
           {
             "name": "total",
+            "type": "u64"
+          },
+          {
+            "name": "released",
+            "docs": [
+              "The part of `committed` that release_monthly_award returned to free balance. This",
+              "field also makes the account 100 bytes, so a month recorded by the 316-byte build",
+              "(92 bytes, with no settled markers or outstanding count) fails closed here."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MonthlyAwardReleased",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "project",
+            "type": "pubkey"
+          },
+          {
+            "name": "period",
+            "type": "u32"
+          },
+          {
+            "name": "source_digest",
+            "type": {
+              "array": ["u8", 32]
+            }
+          },
+          {
+            "name": "actor_id",
+            "type": "u64"
+          },
+          {
+            "name": "gross",
             "type": "u64"
           }
         ]
@@ -1790,6 +2077,33 @@
           {
             "name": "monthly_enabled",
             "type": "bool"
+          },
+          {
+            "name": "accrued_fees",
+            "docs": [
+              "Payout and withdrawal fees held in the vault until claim_fees moves them."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "monthly_outstanding",
+            "docs": [
+              "Gross of admitted monthly allocations not yet committed or released. While it is",
+              "positive the owner cannot commit by hand."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProjectMigrated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "project",
+            "type": "pubkey"
           }
         ]
       }

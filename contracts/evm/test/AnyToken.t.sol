@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {ERC1967Proxy} from "../src/ProjectEscrow.sol";
+import {DeployFactory} from "./DeployFactory.sol";
 
 import "./OpusBase.sol";
 import {WideToken} from "./WideToken.sol";
@@ -236,8 +238,13 @@ contract AnyTokenTest is OpusBase {
         check(address(second.token()) == address(other) && address(escrow.token()) == address(usdc), "token");
         bytes32 initCodeHash = keccak256(
             abi.encodePacked(
-                type(ProjectEscrow).creationCode,
-                abi.encode(project, IERC20(address(other)), OWNER, Purpose.Ordinary, FEE, DELAY)
+                type(ERC1967Proxy).creationCode,
+                abi.encode(
+                    factory.vaultImplementation(),
+                    abi.encodeCall(
+                        ProjectEscrow.initialize, (project, IERC20(address(other)), OWNER, Purpose.Ordinary, FEE, DELAY)
+                    )
+                )
             )
         );
         check(
@@ -250,16 +257,16 @@ contract AnyTokenTest is OpusBase {
     }
 
     function test_factoryTakesExplicitRoles() public {
-        EscrowFactory f = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, DELAY);
+        EscrowFactory f = DeployFactory.create(REGISTRAR, FEE, AUTHORITY, DELAY);
         check(f.registrar() == REGISTRAR && f.feeRecipient() == FEE && f.identityAuthority() == AUTHORITY, "roles");
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(address(0), FEE, AUTHORITY, DELAY);
+        DeployFactory.create(address(0), FEE, AUTHORITY, DELAY);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, address(0), AUTHORITY, DELAY);
+        DeployFactory.create(REGISTRAR, address(0), AUTHORITY, DELAY);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, address(0), DELAY);
+        DeployFactory.create(REGISTRAR, FEE, address(0), DELAY);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, REGISTRAR, DELAY);
+        DeployFactory.create(REGISTRAR, FEE, REGISTRAR, DELAY);
         // Creation is permissionless and the caller is always the owner, whoever deployed the factory.
         vm.prank(DONOR);
         ProjectEscrow own = ProjectEscrow(f.create(keccak256("x"), IERC20(address(usdc)), Purpose.Ordinary));

@@ -27,6 +27,7 @@ import {
   evmVaultKey,
   readVaultTotals,
 } from "../../contracts/evm/adapter";
+import { captureUpgrade } from "../../contracts/evm/integration/upgrade";
 import {
   ESCROW_NETWORKS,
   type EscrowDeployment,
@@ -613,6 +614,11 @@ export async function runEvm(
         rotationDelaySeconds: null,
         factory,
         factoryCodeSha256,
+        evmUpgrade: await captureUpgrade(
+          (method, params) => jsonRpc(rpcUrl, method, params),
+          factory,
+          vault,
+        ),
         registrar: keys.registrar.address.toLowerCase(),
       };
       entry.deployment = { ...deployment };

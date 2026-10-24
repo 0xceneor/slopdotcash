@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 
 import "./OpusBase.sol";
 
@@ -84,7 +85,7 @@ contract OpusTokensTest is OpusBase {
         odd = new OpusOddToken();
         walletKeys[ALICE_WALLET] = OpusWallets.ALICE_KEY;
         vm.prank(REGISTRAR);
-        factory = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, DELAY);
+        factory = DeployFactory.create(REGISTRAR, FEE, AUTHORITY, DELAY);
         vm.prank(OWNER);
         escrow = ProjectEscrow(factory.create(keccak256("p"), IERC20(address(odd)), Purpose.Ordinary));
         odd.mint(OWNER, 1_000e6);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 
 import "./OpusBase.sol";
 
@@ -73,14 +74,12 @@ contract OpusFindingsTest is OpusBase {
     /// F-4 (fixed, review L-1): the factory rejects a delay below one hour or above 30 days, so a zero
     /// delay cannot make the cancel unreachable and an oversized delay cannot overflow every binding.
     function test_F4_delayIsBounded() public {
+        DeployFactory.create(REGISTRAR, FEE, AUTHORITY, 0);
+        DeployFactory.create(REGISTRAR, FEE, AUTHORITY, 1 hours - 1);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, AUTHORITY, 0);
+        DeployFactory.create(REGISTRAR, FEE, AUTHORITY, 30 days + 1);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, AUTHORITY, 1 hours - 1);
-        vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, AUTHORITY, 30 days + 1);
-        vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, AUTHORITY, type(uint64).max - 1_000);
+        DeployFactory.create(REGISTRAR, FEE, AUTHORITY, type(uint64).max - 1_000);
         deployWithDelay(1 hours);
         check(escrow.bindingDelay() == 1 hours, "floor accepted");
         deployWithDelay(30 days);

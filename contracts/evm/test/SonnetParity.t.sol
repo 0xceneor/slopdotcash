@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 import {EscrowFactory, IERC20, ProjectEscrow, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
 
@@ -28,7 +29,7 @@ contract SonnetParity {
     function setUp() public {
         t = new TestDollar();
         // This contract is the registrar; the owner creates its own vault.
-        EscrowFactory f = new EscrowFactory(address(this), feeR, auth, D);
+        EscrowFactory f = DeployFactory.create(address(this), feeR, auth, D);
         vm.prank(owner);
         e = ProjectEscrow(f.create(bytes32(uint256(1)), IERC20(address(t)), Purpose.Ordinary));
         t.mint(owner, 1e15);

@@ -1,4 +1,8 @@
 import { createHash } from "node:crypto";
+import {
+  captureUpgrade,
+  deployUpgradeableFactory,
+} from "../../contracts/evm/integration/upgrade";
 /** Local-only workflow: real Anvil contracts + SQLite + GitHub-session API + signed wallet authorization. */
 
 import { Database } from "bun:sqlite";
@@ -279,7 +283,10 @@ async function factoryVault(factory: string, token: string, url = rpcUrl) {
     )) as string
   ).slice(-40)}`;
 }
-function deploy(contract: string, args: string[] = [], url = rpcUrl) {
+function deploy(contract: string, args: string[] = [], url = rpcUrl): string {
+  if (contract === "src/ProjectEscrow.sol:EscrowFactory" && args.length)
+    return deployUpgradeableFactory((c, a) => deploy(c, a, url), args);
+
   const created = JSON.parse(
     execFileSync(
       "forge",
@@ -388,6 +395,7 @@ try {
     { network: "anvil", chain: "base", vault, chainId: "31337" },
   ];
   const config = {
+    evmUpgrade: await captureUpgrade(rpc, factory, vault),
     asset,
     owner,
     identityAuthority: attester,
@@ -1347,6 +1355,11 @@ try {
     rcRpcUrl,
   )) as string;
   const rcConfig = {
+    evmUpgrade: await captureUpgrade(
+      (method, params) => rpc(method, params, rcRpcUrl),
+      rcFactory,
+      rcVault,
+    ),
     asset: rcAsset,
     owner,
     identityAuthority: attester,

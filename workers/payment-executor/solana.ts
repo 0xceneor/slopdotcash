@@ -578,7 +578,6 @@ export function createSolanaExecutor(
         throw new Error("Gas payer must be separate from project owner");
       if (env.SOLANA_SIGNER.address === solanaPubkey(ctx.project, 104))
         throw new Error("Gas payer must be separate from identity authority");
-      const feeOwner = solanaPubkey(ctx.project, 136);
       const ix: Instruction = {
         program: ctx.config.programId,
         accounts: [
@@ -588,7 +587,6 @@ export function createSolanaExecutor(
           { key: ctx.config.mint, write: false },
           { key: ctx.config.vault, write: true },
           { key: ata(ctx.config.mint, input.destination), write: true },
-          { key: ata(ctx.config.mint, feeOwner), write: true },
           { key: TOKEN, write: false },
           { key: veto, write: false },
         ],
@@ -600,7 +598,6 @@ export function createSolanaExecutor(
           ctx.config.mint,
           input.destination,
         ),
-        createAta(env.SOLANA_SIGNER.address, ctx.config.mint, feeOwner),
         ix,
       ]);
     },

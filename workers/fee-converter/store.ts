@@ -179,7 +179,7 @@ export class D1ConversionStore implements ConversionStore {
 
 /**
  * Reward tokens named by D1 project manifests for one network: a token
- * `rewardAsset` on the network, and the asset of each escrow deployment on its
+ * `rewardAsset` on the network, and the asset of each ordinary or bounty deployment on its
  * escrow network keys. Only reviewed manifests contribute; tokens that merely
  * arrive in the fee wallet are never discovered.
  */
@@ -201,7 +201,9 @@ export async function projectRewardTokens(
     db
       .prepare(
         `SELECT DISTINCT json_extract(d.value, '$.asset') AS asset
-           FROM projects, json_each(projects.manifest, '$.escrow.deployments') AS d
+           FROM projects,
+             json_each('["$.escrow.deployments","$.securityBounty.settlement.deployments"]') AS scope,
+             json_each(projects.manifest, scope.value) AS d
           WHERE json_extract(d.value, '$.network') IN (SELECT value FROM json_each(?))`,
       )
       .bind(JSON.stringify(escrowNetworks))
@@ -212,4 +214,27 @@ export async function projectRewardTokens(
       [...rewardAssets.results, ...deployments.results].map((row) => row.asset),
     ),
   ].filter((asset): asset is string => typeof asset === "string");
+}
+
+/**
+ * Ordinary and private bounty vaults named by D1 project manifests on the network's escrow keys.
+ * Only these vaults are claimed; a vault is never discovered on chain.
+ */
+export async function projectVaults(
+  db: FeeD1Database,
+  escrowNetworks: readonly string[],
+): Promise<string[]> {
+  const rows = await db
+    .prepare(
+      `SELECT DISTINCT json_extract(d.value, '$.vault') AS vault
+         FROM projects,
+             json_each('["$.escrow.deployments","$.securityBounty.settlement.deployments"]') AS scope,
+             json_each(projects.manifest, scope.value) AS d
+        WHERE json_extract(d.value, '$.network') IN (SELECT value FROM json_each(?))`,
+    )
+    .bind(JSON.stringify(escrowNetworks))
+    .all<{ vault: unknown }>();
+  return rows.results
+    .map((row) => row.vault)
+    .filter((vault): vault is string => typeof vault === "string");
 }

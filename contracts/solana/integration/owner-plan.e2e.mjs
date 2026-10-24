@@ -25,7 +25,7 @@ import {
   prepareSolanaFunding,
 } from "../.local/funding.mjs";
 import { handlePaymentsApi } from "../.local/handler.mjs";
-import { listProjects } from "../scripts/config-plan.mjs";
+import { listProjects, migratePlan } from "../scripts/config-plan.mjs";
 import { awardIdFor, ownerPlan } from "../scripts/owner-plan.mjs";
 import {
   configFees,
@@ -34,6 +34,7 @@ import {
   ensureConfig,
   expectedDeployment,
 } from "./deployment.mjs";
+import { legacyMint, legacyOwner, legacyProject } from "./legacy-project.mjs";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 test("unsigned owner plans initialize, fund, reserve, veto and withdraw on actual SPL program", {
@@ -63,7 +64,7 @@ test("unsigned owner plans initialize, fund, reserve, veto and withdraw on actua
       mint,
       owner.publicKey,
     ),
-    // The withdraw plan must create the fee recipient's account itself.
+    // The claim-fees plan must create the fee recipient's account itself.
     feeAccount = {
       address: getAssociatedTokenAddressSync(mint, fees.publicKey),
     };
@@ -431,18 +432,34 @@ test("unsigned owner plans initialize, fund, reserve, veto and withdraw on actua
   assert.equal(withdrawal.freeBalance, "75000000");
   assert.equal(withdrawal.fee, "1500000");
   assert.equal(withdrawal.net, "73500000");
+  // The withdrawal fee stays in the vault until claim_fees.
   assert.equal(
     (await getAccount(provider.connection, vault)).amount,
-    25_000_000n,
+    26_500_000n,
   );
   // 2% of 75,000,000 is 1,500,000. The owner started with 100M and deposited 60M.
   assert.equal(
     (await getAccount(provider.connection, source.address)).amount,
     113_500_000n,
   );
+  await assert.rejects(
+    getAccount(provider.connection, feeAccount.address),
+    /TokenAccountNotFound/,
+  );
+  await execute("claim-fees");
   assert.equal(
     (await getAccount(provider.connection, feeAccount.address)).amount,
     1_500_000n,
+  );
+  assert.equal(
+    (await getAccount(provider.connection, vault)).amount,
+    25_000_000n,
+  );
+  assert.equal(
+    (
+      await program.account.project.fetch(project, "finalized")
+    ).accruedFees.toString(),
+    "0",
   );
   // The owner's rotation plans, and the upgrade runbook's project list, which
   // marks a project in the current layout with the pinned fee recipient.
@@ -487,5 +504,95 @@ test("unsigned owner plans initialize, fund, reserve, veto and withdraw on actua
   );
   const row = listed.projects.find((p) => p.address === project.toBase58());
   assert.equal(row.pinned, true);
+  assert.equal(row.size, 332);
+  assert.equal(row.migrationRequired, false);
+});
+
+// test-e2e.sh preloads a Project of the earlier 316-byte layout. The upgrade runbook
+// lists it, plans its migration, and anyone grows it to the current layout once.
+test("migrate_project grows a 316-byte Project to the current layout once", async () => {
+  const provider = anchor.AnchorProvider.env(),
+    payer = provider.wallet.payer,
+    connection = provider.connection;
+  const program = new anchor.Program(
+    JSON.parse(readFileSync("idl/slop_escrow.json")),
+    provider,
+  );
+  const config = await ensureConfig(program);
+  const runtime = {
+    rpcUrl: connection.rpcEndpoint,
+    expectedGenesis: await connection.getGenesisHash(),
+  };
+  const setMonthly = () =>
+    program.methods
+      .setMonthlyCommitment(new anchor.BN(5), true)
+      .accountsStrict({ owner: legacyOwner.publicKey, project: legacyProject })
+      .signers([legacyOwner])
+      .rpc();
+  const migrate = (project) =>
+    program.methods
+      .migrateProject()
+      .accountsStrict({
+        payer: payer.publicKey,
+        project,
+        systemProgram: anchor.web3.SystemProgram.programId,
+      })
+      .rpc();
+  const legacyRow = async () =>
+    (
+      await listProjects({ programId: program.programId.toBase58() }, runtime)
+    ).projects.find((p) => p.address === legacyProject.toBase58());
+  let row = await legacyRow();
   assert.equal(row.size, 316);
+  assert.equal(row.migrationRequired, true);
+  assert.equal(row.pinned, false);
+  assert.equal(row.owner, legacyOwner.publicKey.toBase58());
+  assert.equal(row.mint, legacyMint.publicKey.toBase58());
+  // No instruction reads the old layout before migration.
+  await assert.rejects(setMonthly(), /AccountDidNotDeserialize/);
+  // The planner builds one unsigned transaction per legacy project; any payer signs it.
+  const block = await connection.getLatestBlockhash("finalized");
+  const plan = await migratePlan(
+    {
+      programId: program.programId.toBase58(),
+      payer: payer.publicKey.toBase58(),
+      ...expectedDeployment,
+    },
+    { ...runtime, recentBlockhash: block.blockhash },
+  );
+  assert.equal(plan.requiredSigner, payer.publicKey.toBase58());
+  const planned = plan.transactions.find(
+    (t) => t.project === legacyProject.toBase58(),
+  );
+  assert.ok(planned);
+  const transaction = Transaction.from(
+    Buffer.from(planned.transactionBase64, "base64"),
+  );
+  transaction.sign(payer);
+  const signature = await connection.sendRawTransaction(
+    transaction.serialize(),
+  );
+  await connection.confirmTransaction(signature, "finalized");
+  const info = await connection.getAccountInfo(legacyProject, "finalized");
+  assert.equal(info.data.length, 332);
+  assert.ok(
+    info.lamports >= (await connection.getMinimumBalanceForRentExemption(332)),
+  );
+  let state = await program.account.project.fetch(legacyProject, "finalized");
+  assert.equal(state.accruedFees.toString(), "0");
+  assert.equal(state.monthlyOutstanding.toString(), "0");
+  assert.equal(state.owner.toBase58(), legacyOwner.publicKey.toBase58());
+  assert.equal(state.mint.toBase58(), legacyMint.publicKey.toBase58());
+  row = await legacyRow();
+  assert.equal(row.size, 332);
+  assert.equal(row.migrationRequired, false);
+  assert.equal(row.pinned, true);
+  // It migrates once, and only a legacy Project migrates.
+  await assert.rejects(migrate(legacyProject), /NotLegacyProject/);
+  await assert.rejects(migrate(config), /NotLegacyProject/);
+  // The owner's instructions work on the migrated project.
+  await setMonthly();
+  state = await program.account.project.fetch(legacyProject);
+  assert.equal(state.monthlyCap.toString(), "5");
+  assert.equal(state.monthlyEnabled, true);
 });

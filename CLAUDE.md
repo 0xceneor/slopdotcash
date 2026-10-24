@@ -28,11 +28,12 @@ alias only.
   - The escrow identity attester key (PAY-05, approved by the repository owner
     on 14 October 2026). It only attests the authenticated GitHub actor for a
     destination binding that the destination wallet also signs, and it submits
-    only that binding transaction. It cannot choose an amount, move, pay or
-    route funds alone, or reach free or reserved funds. Each binding waits the
-    reviewed binding delay, and the project owner can cancel it in that time.
-    A public timelocked rotation replaces the key, and the attester cannot
-    block it. Owner decision of 24 October 2026: after the reviewed contract
+    only that binding transaction. It cannot choose an amount or reach free
+    funds. A binding activates immediately and the award delay is zero (#1086,
+    #1100), so a stolen attester key with a wallet it controls can redirect and
+    pay any matured unpaid award before the owner can cancel. Protection rests
+    on custody of this key (`docs/security/red-team-2026-10-24.md`). A rotation
+    by the registrar replaces the key, and the attester cannot block it. Owner decision of 24 October 2026: after the reviewed contract
     change and independent audit, it also signs each funded project's monthly
     allocation root. The contract limits that commitment to the owner's
     monthly cap, one commitment per period, and the owner's opt-out; the

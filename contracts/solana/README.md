@@ -25,7 +25,7 @@ Anyone can deposit. The owner approves immutable awards: `commit` only in an
 ordinary project and `commit_bounty` only in a bounty project. In an ordinary
 project the bounded monthly commitment below also commits awards. The only
 mutable
-authority is the identity authority, replaced by a public two-party timelock. Award approval reserves principal
+authority is the identity authority, replaced by a public two-party rotation. Award approval reserves principal
 and its included 2% fee before a wallet exists. The `award` PDA and separate `origin` PDA are
 permanent: no close, cancellation, rescue or reserve withdrawal instruction exists.
 The same source digest cannot be committed again under a different award ID.
@@ -67,7 +67,7 @@ paying wallet's associated token account, and `bind_wallet` rejects a zero
 claim digest, a destination equal to the identity authority, the project or the
 vault PDA, and a submission past its `expires_at`; a PDA cannot co-sign in any
 case. `initialize` rejects a fee recipient equal to the owner
-or the project. Production deployments use a delay of at least 48 hours, and
+or the project. New production deployments use zero delay, and
 the adapter checks the project's delay against the reviewed manifest.
 
 ### Deployment Config (review finding L-3)
@@ -77,15 +77,14 @@ The program has one `Config` PDA (seeds `["config"]`) with the deployment-wide
 `initialize_config(identity_authority, fee_recipient, rotation_authority)` creates it once. Only the program's upgrade authority can sign
 it: the instruction requires the program's ProgramData account and checks that
 its `upgrade_authority_address` is the signer. The three keys must be distinct
-and non-default. No instruction changes or closes the Config. After the upgrade
-authority is revoked, nobody can create it, so the human runbook creates it
-before `solana program set-upgrade-authority --final`.
+and non-default. No instruction changes or closes the Config. The owner retains upgrade authority in production. Create the Config before
+project activation; this implementation has no Config update instruction.
 
 `initialize` takes the Config as its last account. It rejects an identity
 authority or fee recipient that differs from the Config (`ConfigMismatch`), and
 keeps the earlier separation checks. Each project still rotates its own
 identity authority (below). The owner proposes, the pinned rotation authority
-confirms, and the timelock applies. Thus every identity authority a new project
+confirms, and execution is immediate with the zero-delay production configuration. Thus every identity authority a new project
 ever has is either the pinned one or one that the pinned rotation authority
 confirmed. A new project always starts with the Config identity authority, even
 after other projects rotate away from it. If that key is ever compromised, each
@@ -93,21 +92,20 @@ new project must rotate at once after `initialize`.
 
 Why on chain: an adapter-only check would need the attester key published in
 source, and the owner has not published it. On-chain pinning matches the EVM
-factory. The human upgrade authority writes it before the program becomes
-immutable.
+factory. The owner-controlled upgrade authority writes it before project activation.
 
 Residual risk: Project accounts created before the Config existed are not
 pinned. The upgrade runbook lists them with `scripts/config-plan.mjs projects`
-(a `getProgramAccounts` query on the Project discriminator) before `--final`.
+(a `getProgramAccounts` query on the Project discriminator) before activation.
 The adapter refuses a project whose fee recipient differs from the Config fee
 recipient, and refuses a deployment that has no Config account.
 
 ### Identity authority rotation
 
 Each project rotates its own identity authority through a public two-party
-timelock. The owner calls `propose_authority_rotation(next)`, which records the
+rotation. The owner calls `propose_authority_rotation(next)`, which records the
 candidate and an effective time `rotation_delay` seconds later (set at
-`initialize`; production uses at least 7 days, and the adapter checks the
+`initialize`; new production deployments use zero, and the adapter checks the
 project's delay against the reviewed manifest) and emits
 `AuthorityRotationProposed`. The rotation authority, the second fixed party, calls
 `confirm_authority_rotation`. The owner can cancel its own pending proposal
@@ -183,9 +181,14 @@ The program has no service charge. Slopbot is free (PRD section 5); owner
 decision D13 removed `charge_service` and its `service_fees` counter. The
 conservation identity is
 `deposited = free + reserved + paid + payout_fees + withdrawn_gross`.
-The binding lifecycle does not change this identity. A zero-amount transfer leg
-(a zero fee, or a withdrawal whose return rounds to zero) is skipped, so a
-frozen fee account cannot stall a zero-fee payout.
+The binding lifecycle does not change this identity. `pay` and `withdraw` move
+only the net amount; the payout or withdrawal fee stays in the vault and is
+added to `accrued_fees`. Anyone calls `claim_fees` to move all accrued fees to
+any token account of the mint that the fee recipient owns. A frozen or missing
+fee account therefore stops only `claim_fees`, never a payout or withdrawal, as
+on EVM (review item L-2). Every new reserve or withdrawal also requires
+`vault.amount >= reserved + accrued_fees + amount`. A withdrawal whose return
+rounds to zero needs no transfer.
 It cannot spend reserved principal or fees. Every credited balance is
 owner-controlled free balance, whoever deposited it; this version keeps no
 separate donor-class funds.
@@ -223,6 +226,22 @@ period is open at a time.
    commits as an ordinary award with the 2% fee
    through the same `origin` and `award` PDAs, so a source commits once, by
    hand or monthly.
+3. Recording a root adds its total to `monthly_outstanding`; each committed
+   award subtracts its gross. While `monthly_outstanding` is positive the owner's
+   ordinary `commit` fails with `MonthlyOutstanding`, so the owner cannot consume
+   an admitted award's source by hand and strand its reserve. Anyone, including
+   the owner, can clear the gate by committing the remaining awards.
+4. An award that can never commit is returned to free balance by anyone with
+   `release_monthly_award(period, source_digest, actor_id, gross, index, count,
+   proof)`. The leaf must prove against the recorded month, and its source must
+   already have an `origin` (it was committed before the month was admitted, or
+   by another month) or its actor must be zero; otherwise the call fails with
+   `AwardCommittable`. Both `commit_monthly_award` and `release_monthly_award`
+   create the `["settled", month, source_digest]` PDA, so each source of a month
+   settles once: a committed award cannot also be released. A source repeated
+   inside one allocation could settle only once and would leave the second copy
+   reserved, so the allocation builder in `adapter.ts` rejects repeated sources
+   before the identity authority signs.
 
 Two steps are necessary because one Solana transaction cannot create the
 accounts of a full month. The attester's role grows from wallet binding to
@@ -292,18 +311,17 @@ finalized reconciliation, real OAuth and browser journey separately.
 
 Program upgrade authority remains a fundamental trust boundary: a retained upgrade
 key can replace these restrictions. Do not activate mainnet without an explicit
-reviewed immutable or governance-controlled deployment decision and independent
-contract review. The owner and fee recipient keys are fixed in each project;
-the identity authority changes only through the public two-party timelock
+owner-approved upgrade-authority decision. The owner approved retained upgrade
+control and waived independent contract and legal reviews on 24 October 2026. The owner and fee recipient keys are fixed in each project;
+the identity authority changes only through the public two-party rotation
 above, never through a hidden administrative bypass.
 
 ## Mainnet upgrade
 
-The program is upgradeable on mainnet until the human runbook in
-`contracts/DEPLOY-MAINNET.md` ("Solana program upgrade") revokes the upgrade
-authority. That runbook builds verifiably, upgrades through a checked buffer,
-creates the Config with `config-plan.mjs`, lists unpinned projects, and then
-runs `solana program set-upgrade-authority --final`. Agents never run it.
+The program remains upgradeable on mainnet under the owner-controlled authority.
+`contracts/DEPLOY-MAINNET.md` records the deployment and upgrade procedure. That runbook builds verifiably, upgrades through a checked buffer,
+creates the Config with `config-plan.mjs`, and lists unpinned projects. Do not revoke the approved upgrade authority.
+Signing requires the operator authorization and custody used for deployment.
 
 ## Deployment identity and automatic execution
 
@@ -333,14 +351,16 @@ the Token program) and requires each transfer's decimals to equal the mint's.
 The result fields `grossMicro`, `netMicro` and `feeMicro` keep their names; they
 carry token base units of the project mint as decimal strings. The adapter checks every field
 against finalized state except the identity authority: after activation it
-changes only through the timelocked rotation that the verified program code
+changes through the authorized rotation that the verified program code
 enforces, so the immutable manifest keeps verifying through a rotation and
 historical receipts stay verifiable.
 For the upgradeable loader, `codeSha256` hashes every byte after the fixed
 45-byte ProgramData header, including allocation padding. `upgradeAuthority`
 must match the finalized loader state, including `null` for an immutable program.
-On mainnet the adapter and manifest schema require `null`: a retained upgrade key
-could replace the program, empty vaults, and restore the reviewed bytes.
+On mainnet the owner-approved upgrade authority remains set and must match the
+manifest. This authority can replace program logic governing deposited funds.
+Each approved upgrade must record the new program hash and preserve prior
+deployment evidence.
 Classic immutable BPF loader deployments hash their complete executable data.
 The deploy script prints separate compiled and deployed hashes; they need not match
 when ProgramData reserves additional zero-filled capacity.
@@ -381,11 +401,11 @@ finalized block time. `vault` is the project PDA, `asset` the mint, and
 `decimals` comes from the mint account. Counters are decimal text in token base
 units. `freeBalance` is `deposited - paid - payout_fees - withdrawn_gross -
 reserved`; the function throws when it is negative. Solana keeps
-one combined `reserved`, so `reservedPrincipal`, `reservedFees` and
-`accruedFees` are null.
+one combined `reserved`, so `reservedPrincipal` and `reservedFees` are null.
+`accruedFees` is the project's unclaimed fees.
 
 `owner-plan.mjs` creates unsigned initialize/deposit/commit/veto/withdraw,
-propose-rotation, confirm-rotation and cancel-rotation transactions; a veto may name an
+claim-fees, propose-rotation, confirm-rotation and cancel-rotation transactions; a veto may name an
 unpaid award (`obligationId`) to use its commit-delay window. `initialize`
 refuses reviewed authorities that differ from the Config, and passes the Config
 account. `confirm-rotation` requires the independent rotation-authority signer,
@@ -395,17 +415,29 @@ fee, signs, and funds the deposit from its associated token account.
 `config-plan.mjs plan` creates the unsigned `initialize_config` transaction for
 the current upgrade authority after it checks the deployed program bytes and
 that no Config exists. `config-plan.mjs projects` lists every Project account
-and marks which ones the Config pins. Neither mode reads keys or sends a
+and marks which ones the Config pins and which still need migration.
+`config-plan.mjs migrate` builds one unsigned `migrate_project` transaction per
+316-byte project for the input's `payer`. No mode reads keys or sends a
 transaction.
 
 ### Project account layout
 
-The `Project` account is 316 bytes. The D13 revision removed `service_fees` and
+The `Project` account is 332 bytes. The D13 revision removed `service_fees` and
 appended `purpose`, `monthly_cap` and `monthly_enabled`, and the purpose is a
-project PDA seed. A project from an earlier build cannot sign with the new
+project PDA seed. The red-team revision of 24 October 2026 appended
+`accrued_fees` and `monthly_outstanding` (u64 each). A 316-byte project from the
+build before it cannot be read until anyone calls the permissionless
+`migrate_project`, which grows it to 332 bytes, takes any added rent from the
+payer and starts both counters at zero (that build sent fees out at once).
+The same revision appended `released` to `MonthlyAllocation` (now 100 bytes).
+A month recorded by the earlier build has no settled markers and is not in
+`monthly_outstanding`, so the new build cannot read it and its awards fail
+closed. Before an in-place upgrade, `getProgramAccounts` must show no
+92-byte month account; devnet program `7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ`
+had none on 24 October 2026. A project from an earlier build cannot sign with the new
 seeds, so the D13 revision is a new deployment, and the earlier
-`migrate_project` path is removed. Mainnet requires an immutable program, so
-any later layout change is also a new deployment.
+`migrate_project` path is removed. Later upgrades must preserve this layout or use an explicitly reviewed migration.
+A replacement deployment must preserve the old deployment and its obligations.
 
 `owner-plan.mjs` takes the reviewed deployment input file;private RPC URL, expected genesis and a fresh
 blockhash come separately from `SLOP_SOLANA_RPC_URL`, `SLOP_SOLANA_GENESIS`, and
@@ -425,3 +457,5 @@ deployment; an earlier 73-byte Config is not migrated or accepted by the
 adapter. Prepare `rotationAuthority` in the reviewed configuration and keep
 its seed only in the owner-controlled signing environment. It must differ
 from the fee wallet, identity authority, project owner and vault.
+
+The owner approved zero mandatory award and identity-rotation delays and retained production upgrade authority on 24 October 2026. New project configurations use zero delays. Existing project accounts retain their recorded delays. The configured upgrade key and exact program bytes remain part of verification.

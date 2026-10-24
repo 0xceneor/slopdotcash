@@ -144,9 +144,17 @@ attempt is uncertain; successor binding rotation requires a proved ancestor clai
 `GET /api/v1/payments/projects/<id>/totals` publishes net contributor payments,
 payout fees, and unpaid award reserves from verified events, one `assets` row
 per network and asset, plus cursor coverage and sync time. These fields are not
-a vault balance, deposit total, or refund ledger. Missing index coverage is explicit. Account `deliveryState` distinguishes
-needs-wallet, awaiting-binding, submitted, held, and paid; only `state=paid`
-represents finalized chain payment.
+a vault balance, deposit total, or refund ledger. Missing index coverage is explicit. Account `deliveryState` names the PRD
+section 6 payment state of a reserved award: `needs_wallet` (awaiting
+wallet), `ready` (an authorized wallet is queued for payment), `submitted`,
+`held`, and `paid`; only `state=paid` represents finalized chain payment.
+Account `monthlyAwards` lists the contributor's approved monthly awards that
+are frozen but not yet reserved in the vault (PRD sections 3 and 6), with the
+owner view's state: `underfunded` until the coordinator creates the month's
+obligations, then `awaiting-reservation`. A reserved award leaves this list
+and appears in `payments` under the same source digest. A proposal that is
+still under the owner's private review is never returned to the contributor,
+and `monthlyAwards` never adds to `balances`.
 
 Migration `0021` changes `payment_obligations` to `asset_address`,
 `asset_decimals`, `gross_base` and `fee_base`. It copies each earlier row as

@@ -8,7 +8,7 @@ import {
   solanaVaultAddress,
 } from "./adapter";
 
-const PROGRAM = "4hXeYxsTKbwVKRRn8P1emGNDmVUSx13VMykfUAsbPnnj";
+const PROGRAM = "7E5ZRh5y6Xgg7k3kdS75CMiTE2efoq9PqNWR5fCVDavQ";
 const TOKEN = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const PROJECT = solanaBase58(new Uint8Array(32).fill(7));
 const MINT_BYTES = new Uint8Array(32).fill(9);
@@ -26,6 +26,7 @@ interface Counters {
   payoutFees: bigint;
   withdrawnGross: bigint;
   withdrawalFees: bigint;
+  accruedFees: bigint;
 }
 const base: Counters = {
   reserved: 30n,
@@ -34,8 +35,9 @@ const base: Counters = {
   payoutFees: 2n,
   withdrawnGross: 500n,
   withdrawalFees: 10n,
+  accruedFees: 12n,
 };
-/** A Project account in the current 316-byte layout. */
+/** A Project account in the current 332-byte layout. */
 function projectAccount(c: Counters, mint = MINT_BYTES): Uint8Array {
   const data = new Uint8Array(PROJECT_SIZE);
   const view = new DataView(data.buffer);
@@ -54,6 +56,7 @@ function projectAccount(c: Counters, mint = MINT_BYTES): Uint8Array {
   data[248] = 254;
   view.setBigInt64(249, 3600n, true);
   view.setBigInt64(298, 604800n, true);
+  view.setBigUint64(316, c.accruedFees, true);
   return data;
 }
 function mintAccount(decimals: number, initialized = 1): Uint8Array {
@@ -128,7 +131,7 @@ describe("readVaultTotals", () => {
       freeBalance: (10n ** 19n - 98n - 2n - 500n - 30n).toString(),
       reservedPrincipal: null,
       reservedFees: null,
-      accruedFees: null,
+      accruedFees: "12",
       reserved: "30",
     });
     expect(calls.map((c) => c.method)).toEqual([
@@ -191,8 +194,8 @@ describe("program addresses", () => {
   test("derive the Config and vault PDAs", () => {
     expect(PROJECT).toBe("US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx");
     expect(solanaConfigAddress(PROGRAM)).toBe(
-      "D1zzrMUJ5CyZZgwNkMHKp7n6WpV2MLev7i2P6j2BAxmC",
+      "9hjoFnUrgF65K4DnWSDbS1WJjoGu4LChuz8XFq73UtaS",
     );
-    expect(VAULT).toBe("HKDSkf4p2xZ3frfngLQdS8QiE6Z9UazAqWxhEMJ63piw");
+    expect(VAULT).toBe("DmCm1opZm61cYKAHYQ24LTVvh8UqPu5hpkRChccaCa6n");
   });
 });

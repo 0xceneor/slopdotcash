@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
+import {DeployFactory} from "./DeployFactory.sol";
 
 import {ProjectEscrow, EscrowFactory, IERC20, Purpose} from "../src/ProjectEscrow.sol";
 import {TestDollar} from "../integration/TestDollar.sol";
@@ -42,7 +43,7 @@ contract FableBase {
         vm.warp(1_800_000_000);
         usdc = new TestDollar();
         vm.prank(REGISTRAR);
-        factory = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, DELAY);
+        factory = DeployFactory.create(REGISTRAR, FEE, AUTHORITY, DELAY);
         vm.prank(OWNER);
         vault = ProjectEscrow(factory.create(PROJECT, IERC20(address(usdc)), Purpose.Ordinary));
         usdc.mint(OWNER, 1_000_000_000e6);
@@ -160,10 +161,10 @@ contract FableEscrowTest is FableBase {
     function test_F3_delayIsBoundedAndCancelIsAFlag() public {
         vm.prank(REGISTRAR);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, AUTHORITY, type(uint64).max);
+        DeployFactory.create(REGISTRAR, FEE, AUTHORITY, type(uint64).max);
         vm.prank(REGISTRAR);
         vm.expectRevert(ProjectEscrow.InvalidInput.selector);
-        new EscrowFactory(REGISTRAR, FEE, AUTHORITY, type(uint64).max - uint64(block.timestamp));
+        DeployFactory.create(REGISTRAR, FEE, AUTHORITY, type(uint64).max - uint64(block.timestamp));
         bind(1, CONTRIBUTOR, 0);
         (,,, uint64 activatesAt, bool cancelled) = vault.bindings(1);
         require(activatesAt == uint64(block.timestamp) && !cancelled, "active, not cancelled");
@@ -315,7 +316,7 @@ contract FableEscrowTest is FableBase {
         );
         // Second factory, same project id, different vault address, different award ids.
         vm.prank(REGISTRAR);
-        EscrowFactory f2 = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, DELAY);
+        EscrowFactory f2 = DeployFactory.create(REGISTRAR, FEE, AUTHORITY, DELAY);
         vm.prank(OWNER);
         ProjectEscrow v2 = ProjectEscrow(f2.create(PROJECT, IERC20(address(usdc)), Purpose.Ordinary));
         require(address(v2) != address(vault), "distinct");
@@ -416,7 +417,7 @@ contract FableOddTokenTest is FableBase {
         vm.warp(1_800_000_000);
         odd = new OddToken();
         vm.prank(REGISTRAR);
-        EscrowFactory f = new EscrowFactory(REGISTRAR, FEE, AUTHORITY, DELAY);
+        EscrowFactory f = DeployFactory.create(REGISTRAR, FEE, AUTHORITY, DELAY);
         vm.prank(OWNER);
         oddVault = ProjectEscrow(f.create(PROJECT, IERC20(address(odd)), Purpose.Ordinary));
         odd.mint(OWNER, 1_000e6);
