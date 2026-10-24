@@ -1504,7 +1504,7 @@ function ProjectPage({
             view={view}
           />
         ) : null}
-        <ProjectRiskFlag key={project.id} projectId={project.id} />
+        <ProjectRiskFlag key={`flag:${project.id}`} projectId={project.id} />
       </div>
     </main>
   );
