@@ -789,9 +789,18 @@ function ProjectsSection({
   const [state, reload] = useAdminData("admin/projects", selectProjects);
   const [editing, setEditing] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // Confirmed malicious results that wait for a moderator decision come
+  // first (PRD sections 2 and 8).
   const matchingProjects =
     state.status === "ready"
-      ? state.value.filter((project) =>
+      ? [
+          ...state.value.filter(
+            (project) => project.enforcement.decisionRequired,
+          ),
+          ...state.value.filter(
+            (project) => !project.enforcement.decisionRequired,
+          ),
+        ].filter((project) =>
           selectedProject
             ? project.id === selectedProject
             : `${project.id} ${project.manifest.name} ${project.manifest.repositories.map((repo) => repo.id).join(" ")}`
@@ -921,6 +930,12 @@ function ProjectsSection({
                     {project.id} · {project.status} ·{" "}
                     {project.manifest.listingTier}
                   </p>
+                  {project.enforcement.decisionRequired ? (
+                    <p className="form-error">
+                      <CircleAlert aria-hidden="true" /> Moderator decision
+                      needed: confirmed malicious result
+                    </p>
+                  ) : null}
                 </div>
                 <button
                   className="button secondary-button"

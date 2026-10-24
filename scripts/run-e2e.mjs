@@ -28,6 +28,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  E2E_MAINTAINER_ACCOUNTS,
   E2E_OWNER,
   E2E_SECURITY_ACCOUNTS,
   startGitHubApiFixture,
@@ -140,6 +141,13 @@ function prepareRegistryDatabase() {
         { token: sessionToken(), githubId },
       ]),
     ),
+    // Maintainers a moderator bans in tests/e2e/registry.spec.ts.
+    ...Object.fromEntries(
+      Object.entries(E2E_MAINTAINER_ACCOUNTS).map(([role, githubId]) => [
+        role,
+        { token: sessionToken(), githubId },
+      ]),
+    ),
     // Private security bounty roles (tests/e2e/security-bounty.spec.ts).
     ...Object.fromEntries(
       Object.entries(E2E_SECURITY_ACCOUNTS).map(([role, githubId]) => [
@@ -187,6 +195,14 @@ function prepareRegistryDatabase() {
       SLOP_E2E_EMAIL_TOKENS: JSON.stringify(
         Object.fromEntries(
           Object.keys(E2E_EMAIL_ACCOUNTS).map((role) => [
+            role,
+            sessions[role].token,
+          ]),
+        ),
+      ),
+      SLOP_E2E_MAINTAINER_TOKENS: JSON.stringify(
+        Object.fromEntries(
+          Object.keys(E2E_MAINTAINER_ACCOUNTS).map((role) => [
             role,
             sessions[role].token,
           ]),

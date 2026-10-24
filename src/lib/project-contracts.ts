@@ -130,6 +130,11 @@ export type ProjectEnforcement = {
   result: EnforcementResult;
   /** Exact scan and malicious findings covered by this independent decision. */
   vettingReview?: { assessmentId: string; maliciousAssessmentIds: string[] };
+  /**
+   * Maintainer accounts a moderator banned with the project when deciding a
+   * confirmed malicious result (PRD section 8). Only that decision has them.
+   */
+  maintainerBans?: GithubActor[];
   createdAt: string;
 };
 
@@ -152,6 +157,13 @@ export interface ProjectEnforcementState {
   /** The restriction holds but its paused, retired revision has not landed. */
   revisionPending: boolean;
   moderation: "unconfigured" | "moderator" | "not-moderator";
+  /**
+   * A confirmed malicious scan result banned the project and no moderator
+   * has decided it yet: ban the project and its maintainer, or reinstate.
+   */
+  decisionRequired: boolean;
+  /** Maintainer accounts banned with the restriction in force. */
+  bannedMaintainers: GithubActor[];
   records: ProjectEnforcement[];
 }
 
@@ -167,6 +179,8 @@ export interface EnforcementPreview {
   appealAfter: ProjectEnforcementState["appeal"];
   result: EnforcementResult;
   pendingReason: string | null;
+  /** Maintainer accounts the action bans with the project. */
+  maintainerBans: GithubActor[];
   revision: {
     before: number;
     after: number | null;

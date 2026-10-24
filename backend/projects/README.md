@@ -289,6 +289,22 @@ rate limit, and caches each answer for five minutes. The browser never calls
   paused, `retired` revision of the restriction is still pending. It appends a paused `community` revision only if
   the project was listed when the restriction began; it never restores
   featuring, activation or money. A denial keeps the restriction.
+- A signed confirmed malicious Ban waits for a moderator decision (PRD
+  sections 2 and 8). `/admin` lists the project first with "Moderator
+  decision needed", with or without an owner appeal. The moderator either
+  reinstates the project through the appeal path above, or chooses "Ban
+  project and maintainer". That decision is a moderator `ban` record. In the
+  same D1 batch it stores the project's GitHub user steward and the account
+  that listed the project in `project_maintainer_bans`
+  (`0066_project_maintainer_bans.sql`), and it closes an open appeal as
+  denied. A moderator who placed the restriction cannot decide an open appeal
+  this way. A plain denial is refused with `malicious_decision_required`
+  until the decision is made. While that project stays restricted, a banned
+  maintainer cannot create a project, publish a stored application or publish
+  an owner revision, as the actor or as the named steward
+  (`maintainer_banned`). The steward or applicant can still appeal the
+  project. A later reinstatement of that project lifts the maintainer ban.
+  The ban does not erase an approved funded award.
 - Two standing rules act without a moderator (PRD section 8; see
   `backend/vetting/README.md`). The second distinct active contributor flag
   appends a `quarantine` record whose issuer is `contributor-flags`, and a

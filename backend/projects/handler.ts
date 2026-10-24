@@ -47,6 +47,8 @@ import {
 } from "./edge-cache";
 import {
   activeRestrictions,
+  awaitsMaliciousDecision,
+  bannedMaintainerIds,
   ENFORCEMENT_ACTIONS,
   enforcedManifest,
   enforcementRevisionReason,
@@ -912,11 +914,10 @@ async function createProject(
     ),
   );
   assertNewProjectManifest(manifest);
-  assertRepositoryUnrestricted(
-    manifest,
-    await deps.persistence.listEnforcements(),
-  );
   const actor = actorOf(session);
+  const enforcements = await deps.persistence.listEnforcements();
+  assertMaintainerNotBanned(manifest, actor, enforcements);
+  assertRepositoryUnrestricted(manifest, enforcements);
   const referrer = await resolveReferrer(body.referrer, manifest, actor, deps);
   assertRegistryWith(await deps.persistence.listProjects(), manifest, {
     replaces: false,
@@ -1006,10 +1007,9 @@ async function publishOwnerRevision(
   if (current === null) fail(404, "not_found", "Project not found");
   if (current.revision !== expectedRevision)
     fail(409, "stale_revision", "The project changed since you loaded it");
-  const restriction = publicRestrictionOf(
-    current,
-    await deps.persistence.listEnforcements(),
-  );
+  const enforcements = await deps.persistence.listEnforcements();
+  assertMaintainerNotBanned(current.manifest, actor, enforcements);
+  const restriction = publicRestrictionOf(current, enforcements);
   if (restriction.state !== "clear")
     fail(
       409,
@@ -1209,10 +1209,9 @@ async function publishPendingApplication(
     });
   canonicalManifest(application.manifest);
   assertNewProjectManifest(application.manifest, { storedApplication: true });
-  assertRepositoryUnrestricted(
-    application.manifest,
-    await deps.persistence.listEnforcements(),
-  );
+  const enforcements = await deps.persistence.listEnforcements();
+  assertMaintainerNotBanned(application.manifest, actor, enforcements);
+  assertRepositoryUnrestricted(application.manifest, enforcements);
   assertRegistryWith(
     await deps.persistence.listProjects(),
     application.manifest,
@@ -1497,6 +1496,51 @@ function assertRepositoryUnrestricted(
     );
 }
 
+/**
+ * Refuses project setup and owner changes by a maintainer that a moderator
+ * banned after a confirmed malicious result (PRD sections 2 and 8), whether
+ * the account acts itself or is named as the steward.
+ */
+function assertMaintainerNotBanned(
+  manifest: ProjectDefinition,
+  actor: GithubActor,
+  enforcements: ProjectEnforcement[],
+): void {
+  const banned = bannedMaintainerIds(enforcements);
+  if (
+    banned.has(actor.githubId) ||
+    banned.has(String(manifest.steward.github.actorId))
+  )
+    fail(
+      403,
+      "maintainer_banned",
+      "A moderator banned this maintainer after a confirmed malicious scan result. The account cannot list or change projects. The steward or applicant of the banned project may request its reinstatement.",
+    );
+}
+
+/**
+ * The maintainer accounts a moderator bans with a confirmed malicious
+ * project: its steward when that is a GitHub user, and the account that
+ * listed it.
+ */
+async function projectMaintainers(
+  deps: ProjectApiDependencies,
+  project: ProjectRecord,
+): Promise<GithubActor[]> {
+  const steward = project.manifest.steward.github;
+  const maintainers: GithubActor[] =
+    steward.type === "User"
+      ? [{ githubId: String(steward.actorId), githubLogin: steward.login }]
+      : [];
+  const creator = await deps.persistence.projectCreator(project.id);
+  if (
+    creator !== null &&
+    !maintainers.some((maintainer) => maintainer.githubId === creator.githubId)
+  )
+    maintainers.push(creator);
+  return maintainers;
+}
+
 function adminEnforcement(
   project: ProjectRecord,
   restriction: ProjectRestriction,
@@ -1513,6 +1557,8 @@ function adminEnforcement(
     revisionPending:
       restriction.state !== "clear" && !enforcedManifest(project.manifest),
     moderation,
+    decisionRequired: awaitsMaliciousDecision(restriction),
+    bannedMaintainers: restriction.bannedMaintainers,
     records: restriction.records,
   };
 }
@@ -1724,6 +1770,9 @@ async function recordEnforcement(
       maliciousAssessmentIds: vetting.reviewedMaliciousAssessmentIds ?? [],
     };
   }
+  const maintainerBans = plan.bansMaintainer
+    ? await projectMaintainers(deps, project)
+    : [];
   const recordId = `enf_${deps.randomId().replaceAll("-", "")}`;
   const at = deps.now().toISOString();
   const revisionText =
@@ -1762,6 +1811,7 @@ async function recordEnforcement(
           ? "revision_pending"
           : "no_revision_needed",
     ...(vettingReview ? { vettingReview } : {}),
+    ...(maintainerBans.length > 0 ? { maintainerBans } : {}),
     createdAt: at,
   };
   const preview: EnforcementPreview = {
@@ -1775,6 +1825,7 @@ async function recordEnforcement(
     appealAfter: record.appealAfter,
     result: record.result,
     pendingReason: plan.pendingReason,
+    maintainerBans,
     revision: {
       before: project.revision,
       after: record.afterRevision,

@@ -3,6 +3,8 @@
  * ADM-06). Every action needs a reason and an evidence reference, shows the
  * server's exact project and revision preview, and asks for confirmation.
  * The API decides the moderator role and independent review on every call.
+ * A confirmed malicious result waits for a moderator decision: ban the
+ * project and its maintainer, or reinstate it (PRD sections 2 and 8).
  */
 
 import { CircleAlert } from "lucide-react";
@@ -29,10 +31,27 @@ const RESULT_LABELS: Record<EnforcementPreview["result"], string> = {
   no_revision_needed: "No revision needed",
 };
 
+/** The decision on a confirmed malicious result also bans the maintainer. */
+function actionLabel(action: EnforcementAction, decision: boolean): string {
+  return action === "ban" && decision
+    ? "Ban project and maintainer"
+    : ACTION_LABELS[action];
+}
+
+function maintainerList(maintainers: { githubLogin: string }[]): string {
+  return maintainers
+    .map((maintainer) => `@${maintainer.githubLogin}`)
+    .join(", ");
+}
+
 function availableActions(
   enforcement: AdminProject["enforcement"],
 ): EnforcementAction[] {
   if (enforcement.state === "clear") return ["quarantine", "ban"];
+  if (enforcement.decisionRequired)
+    return enforcement.appeal === "requested"
+      ? ["ban", "reinstate"]
+      : ["ban", "request_reinstatement"];
   const escalate: EnforcementAction[] =
     enforcement.state === "quarantined" ? ["ban"] : [];
   return enforcement.appeal === "requested"
@@ -98,7 +117,7 @@ export function ProjectEnforcementPanel({
     projectApiRequest("POST", path("enforcement"), request()).then(
       () =>
         onDone(
-          `${ACTION_LABELS[action]} recorded for ${project.manifest.name}. Public lists and skill routes changed at once.`,
+          `${actionLabel(action, enforcement.decisionRequired)} recorded for ${project.manifest.name}. Public lists and skill routes changed at once.`,
         ),
       (caught: unknown) => {
         setBusy(null);
@@ -134,6 +153,12 @@ export function ProjectEnforcementPanel({
             <dd>{formatTime(enforcement.since)} UTC</dd>
           </div>
         ) : null}
+        {enforcement.bannedMaintainers.length > 0 ? (
+          <div>
+            <dt>Banned maintainers</dt>
+            <dd>{maintainerList(enforcement.bannedMaintainers)}</dd>
+          </div>
+        ) : null}
         {enforcement.restrictedBy.length > 0 ? (
           <div>
             <dt>Restricted by</dt>
@@ -146,6 +171,14 @@ export function ProjectEnforcementPanel({
           </div>
         ) : null}
       </dl>
+      {enforcement.decisionRequired ? (
+        <p className="form-error" role="status">
+          <CircleAlert aria-hidden="true" /> Moderator decision needed: a
+          confirmed malicious scan result banned this project. Ban the project
+          and its maintainer, or reinstate it after the owner's appeal and a
+          fresh clean scan.
+        </p>
+      ) : null}
       {enforcement.revisionPending ? (
         <p className="form-error" role="status">
           <CircleAlert aria-hidden="true" /> Revision pending: the restriction
@@ -162,7 +195,10 @@ export function ProjectEnforcementPanel({
           <ol className="admin-enforcement-history">
             {enforcement.records.map((record) => (
               <li key={record.id}>
-                <strong>{ACTION_LABELS[record.action]}</strong> by{" "}
+                <strong>
+                  {actionLabel(record.action, Boolean(record.maintainerBans))}
+                </strong>{" "}
+                by{" "}
                 {record.actor
                   ? `@${record.actor.githubLogin}`
                   : "the signed security vetting service"}{" "}
@@ -177,6 +213,12 @@ export function ProjectEnforcementPanel({
                 Reason: {record.reason}
                 <br />
                 Evidence: {record.evidenceReference}
+                {record.maintainerBans ? (
+                  <>
+                    <br />
+                    Banned maintainers: {maintainerList(record.maintainerBans)}
+                  </>
+                ) : null}
               </li>
             ))}
           </ol>
@@ -203,7 +245,7 @@ export function ProjectEnforcementPanel({
             >
               {actions.map((value) => (
                 <option key={value} value={value}>
-                  {ACTION_LABELS[value]}
+                  {actionLabel(value, enforcement.decisionRequired)}
                 </option>
               ))}
             </select>
@@ -261,7 +303,11 @@ export function ProjectEnforcementPanel({
                 <div>
                   <dt>Action</dt>
                   <dd>
-                    {ACTION_LABELS[preview.action]} · record {preview.sequence}
+                    {actionLabel(
+                      preview.action,
+                      preview.maintainerBans.length > 0,
+                    )}{" "}
+                    · record {preview.sequence}
                   </dd>
                 </div>
                 <div>
@@ -292,6 +338,15 @@ export function ProjectEnforcementPanel({
                   <dt>Result</dt>
                   <dd>{RESULT_LABELS[preview.result]}</dd>
                 </div>
+                {preview.maintainerBans.length > 0 ? (
+                  <div>
+                    <dt>Maintainer accounts banned</dt>
+                    <dd>
+                      {maintainerList(preview.maintainerBans)}. They cannot list
+                      or change projects while this ban holds.
+                    </dd>
+                  </div>
+                ) : null}
               </dl>
               {preview.pendingReason ? (
                 <p className="form-error" role="status">
@@ -313,7 +368,10 @@ export function ProjectEnforcementPanel({
                 >
                   {busy === "apply"
                     ? "Recording…"
-                    : `Confirm: ${ACTION_LABELS[preview.action]}`}
+                    : `Confirm: ${actionLabel(
+                        preview.action,
+                        preview.maintainerBans.length > 0,
+                      )}`}
                 </button>
                 <button
                   className="button ghost-button"

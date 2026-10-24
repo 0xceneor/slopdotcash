@@ -613,10 +613,28 @@ export class CloudflareProjectPersistence implements ProjectPersistence {
         },
       ]),
     );
+    const bans = await this.db
+      .prepare(
+        "SELECT enforcement_id, github_id, github_login FROM project_maintainer_bans ORDER BY enforcement_id, github_id",
+      )
+      .all<{
+        enforcement_id: string;
+        github_id: string;
+        github_login: string;
+      }>();
+    const bansByEnforcement = new Map<string, GithubActor[]>();
+    for (const ban of bans.results ?? [])
+      bansByEnforcement.set(ban.enforcement_id, [
+        ...(bansByEnforcement.get(ban.enforcement_id) ?? []),
+        { githubId: ban.github_id, githubLogin: ban.github_login },
+      ]);
     return (result.results ?? []).map((row) => ({
       ...enforcementFromRow(row),
       ...(byEnforcement.has(row.id)
         ? { vettingReview: byEnforcement.get(row.id) }
+        : {}),
+      ...(bansByEnforcement.has(row.id)
+        ? { maintainerBans: bansByEnforcement.get(row.id) }
         : {}),
     }));
   }
@@ -655,6 +673,16 @@ export class CloudflareProjectPersistence implements ProjectPersistence {
           ),
       );
     }
+    for (const maintainer of record.maintainerBans ?? [])
+      statements.push(
+        this.db
+          .prepare(
+            `INSERT INTO project_maintainer_bans
+             (enforcement_id, github_id, github_login)
+           VALUES (?, ?, ?)`,
+          )
+          .bind(record.id, maintainer.githubId, maintainer.githubLogin),
+      );
     if (revision !== null) {
       statements.push(
         this.db
