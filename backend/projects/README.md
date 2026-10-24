@@ -294,3 +294,10 @@ which active repositories to collect; an origin that does not serve the
 registry API yet keeps the committed snapshot. `bun run projects:check` proves
 the committed snapshot is canonical and that every active project carries its
 contribution fields.
+
+A clean scan result reruns setup for the recorded project creator. It reloads
+current GitHub permission and checks the permanent actor ID, installation,
+restrictions, and exact scan clearance before activation. No owner session or
+admin action is needed for this check. A failed readiness check leaves the
+project paused and returns an explicit retry state; the owner can retry from
+the setup page. A scan result alone never grants repository authority.

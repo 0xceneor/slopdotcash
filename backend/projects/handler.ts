@@ -770,7 +770,7 @@ async function runSetupCheck(
     project = await appendRevision(request, deps, {
       current: project,
       manifest: { ...project.manifest, status: "active" },
-      reason: `Activated automatically after setup checks run by @${actor.githubLogin}: ${authority.message} Slopbot installation ${access.access.installationId}. Clean scan ${clearance.assessment.id}.`,
+      reason: `Activated automatically after setup checks for @${actor.githubLogin}: ${authority.message} Slopbot installation ${access.access.installationId}. Clean scan ${clearance.assessment.id}.`,
       actor,
     });
     activatedRevision = project.revision;
@@ -785,6 +785,21 @@ async function runSetupCheck(
     activatedRevision,
     checkedAt: deps.now().toISOString(),
   });
+}
+
+/** Recheck the stored creator's current authority after a clean scan.
+ * The scan signature does not grant project authority. The same live GitHub,
+ * installation, restriction and revision checks used by the owner still run.
+ */
+export async function refreshProjectSetup(
+  request: Request,
+  deps: ProjectApiDependencies,
+  projectId: string,
+): Promise<ProjectSetupStatus | null> {
+  const project = await deps.persistence.getProject(projectId);
+  const creator = await deps.persistence.projectCreator(projectId);
+  if (project === null || creator === null) return null;
+  return runSetupCheck(request, deps, project, creator);
 }
 
 /**

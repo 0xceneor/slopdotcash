@@ -11,6 +11,7 @@ import { CloudflareProjectPersistence } from "../backend/projects/cloudflare-per
 import type { RepositoryControl } from "../backend/projects/contracts";
 import {
   handleProjectApi,
+  refreshProjectSetup,
   type ProjectApiDependencies,
 } from "../backend/projects/handler";
 import type { ScanRequest } from "../backend/projects/setup";
@@ -207,7 +208,7 @@ test("creation queues the first scan and returns one status whose next action is
 });
 
 test("setup activates a project only with installation write access and a clean scan", async () => {
-  const { persistence, call, create, state, sqlite } = registry();
+  const { persistence, call, create, state, sqlite, deps } = registry();
   await create("open-registry", "example/open-registry");
   const check = async (actor = OWNER) =>
     (await call("POST", "project-setup/open-registry/check", actor, {}))
@@ -255,7 +256,13 @@ test("setup activates a project only with installation write access and a clean 
   });
   // With every check passing, the project activates once, by status alone.
   state.clearance = CLEARED;
-  const ready = (await check()).setup;
+  // The scan completion hook has no owner session. It reloads the creator
+  // and checks current authority before activating the project.
+  const ready = await refreshProjectSetup(
+    new Request("https://slop.cash/api/v1/vetting/results"),
+    deps,
+    "open-registry",
+  );
   expect(ready).toMatchObject({
     state: "ready",
     status: "active",
@@ -270,7 +277,7 @@ test("setup activates a project only with installation write access and a clean 
     )
     .get() as { reason: string };
   expect(reason.reason).toBe(
-    "Activated automatically after setup checks run by @owner: @owner has admin access to example/open-registry. Slopbot installation 42. Clean scan vet_00000000000000000000000000000001.",
+    "Activated automatically after setup checks for @owner: @owner has admin access to example/open-registry. Slopbot installation 42. Clean scan vet_00000000000000000000000000000001.",
   );
   expect((await check()).setup).toMatchObject({
     state: "ready",

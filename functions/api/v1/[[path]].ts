@@ -33,7 +33,11 @@ import type { RepositoryControl } from "../../../backend/projects/contracts";
 import { edgeCache } from "../../../backend/projects/edge-cache";
 import { publicRestrictionOf } from "../../../backend/projects/enforcement";
 import { githubApiOrigin } from "../../../backend/projects/github-lookup";
-import { handleProjectApi } from "../../../backend/projects/handler";
+import {
+  handleProjectApi,
+  refreshProjectSetup,
+  type ProjectApiDependencies,
+} from "../../../backend/projects/handler";
 import {
   parseRepositoryAccess,
   vettingScanRequester,
@@ -573,7 +577,7 @@ export async function onRequest(context: PagesContext): Promise<Response> {
       manifest,
       (await loadTemplate()).index.templateSha256,
     );
-  const projectResponse = await handleProjectApi(context.request, {
+  const projectDependencies: ProjectApiDependencies = {
     persistence: projectPersistence,
     vettingClearance: (
       projectId,
@@ -619,7 +623,11 @@ export async function onRequest(context: PagesContext): Promise<Response> {
     github,
     cache: edgeCache(),
     waitUntil: context.waitUntil?.bind(context),
-  });
+  };
+  const projectResponse = await handleProjectApi(
+    context.request,
+    projectDependencies,
+  );
   if (projectResponse !== null) return projectResponse;
   const securityResponse = await handleSecurityApi(context.request, {
     db: context.env.SLOP_DB,
@@ -644,6 +652,8 @@ export async function onRequest(context: PagesContext): Promise<Response> {
   const evidenceResponse = await evidence.handle(context.request);
   if (evidenceResponse !== null) return evidenceResponse;
   const vettingResponse = await handleVettingApi(context.request, {
+    refreshSetup: (projectId) =>
+      refreshProjectSetup(context.request, projectDependencies, projectId),
     evidence,
     vetting,
     projects: projectPersistence,

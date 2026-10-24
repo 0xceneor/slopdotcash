@@ -449,9 +449,11 @@ test("an owner creates and updates directly; an admin can delist by exception @r
     .getByLabel("Revision note", { exact: true })
     .fill("Clarify the project scope for contributors");
   await returningOwner.getByRole("button", { name: "Publish changes" }).click();
-  await expect(returningOwner.getByRole("status")).toContainText(
-    "Published revision 2",
-  );
+  await expect(
+    returningOwner
+      .getByRole("status")
+      .filter({ hasText: "Published revision 2" }),
+  ).toBeVisible();
   expect(
     (await (await admin.request.get(`/api/v1/projects/${project.id}`)).json())
       .revision,
