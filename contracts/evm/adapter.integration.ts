@@ -381,7 +381,7 @@ try {
   assert.equal(binding.claimDigest, source);
   assert.ok(BigInt(binding.activatesAt) > 0n);
   await assert.rejects(verifyBinding(config, bindingTx, 0, "202"), /identity/);
-  // A pending binding cannot pay; the owner can still cancel it.
+  // An award inside its commitment period cannot pay; the owner can still cancel its binding.
   const early = await rpc("eth_sendTransaction", [
     {
       from: recipient,
@@ -855,7 +855,7 @@ try {
     "a payment made before the rotation still verifies after it",
   );
   console.log(
-    "EVM adapter integration passed: real factory deployment, permissionless owner-keyed vault creation, separate ordinary and bounty vaults, permissionless deposit, 18-decimal vault beyond uint64, readVaultTotals, 2% withdrawal fee, vault-bound award, wallet-accepted delayed and cancellable binding, payment, fee claim, signed capped once-per-period monthly commitment from any sender, owner opt-out, finalized gating, wrong chain/vault/award/index/delay/purpose rejection, timelocked authority rotation.",
+    "EVM adapter integration passed: real factory deployment, permissionless owner-keyed vault creation, separate ordinary and bounty vaults, permissionless deposit, 18-decimal vault beyond uint64, readVaultTotals, 2% withdrawal fee, vault-bound award, wallet-accepted immediate and cancellable binding, payment, fee claim, signed capped once-per-period monthly commitment from any sender, owner opt-out, finalized gating, wrong chain/vault/award/index/delay/purpose rejection, timelocked authority rotation.",
   );
 } finally {
   anvil.kill("SIGTERM");

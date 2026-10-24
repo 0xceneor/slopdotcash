@@ -8,8 +8,7 @@ interface IERC20 {
     function decimals() external view returns (uint8);
 }
 
-/// @dev Bounds on the binding delay. Below one hour the owner cannot react; above 30 days a binding or a
-/// committed award waits too long to be useful.
+/// @dev Bounds on award-commit and unpaid-binding review periods. Wallet activation is immediate.
 uint64 constant MIN_BINDING_DELAY = 1 hours;
 uint64 constant MAX_BINDING_DELAY = 30 days;
 
@@ -25,20 +24,13 @@ enum Purpose {
 }
 
 /// @notice Version 5, immutable single-project, single-asset, single-purpose escrow for any standard ERC-20.
-/// @dev A binding needs the identity authority's transaction and the destination wallet's EIP-712 signature,
-/// so the authority alone cannot point funds at a wallet it does not hold; it cannot change amounts. The
-/// authority is read from the factory, which replaces it only through a public 7-day timelock. A new binding waits
-/// bindingDelay before it can pay, and an award waits bindingDelay after it is committed, so a stolen
-/// authority key cannot pay itself before the sponsor can react, even with a binding placed in advance.
-/// Only the latest binding pays: while a newer binding waits out its delay or after the owner cancels it,
-/// no payment goes to any earlier wallet, so a rotation away from a compromised wallet freezes payment
-/// instead of racing it. The owner can cancel the latest binding only inside those windows, never after it
-/// has paid, and at most MAX_CANCELS_BETWEEN_PAYMENTS times between two payments to the actor, so the owner
-/// can delay a payout by a bounded number of delays but never retract it. That cap does not apply while the
-/// factory has a pending authority rotation, which only the registrar can open: during the public notice of
-/// a stolen key the owner cancels every attacker binding, however many cancels it had spent before, and those
-/// cancels do not count. Fees accrue in the vault and are pulled separately, so a blocked fee recipient cannot
-/// stop payouts or refunds.
+/// @dev A binding needs the identity authority's transaction and the destination wallet's EIP-712 signature.
+/// The latest verified binding activates immediately; earlier versions never pay. An award still waits
+/// bindingDelay after commitment. The owner may cancel an unpaid binding during its review window or an
+/// award's commit window, subject to MAX_CANCELS_BETWEEN_PAYMENTS. Payment and cancellation may race:
+/// cancellation is effective only if mined first. It cannot guarantee recovery from a compromised
+/// identity authority that also controls the destination key. Factory authority rotation retains its
+/// public seven-day delay. Fees accrue separately, so a blocked fee recipient cannot stop payouts.
 /// Anyone may deposit; deposits join one free balance that only the owner commits or refunds to itself. An
 /// ordinary vault also accepts one monthly allocation per calendar month from anyone, when the owner has
 /// turned it on, the identity authority signed it, and its total is within the owner's monthly cap.
@@ -63,8 +55,7 @@ contract ProjectEscrow {
         bytes32 sourceDigest;
     }
 
-    /// @dev The latest authority binding for an actor. It is pending until activatesAt and is the only
-    /// binding that can pay.
+    /// @dev The latest authority binding for an actor. activatesAt records its immediate activation.
     struct Binding {
         address destination;
         uint64 version;
@@ -73,10 +64,8 @@ contract ProjectEscrow {
         bool cancelled;
     }
 
-    /// @notice Cancels the owner may make for an actor between two payments to that actor. Each cancel can
-    /// only delay the actor by one more bindingDelay, so this bounds the owner's delay power. The cap is
-    /// waived, and the count untouched, while the factory has a pending authority rotation, so an earlier
-    /// cancel never shortens the cover the owner can give during a key compromise.
+    /// @notice Maximum unpaid-binding cancellations between payments. A pending factory authority
+    /// rotation waives this cap but does not prevent an eligible payment from executing first.
     uint8 public constant MAX_CANCELS_BETWEEN_PAYMENTS = 3;
 
     bytes32 private constant DOMAIN_TYPEHASH =
@@ -452,18 +441,13 @@ contract ProjectEscrow {
             revert InvalidWalletSignature();
         }
         uint64 version = expectedVersion + 1;
-        uint64 activatesAt = uint64(block.timestamp) + bindingDelay;
+        uint64 activatesAt = uint64(block.timestamp);
         bindings[actorId] = Binding(destination, version, claimDigest, activatesAt, false);
         emit DestinationBound(actorId, destination, version, claimDigest, activatesAt);
     }
 
-    /// @notice The sponsor can stop the latest binding before it pays: while it waits out its own delay, or
-    /// while an award committed to the actor is still inside its commit delay. A binding that has paid
-    /// cannot be cancelled, and the owner can cancel at most MAX_CANCELS_BETWEEN_PAYMENTS times between two
-    /// payments to the actor, except while the factory has a pending authority rotation: then every cancel
-    /// is allowed and none is counted, because the registrar alone opens that window and the owner needs
-    /// an unbounded number of cancels to outlast a stolen key's notice period. Only a new authority binding
-    /// can follow a cancel; no payment goes out until it is ready.
+    /// @notice Cancel the latest unpaid binding during its binding or award review period. A payment
+    /// already mined cannot be cancelled. A new co-signed version is required after cancellation.
     function cancelBinding(uint64 actorId, uint64 expectedVersion) external onlyOwner {
         Binding storage binding = bindings[actorId];
         if (
@@ -471,9 +455,9 @@ contract ProjectEscrow {
                 || binding.version == paidVersion[actorId]
         ) revert InvalidBinding();
         uint64 committedAt = lastCommittedAt[actorId];
-        bool pending = block.timestamp < binding.activatesAt;
+        bool walletReviewWindow = block.timestamp < uint256(binding.activatesAt) + bindingDelay;
         bool commitWindow = committedAt != 0 && block.timestamp < committedAt + bindingDelay;
-        if (!pending && !commitWindow) revert InvalidBinding();
+        if (!walletReviewWindow && !commitWindow) revert InvalidBinding();
         if (factory.pendingIdentityAuthority() == address(0)) {
             if (cancelCount[actorId] >= MAX_CANCELS_BETWEEN_PAYMENTS) revert CancelLimit();
             cancelCount[actorId] += 1;
@@ -482,8 +466,7 @@ contract ProjectEscrow {
         emit BindingCancelled(actorId, expectedVersion);
     }
 
-    /// @notice The binding a payment to this actor would use now: the latest binding once its delay has
-    /// passed and it is not cancelled. Version 0 means no binding can pay; an earlier binding never pays.
+    /// @notice The binding a payment to this actor would use now: the latest verified, uncancelled binding. Version 0 means no binding can pay; an earlier binding never pays.
     function payableBinding(uint64 actorId) public view returns (address destination, uint64 version) {
         Binding storage binding = bindings[actorId];
         if (binding.version != 0 && !binding.cancelled && block.timestamp >= binding.activatesAt) {
@@ -492,8 +475,7 @@ contract ProjectEscrow {
         return (address(0), 0);
     }
 
-    /// @notice Pays an award to its actor's payable binding once both the binding delay and the award's
-    /// commit delay have passed. Anyone can call it, because the destination is fixed by the contract.
+    /// @notice Pays an award to its actor's current binding once the award's commit delay has passed. Anyone can call it, because the destination is fixed by the contract.
     function pay(bytes32 id, uint64 expectedBindingVersion) external nonReentrant {
         Award storage award = awards[id];
         if (award.actorId == 0 || award.paid) revert InvalidInput();

@@ -524,7 +524,7 @@ export function createEvmAttester(env: ExecutorEnvironment): PaymentExecutor {
       const current = await binding(deployment, input.githubUserId);
       if (current.version !== "0")
         await authorizeWalletRotation(env, input, current.claimDigest);
-      else await holdSuccessorClaim(env, input);
+      else await requireWalletAuthorization(env, input);
       // The destination wallet's own EIP-712 signature over this exact binding,
       // collected by the account API. The attester submits it unchanged and
       // cannot bind without it.
@@ -660,56 +660,35 @@ export async function lookupAttempt(
   return { transactionId: attempt.transactionId };
 }
 
-const ROTATION_HOLD_MS = 24 * 60 * 60 * 1000;
-function assertRotationHoldElapsed(createdAt: string, authorizedAt: string) {
-  const activatedAt = Math.max(Date.parse(createdAt), Date.parse(authorizedAt));
-  if (
-    !Number.isFinite(activatedAt) ||
-    Date.now() < activatedAt + ROTATION_HOLD_MS
-  )
-    throw new Error(
-      "Wallet rotation held for 24 hours after registration and authorization",
-    );
-}
-
-/** A successor wallet waits out the rotation hold even where no binding exists yet. */
-export async function holdSuccessorClaim(
+/** Verify wallet authorization before its first on-chain binding. */
+export async function requireWalletAuthorization(
   env: { PAYMENTS_DB: D1Database },
   input: Input,
 ): Promise<void> {
   const claim = await env.PAYMENTS_DB.prepare(
-    "SELECT w.supersedes_claim_id supersedes,w.created_at createdAt,a.authorized_at authorizedAt FROM wallet_claims w JOIN payment_wallet_authorizations a ON a.claim_id=w.id AND a.github_user_id=w.github_user_id WHERE w.id=? AND w.github_user_id=?",
+    "SELECT w.id FROM wallet_claims w JOIN payment_wallet_authorizations a ON a.claim_id=w.id AND a.github_user_id=w.github_user_id WHERE w.id=? AND w.github_user_id=?",
   )
     .bind(input.claimId, input.githubUserId)
-    .first<{
-      supersedes: string | null;
-      createdAt: string;
-      authorizedAt: string;
-    }>();
+    .first();
   if (!claim) throw new Error("Wallet authorization missing");
-  if (claim.supersedes !== null)
-    assertRotationHoldElapsed(claim.createdAt, claim.authorizedAt);
 }
 
-/** Delayed user-authorized successor activation; never an administrator override. */
+/** Immediate user-authorized successor activation after prior attempts are reconciled. */
 export async function authorizeWalletRotation(
   env: { PAYMENTS_DB: D1Database },
   input: Input,
   oldClaimDigest: string,
 ): Promise<void> {
   const current = await env.PAYMENTS_DB.prepare(
-    "SELECT w.chain,w.created_at createdAt,a.authorized_at authorizedAt FROM wallet_claims w JOIN payment_wallet_authorizations a ON a.claim_id=w.id AND a.github_user_id=w.github_user_id WHERE w.id=? AND w.github_user_id=?",
+    "SELECT w.chain FROM wallet_claims w JOIN payment_wallet_authorizations a ON a.claim_id=w.id AND a.github_user_id=w.github_user_id WHERE w.id=? AND w.github_user_id=?",
   )
     .bind(input.claimId, input.githubUserId)
     .first<{
       chain: EscrowChain;
-      createdAt: string;
-      authorizedAt: string;
     }>();
   if (!current || !isEscrowChain(current.chain))
     throw new Error("Wallet rotation authorization missing");
   await authorizeRegistry(env, input, current.chain);
-  assertRotationHoldElapsed(current.createdAt, current.authorizedAt);
   const lineage =
     "WITH RECURSIVE lineage(id,supersedes_claim_id,record_sha256,depth) AS (SELECT id,supersedes_claim_id,record_sha256,0 FROM wallet_claims WHERE id=? AND github_user_id=? AND chain=? UNION ALL SELECT w.id,w.supersedes_claim_id,w.record_sha256,l.depth+1 FROM wallet_claims w JOIN lineage l ON l.supersedes_claim_id=w.id WHERE w.github_user_id=? AND w.chain=? AND l.depth<100) ";
   const args = [

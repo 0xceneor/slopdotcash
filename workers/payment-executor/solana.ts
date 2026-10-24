@@ -38,8 +38,8 @@ import { payoutFee } from "../../src/lib/payments/contracts";
 import {
   authorizeRegistry,
   authorizeWalletRotation,
-  holdSuccessorClaim,
   type JournalStore,
+  requireWalletAuthorization,
 } from "./core";
 import { mainnetExecutionEnabled } from "./mainnet-execution.mjs";
 
@@ -491,7 +491,7 @@ export function createSolanaAttester(env: SolanaExecutorEnvironment): {
           input,
           hex(ctx.binding.slice(8, 40)),
         );
-      if (!ctx.binding) await holdSuccessorClaim(env, input);
+      if (!ctx.binding) await requireWalletAuthorization(env, input);
       const version = ctx.binding ? solanaUint(ctx.binding, 144) : 0n;
       // Submission expiry only; the binding itself has no expiry (see contracts/solana/README.md).
       const expiresAt = BigInt(Math.floor(Date.now() / 1000) + 3600);
@@ -555,11 +555,6 @@ export function createSolanaExecutor(
       const version = solanaUint(ctx.binding, 144);
       const delay = int64(ctx.project, 249);
       const now = await confirmedChainTime(ctx.config);
-      const activatesAt = int64(ctx.binding, 152) + delay;
-      if (now < activatesAt)
-        throw new Error(
-          `Destination binding activates at ${new Date(Number(activatesAt) * 1000).toISOString()}; retry after activation`,
-        );
       const payableAt = int64(ctx.obligation, 137) + delay;
       if (now < payableAt)
         throw new Error(

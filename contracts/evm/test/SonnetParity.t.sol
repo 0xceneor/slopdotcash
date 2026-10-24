@@ -236,14 +236,11 @@ contract SonnetParity {
         _bind(7, dest1, 0, bytes32(uint256(1)));
         vm.warp(block.timestamp + D + 1); // v1 payable
         e.pay(id1, 1);
-        // authority rotates to a new destination; neither the pending v2 nor v1 pays
+        // authority rotates to a new destination; v1 can no longer pay
         _bind(7, dest2, 1, bytes32(uint256(2)));
         vm.expectRevert();
-        e.pay(id2, 2);
-        vm.expectRevert();
         e.pay(id2, 1);
-        // v2 pays after its delay
-        vm.warp(block.timestamp + D);
+        // v2 pays immediately; v1 never pays again
         e.pay(id2, 2);
         // a cancelled v3 does not reopen v2
         _bind(7, dest1, 2, bytes32(uint256(3)));

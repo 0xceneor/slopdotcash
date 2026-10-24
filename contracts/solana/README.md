@@ -44,38 +44,25 @@ do not include the authority, so bindings survive an authority rotation.
 Permissionless payment callers select neither amount nor recipient; the binding
 and expected version select the recipient. The backend must verify GitHub login
 and the contributor's current registered claim before the identity signer
-co-signs. A compromised identity key cannot redirect unpaid awards on its own;
-with a colluding wallet it can propose a new destination, which the delay and
-veto below exist to catch. The authority must be disclosed, protected and
-reviewed separately from relayers.
+co-signs. A verified binding activates immediately. `bound_at` records its chain time;
+no wallet waiting period follows. The identity authority must be protected
+and remain separate from relayers.
 
-Two delays protect awards, both of length `binding_delay` (set once at
-`initialize`, between one hour and 30 days). Each binding records `bound_at`,
-and `pay` rejects the latest binding until `bound_at + binding_delay`. Each
-award records `committed_at`, and `pay` rejects the award until
-`committed_at + binding_delay`, so a binding placed before the actor had any
-award still gives the owner a full delay from the moment money is attached to
-it. The owner's exact power is `veto_binding(actor_id, version)` on the latest
-binding: allowed while that binding waits out its own delay, or while an unpaid
-award to the actor (passed as the optional `obligation` account) is inside its
-commit delay, and never on a binding that has paid. A veto creates a permanent
-`veto` PDA for that project, actor and version, and `pay` in that project never
-uses a vetoed version. Only a new co-signed binding (the next version, with a
-new delay) can follow. Between two payments to an actor, the owner can veto at
-most three times (`veto_count` on the binding, reset by each payment); the next
-binding cannot be vetoed and pays after its delay. An owner can therefore delay
-a contributor's payout by a bounded number of delays, but never take an approved
-award back or redirect it.
+An award still waits `binding_delay` from its commitment. This parameter also
+retains the owner's review period for vetoing an unpaid binding; it no longer
+delays wallet activation. The owner may veto the latest unpaid binding during
+that period or an unpaid award's commitment period (passed as `obligation`).
+A veto creates a permanent PDA for the exact project, actor, and version.
+Only a new co-signed version can replace it. The three-veto cap between
+payments remains, except during a confirmed authority rotation.
 
-Only the latest binding (`destination`, `version`, `bound_at`, `claim_digest`)
-can pay. `pay` requires its delay to have passed in this project and requires
-the empty `veto` address for that version. `paid_version` records the version
-the last payment in this project used, so that binding cannot be vetoed. While
-a rotation waits out its delay, or after the owner vetoes it, no payment goes
-to any earlier wallet: a contributor who rotates away from a lost or compromised
-wallet freezes payment to it at once. This is the stale-binding rule in
-`docs/base-solana-payout-plan.md`: a finalized change invalidates payment to
-the earlier destination. `pay` requires the destination to be the
+Only the latest unvetoed version pays. An immediate successor invalidates
+payment to the previous wallet. A paid version cannot be vetoed. Payment and
+veto can race: a veto protects an eligible award only if it executes first.
+A compromised authority with a colluding destination wallet can redirect an
+eligible payment; there is no guaranteed reaction period after binding.
+
+`pay` requires the destination to be the
 paying wallet's associated token account, and `bind_wallet` rejects a zero
 claim digest, a destination equal to the identity authority, the project or the
 vault PDA, and a submission past its `expires_at`; a PDA cannot co-sign in any
@@ -148,30 +135,14 @@ executes after the delay. Existing bindings keep paying throughout.
 Contributors whose bindings were pending or missing co-sign their next binding
 with the new authority.
 
-Identity key compromised: the owner proposes the replacement at once; the
-exposure window is the rotation delay. During it the attacker can submit only
-bindings that a wallet co-signs, each activating after `binding_delay`. The
-owner watches `WalletBound` and vetoes any binding it did not expect with
-`veto_binding`, which costs the contributor a delay and nothing else. The fee
-recipient confirms the proposal at once: while a confirmed proposal is
-pending, `MAX_VETOES_BETWEEN_PAYMENTS` does not apply and vetoes are not
-counted, so the owner's cover does not depend on how many vetoes it had spent
-on that actor before the compromise. Until the confirmation lands the cap
-still applies, so the fee recipient must confirm within one binding delay of
-the proposal (48 hours in production) for an actor whose vetoes are already
-spent. The owner vetoes late in each binding's delay; each veto forces the
-attacker to bind again with a fresh delay, so the attacker's last binding,
-made before execution, activates at least `binding_delay` after it was made,
-and the new authority co-signs the contributor's binding as the next version
-at execution, before that binding activates. The old key cannot bind after
-execution, and only the latest binding pays. Rotation never vetoes or
-re-points a binding by itself, so review every binding made during the
-window. The end-to-end test "veto cap is waived during a confirmed authority
-rotation and resumes after it" in `integration/escrow.e2e.mjs` runs this
-sequence starting with one earlier veto on the actor. The registry still
-requires the rotation delay to be shorter than four binding delays, so that
-with no earlier veto the capped vetoes alone outlast the notice even before
-the confirmation lands.
+Identity key compromised: the owner proposes a replacement immediately and
+the fee recipient confirms it. Execute after the existing rotation period.
+The owner may veto unexpected unpaid bindings within their review windows,
+but the veto must execute before payment. The confirmed proposal waives the
+veto count; it neither pauses payments nor disables the current key early.
+After execution the old key cannot bind. The new authority and contributor
+can replace the latest binding. Review bindings made during the incident;
+rotation cannot reverse payments or replace bindings by itself.
 
 Owner key lost: awards, withdrawals and rotation proposals for that project
 stop (other parties can still deposit, but nobody can commit or withdraw the
@@ -286,7 +257,7 @@ against the on-chain counters.
 These use real token accounts, transactions, finalized receipts and balance
 checks. They cover the canonical lifecycle, delayed wallet registration, wallet
 rotation that freezes payment to the earlier wallet, project-scoped bindings,
-binding delay and owner veto with its cap, reserve protection, split withdrawals,
+immediate binding and owner veto with its cap, reserve protection, split withdrawals,
 frozen destination rollback, duplicate payment and forged award rejection, wrong
 destination, unauthorized binding, a third-party payment mixed with unrelated
 token transfers, and a foreign project that mentions this project's account.
@@ -294,7 +265,7 @@ Fixture keys and tokens have no mainnet value. CI runs these end-to-end
 workflows; a successful build alone is not payment evidence.
 `cargo check --locked` verifies the host program build but does not prove SBF or
 validator execution. Use Anchor 0.32.1 and the platform tools pinned in the scripts.
-The end-to-end suite waits the binding delay out in seconds, so `test-e2e.sh`
+The end-to-end suite waits the award commitment delay out in seconds, so `test-e2e.sh`
 builds with the `short-delay-for-tests` Cargo feature, which lowers the on-chain
 delay floor from one hour to one second. `deploy-testnet.sh` never sets it;
 a reviewed deployment digest must come from a build without it. Before that,
@@ -387,10 +358,10 @@ binding: a signed-in contributor calls `POST /wallets/solana-bind/prepare` with
 the award ID to receive the half-signed transaction for their current claim
 and payout attempt, signs it in the wallet, and returns it with
 `POST /wallets/solana-bind/complete`. The identity role stores the claim digest
-in the wallet binding. The executor compares both delays with the time of the
+in the wallet binding. The executor compares the award commitment delay with the time of the
 latest confirmed block, not the host clock, so a fast host clock cannot submit
 a payment the program must reject. A
-successor needs the shared 24-hour signed-lineage policy and reconciliation of
+successor needs signed lineage authorization and reconciliation of
 older attempts. The program itself never authorizes GitHub sessions.
 
 The durable journal stores signed transaction bytes before sending them. Repeated

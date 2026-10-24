@@ -166,7 +166,7 @@ contract FableEscrowTest is FableBase {
         new EscrowFactory(REGISTRAR, FEE, AUTHORITY, type(uint64).max - uint64(block.timestamp));
         bind(1, CONTRIBUTOR, 0);
         (,,, uint64 activatesAt, bool cancelled) = vault.bindings(1);
-        require(activatesAt == uint64(block.timestamp) + DELAY && !cancelled, "pending, not cancelled");
+        require(activatesAt == uint64(block.timestamp) && !cancelled, "active, not cancelled");
         vm.prank(OWNER);
         vault.cancelBinding(1, 1);
         (,,, uint64 later, bool cancelledAfter) = vault.bindings(1);
@@ -202,13 +202,12 @@ contract FableEscrowTest is FableBase {
         bytes32 id = commit(keccak256("src-s1"), 3, 100e6);
         bind(3, CONTRIBUTOR, 0);
         (,,, uint64 activatesAt,) = vault.bindings(3);
-        // One second before activation: pay fails (the award's commit delay ends at the same instant
-        // as the binding delay), cancel allowed.
-        vm.warp(activatesAt - 1);
+        // One second before the award commitment period ends: pay fails, cancel remains allowed.
+        vm.warp(activatesAt + DELAY - 1);
         vm.expectRevert(ProjectEscrow.AwardPending.selector);
         vault.pay(id, 1);
-        // At activation: cancel fails, pay succeeds. No instant allows both.
-        vm.warp(activatesAt);
+        // At the shared review boundary: cancel fails, pay succeeds.
+        vm.warp(activatesAt + DELAY);
         vm.prank(OWNER);
         vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
         vault.cancelBinding(3, 1);
@@ -230,11 +229,9 @@ contract FableEscrowTest is FableBase {
         bytes32 id = commit(keccak256("src-s2"), 5, 100e6);
         bind(5, CONTRIBUTOR, 0);
         vm.warp(block.timestamp + DELAY);
-        bind(5, ATTACKER, 1); // rotation by authority, pending again; v1 never paid, so it is replaced
+        bind(5, ATTACKER, 1); // rotation by authority, immediately active; v1 never paid, so it is replaced
         vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
         vault.pay(id, 1);
-        vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
-        vault.pay(id, 2);
         vm.prank(OWNER);
         vault.cancelBinding(5, 2);
         vm.warp(block.timestamp + DELAY);

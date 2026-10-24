@@ -70,9 +70,8 @@ the same verification.
 The ledger records `paid` only when the payout destination is one of the
 contributor's authorized wallets. Any other destination means the identity
 authority was misused, so indexing fails closed for investigation. Executors
-never sign a payment for a pending, cancelled, or vetoed binding. A successor
-wallet waits 24 hours even where the escrow has no earlier binding for that
-contributor. A Base bind transaction can be retired only after its revert is finalized
+never sign a payment for a pending, cancelled, or vetoed binding. A verified successor wallet activates immediately once earlier payment attempts
+are reconciled. A Base bind transaction can be retired only after its revert is finalized
 and its receipt matches the canonical block. The journal keeps that proof
 before a fresh bind can replace it. Pending and ambiguous results remain held.
 
@@ -140,8 +139,7 @@ status API even after a wallet change. Missing receipts remain uncertain. Only
 proved finalized reverts permit a fresh payment attempt; the failure evidence is
 retained. Successful transactions become paid only through the finalized event
 scanner. Destination changes cannot start a competing transfer while an earlier
-attempt is uncertain; successor binding rotation waits 24 hours after the later claim/consent time
-and requires a proved ancestor claim with no unresolved old-wallet attempts.
+attempt is uncertain; successor binding rotation requires a proved ancestor claim with no unresolved old-wallet attempts.
 
 `GET /api/v1/payments/projects/<id>/totals` publishes net contributor payments,
 payout fees, and unpaid award reserves from verified events, one `assets` row

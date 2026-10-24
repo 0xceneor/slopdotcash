@@ -3,9 +3,8 @@ pragma solidity 0.8.30;
 
 import "./OpusBase.sol";
 
-/// Binding lifecycle after the 12 October 2026 review (M-1, M-2, L-1, L-5): the delay is anchored to the
-/// award's commit as well as the bind, only the latest ready binding pays, the owner's cancel is capped
-/// between payments, the delay is bounded, and cancel is an explicit one-shot flag.
+/// Immediate verified wallet activation preserves award review, latest-version payment, bounded
+/// owner cancellation, and permanent reservations.
 contract BindingLifecycleTest is OpusBase {
     uint64 constant ALICE = 4242;
 
@@ -80,41 +79,30 @@ contract BindingLifecycleTest is OpusBase {
         check(usdc.balanceOf(ALICE_WALLET) == 196e6, "both paid to the paid binding");
     }
 
-    /// Rotation: while a newer binding waits out its delay, no caller can pay the previous wallet. The
-    /// destination moves only once the new binding is ready.
-    function test_rotationFreezesPaymentToPreviousWallet() public {
+    /// A verified successor immediately receives eligible awards. Stale versions never pay.
+    function test_rotationImmediatelyPaysOnlyTheNewWallet() public {
         bytes32 first = commit(keccak256("first"), ALICE, 100e6);
         bytes32 second = commit(keccak256("second"), ALICE, 100e6);
         uint64 v1 = bindAs(ALICE, ALICE_WALLET);
         vm.warp(block.timestamp + DELAY);
         payAs(first, v1);
-        check(escrow.paidVersion(ALICE) == v1, "first payment recorded v1");
         address newWallet = vm.addr(OpusWallets.NEW_WALLET_KEY);
         uint64 v2 = bindAs(ALICE, newWallet);
-        (address payable_, uint64 payableVersion) = escrow.payableBinding(ALICE);
-        check(payable_ == address(0) && payableVersion == 0, "nothing payable while v2 pending");
-        vm.prank(RELAYER);
-        vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
-        escrow.pay(second, v1);
-        vm.prank(ATTACKER);
-        vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
-        escrow.pay(second, v1);
-        vm.prank(RELAYER);
-        vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
-        escrow.pay(second, v2);
-        vm.warp(block.timestamp + DELAY);
-        (payable_, payableVersion) = escrow.payableBinding(ALICE);
-        check(payable_ == newWallet && payableVersion == v2, "v2 payable after its delay");
+        (address destination, uint64 version) = escrow.payableBinding(ALICE);
+        check(destination == newWallet && version == v2, "successor immediately payable");
         vm.prank(RELAYER);
         vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
         escrow.pay(second, v1);
         payAs(second, v2);
         check(usdc.balanceOf(ALICE_WALLET) == 98e6 && usdc.balanceOf(newWallet) == 98e6, "second award followed v2");
         check(escrow.paidVersion(ALICE) == v2, "v2 is now the paid version");
+        vm.prank(OWNER);
+        vm.expectRevert(ProjectEscrow.InvalidBinding.selector);
+        escrow.cancelBinding(ALICE, v2);
     }
 
     /// Rotation: an owner cancel of the newer binding does not reopen payment to the previous wallet. Only
-    /// a fresh authority binding, after its own delay, can pay.
+    /// a fresh authority binding can pay.
     function test_cancelledRotationDoesNotPayPreviousWallet() public {
         bytes32 first = commit(keccak256("first"), ALICE, 100e6);
         bytes32 second = commit(keccak256("second"), ALICE, 100e6);
@@ -138,7 +126,7 @@ contract BindingLifecycleTest is OpusBase {
     }
 
     /// Cap after a payment: the owner can again cancel at most MAX_CANCELS_BETWEEN_PAYMENTS rotations, so
-    /// a paid actor's next award is also delayed by a bounded number of delays.
+    /// the owner cannot cancel an unbounded sequence of new bindings.
     function test_cancelCapAppliesBetweenPayments() public {
         bytes32 first = commit(keccak256("first"), ALICE, 100e6);
         bytes32 second = commit(keccak256("second"), ALICE, 100e6);

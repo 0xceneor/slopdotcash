@@ -443,14 +443,9 @@ pub mod slop_escrow {
         });
         Ok(())
     }
-    // The owner stops the latest binding for this project before it pays: while it waits
-    // out its own delay, or while an unpaid award to the actor (passed as `obligation`) is
-    // still inside its commit delay. A binding that has paid cannot be vetoed, and the
-    // owner can veto at most MAX_VETOES_BETWEEN_PAYMENTS times between two payments to the
-    // actor, except while a pending authority rotation has the fee recipient's confirmation:
-    // then every veto is allowed and none is counted, because the owner cannot open that
-    // window alone and needs an unbounded number of vetoes to outlast a stolen key's notice
-    // period. A new authority binding (next version) is required afterwards.
+    // The owner may veto the latest unpaid binding during its review period or the named award's
+    // commit period. Payment is immediately eligible after a verified bind if the award has matured:
+    // a veto must execute before payment. The cap is waived during a confirmed authority rotation.
     pub fn veto_binding(ctx: Context<VetoBinding>, actor_id: u64, version: u64) -> Result<()> {
         let p = &ctx.accounts.project;
         let b = &ctx.accounts.binding;
@@ -465,7 +460,7 @@ pub mod slop_escrow {
             None => false,
         };
         require!(
-            now < activates_at(b, p)? || commit_window,
+            now < binding_review_ends_at(b, p)? || commit_window,
             EscrowError::BindingActive
         );
         let rotation_pending =
@@ -484,9 +479,7 @@ pub mod slop_escrow {
         });
         Ok(())
     }
-    // Pays an award once its commit delay has passed, only to this project's latest
-    // binding, once that binding's delay has passed and the owner has not vetoed it. While
-    // a newer binding waits or after its veto, no earlier binding pays.
+    // Pays a matured award to the latest verified, unvetoed binding without another wallet wait.
     pub fn pay(ctx: Context<Pay>, expected_version: u64) -> Result<()> {
         let p = &ctx.accounts.project;
         let a = &ctx.accounts.obligation;
@@ -498,7 +491,6 @@ pub mod slop_escrow {
             EscrowError::AwardPending
         );
         require!(b.version > 0, EscrowError::StaleBinding);
-        require!(now >= activates_at(b, p)?, EscrowError::BindingPending);
         // A veto address can only be created by veto_binding; an empty system account
         // proves the owner did not veto that binding version.
         require!(unvetoed(&ctx.accounts.veto), EscrowError::BindingVetoed);
@@ -796,7 +788,7 @@ fn valid_delay(binding_delay: i64) -> bool {
 fn valid_rotation_delay(rotation_delay: i64) -> bool {
     (MIN_BINDING_DELAY..=MAX_ROTATION_DELAY).contains(&rotation_delay)
 }
-fn activates_at(b: &WalletBinding, p: &Project) -> Result<i64> {
+fn binding_review_ends_at(b: &WalletBinding, p: &Project) -> Result<i64> {
     add_i64(b.bound_at, p.binding_delay)
 }
 fn add_i64(a: i64, b: i64) -> Result<i64> {

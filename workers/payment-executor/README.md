@@ -83,8 +83,8 @@ token accounts idempotently and pays through the version-bound escrow instructio
 payment paid; the independent scanner and verifier must prove finality first.
 On Base a missing finalized wallet binding requests the separate attester and
 remains retryable until binding finality; on Solana it waits for the
-contributor's co-signed binding. A successor wallet activates only after 24 hours have passed since both its
-registration and signed authorization. The previous on-chain claim must occur
+contributor's co-signed binding. A verified successor wallet activates immediately after registration, signed
+authorization, and reconciliation of earlier payment attempts. The previous on-chain claim must occur
 in the same actor/chain predecessor lineage, and all older-wallet payment
 attempts for unpaid awards must be reconciled. An award whose finalized payout
 is indexed is settled, even when an older attempt never recorded that

@@ -67,34 +67,25 @@ no reusable attestation blob. Each binding includes a reviewed wallet-claim
 digest, an expected predecessor version, and an expiry that bounds submission
 of both signatures. Once accepted, the binding persists. The authority must
 independently verify GitHub login and the current registered claim before
-submission. A compromised authority cannot redirect unpaid funds on its own;
-with a colluding wallet it can propose a new destination, which the delays
-below exist to catch. It cannot change awards or withdraw funds. Two delays
-limit that risk, both of length
-`bindingDelay`. A new or rotated binding activates `bindingDelay` seconds after
-it is made. An award can be paid only `bindingDelay` seconds after it is
-committed (`committedAt`), so a binding placed before the actor had any award
-still gives the owner a full delay measured from the moment money is attached
-to it. The owner's exact power is `cancelBinding(actorId, version)` on the
-latest binding, allowed while that binding waits out its own delay or while an
-award to the actor is inside its commit delay, and never on a binding that has
-already paid. A cancelled binding never pays; only a new binding (the next
-version, with a new delay and a new wallet signature) can follow. Between two
-payments to an actor, the owner can cancel at most `MAX_CANCELS_BETWEEN_PAYMENTS`
-(3) times; the next binding cannot be cancelled and pays after its delay. A
-payment resets the count. The cap does not apply while the factory has a
-pending identity authority rotation (`pendingIdentityAuthority` set): then
-every cancel is allowed and none is counted, because only the registrar can
-open that public 7-day window and the owner needs an unbounded number of
-cancels to outlast a stolen key's notice period. Once the rotation executes or
-the registrar withdraws it, the cap applies again with the count unchanged.
-The owner can therefore delay a
-contributor's payout by a bounded number of delays, but can never take an
-approved award back or redirect it. The constructor rejects a delay below one
-hour or above 30 days; production deployments use at least 48 hours
-(`MIN_PRODUCTION_BINDING_DELAY`), and the adapter checks the deployed
-`bindingDelay` against the reviewed manifest. Use separate test identities for
-the owner, attester, registrar, and gas sponsor.
+submission. A verified binding activates immediately. The `activatesAt` event field records
+that transaction's block time. Only the latest version may receive payment.
+An award still waits `bindingDelay` seconds from its commitment. This parameter
+also retains the owner's review period for cancelling an unpaid binding; it
+no longer delays wallet activation. The owner may cancel the latest unpaid
+binding during that review period or an award's commitment period. A cancelled
+version never pays; a new co-signed version is required.
+
+The cancellation cap remains three between payments, waived during a pending
+factory authority rotation. Cancellation must execute before payment. For an
+already eligible award, there is no guaranteed reaction period after a wallet
+change. Protect the identity authority and verify account and wallet proof
+before signing. A compromised authority with a colluding destination wallet
+can redirect an eligible payment. Authority rotation does not reverse payments.
+
+The constructor still bounds the award/review period to one hour through
+30 days. Production configuration retains its 48-hour minimum. The adapter
+checks this parameter against the reviewed manifest. Use separate identities
+for the owner, attester, registrar, and gas sponsor.
 
 ### Identity authority rotation
 
@@ -107,7 +98,7 @@ anyone can call `executeIdentityAuthorityRotation`, which emits
 `IdentityAuthorityRotated`; the current authority has no call that blocks or
 delays it. Until execution the current authority keeps binding; afterwards only
 the new one can. Bindings are stored per vault and actor and do not reference
-the authority, so every existing binding, pending or active, stays valid across
+the authority, so every existing binding, cancelled or active, stays valid across
 a rotation, and `pay` never reads the authority. The next authority must be
 nonzero and differ from the current authority and the registrar. Vaults are
 created only by the factory and read `factory.identityAuthority()`. The reviewed
@@ -136,31 +127,21 @@ and executes the rotation after 7 days. Existing bindings keep paying
 throughout. A contributor whose binding was pending or missing signs nothing
 new unless the wallet signature already collected has expired.
 
-Attester key compromised: the registrar proposes the replacement at once; the
-exposure window is 7 days. During it the attacker can submit only bindings
-that a wallet co-signs, each activating after `bindingDelay`. Every project
-owner watches `DestinationBound` and cancels any binding it did not expect
-with `cancelBinding`, which costs the contributor a delay and nothing else.
-While the proposal is pending, `MAX_CANCELS_BETWEEN_PAYMENTS` does not apply
-and cancels are not counted, so the owner's cover does not depend on how many
-cancels it had spent on that actor before the compromise. The owner cancels
-late in each binding's delay; each cancel forces the attacker to bind again
-with a fresh delay, so the attacker's last binding, made before execution,
-activates at least `bindingDelay` after it was made, and the new authority
-binds the contributor's wallet as the next version at execution, before that
-binding activates. The old key cannot bind after execution, and only the
-latest binding pays. `test_H1_stolenAuthorityCannotTakeAnAward` and
-`test_H1_stolenAuthorityCannotTakeAnAwardAfterPriorCancel` in
-`test/BoundedAttester.t.sol` run this sequence, the second starting with one
-earlier cancel on the actor, and assert that the attacker receives nothing.
-Rotation never cancels or re-points a binding by itself, so review every
-binding made during the window.
+Attester key compromised: the registrar proposes a replacement immediately
+and executes it after the seven-day authority-rotation period. The owner may
+cancel unexpected unpaid bindings within their review windows. Such a cancel
+must execute before payment; it is not a guaranteed recovery mechanism.
+Pending rotation waives the cancellation count, but it does not pause payment
+or remove the current authority before execution. After execution, the old key
+cannot bind; the new authority and contributor can replace the latest binding.
+Review bindings made during the incident. Rotation neither reverses a payment
+nor replaces an existing binding by itself.
 
 Registrar key lost or compromised: there is no second rotation path; the
 registrar is the recovery authority, so choose it at factory deployment and
 record its custody in the deployment evidence. A compromised registrar can
 propose a rotation to a key it controls, but still needs a wallet co-signature
-per binding and still faces the delay and the owner cancel; the public 7-day
+per binding; the public 7-day
 proposal is the notice to deploy a new factory for new projects.
 
 Project owner key lost: deposits, awards and withdrawals from that vault stop;
@@ -224,7 +205,7 @@ The authority's role therefore grows from wallet binding to monthly
 attestation. It still cannot withdraw, redirect or pay funds, and it cannot
 commit more than one owner cap in each calendar month. A monthly award, like
 any award, pays only to a binding that the destination wallet signed, after the
-binding delay and the commit delay, and the owner can still cancel a binding in
+commit delay, and the owner can still cancel a binding in
 those windows. A stolen authority key can reserve at most one cap for each
 month until the registrar's rotation executes; the owner limits that exposure
 with the cap and the opt-out. `test/MonthlyCommitment.t.sol` tests the cap, one

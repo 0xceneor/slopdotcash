@@ -381,13 +381,8 @@ function validateEscrowPolicy(value, feeBasisPoints) {
       throw new TypeError(
         "Escrow binding delay is missing or below the production minimum",
       );
-    // The veto cap is waived while a confirmed rotation is pending (outside
-    // report, 20 October 2026), so the owner's cover during a key compromise
-    // no longer depends on vetoes already spent. This bound stays as defence in
-    // depth: with no earlier veto, three vetoes and the last binding's own delay
-    // still outlast the rotation notice before the fee recipient confirms, so
-    // the new authority replaces a stolen key's last binding before it can pay.
-    // Base fixes 7 days, under four 48-hour delays.
+    // Retain the reviewed deployment delay relationship. Wallet activation is immediate;
+    // this bound does not guarantee time to cancel an eligible payment.
     if (
       chainFamily(value.chain) === "solana" &&
       Number(deployment.rotationDelaySeconds) >=

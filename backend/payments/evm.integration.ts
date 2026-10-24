@@ -943,10 +943,10 @@ try {
     "Finalized revert permits one replacement bind",
   );
   await rpc("anvil_mine", ["0x40"]);
-  // A pending binding never reaches signing; it pays only after the delay.
+  // An award inside its commitment period never reaches payment signing.
   await assert.rejects(
     dispatchPayment(db, makeExecutor(), award, new Date()),
-    /activates at/,
+    /commit delay/,
   );
   await rpc("evm_increaseTime", [Number(delay)]);
   await rpc("anvil_mine", ["0x1"]);
@@ -1105,7 +1105,7 @@ try {
     { encoding: "utf8" },
   ).trim();
   assert.equal(refundBalance.split(" ")[0], "98000000");
-  // A later award follows an authenticated successor only after the 24-hour delay.
+  // A later award follows an authenticated successor only without a wallet waiting period.
   const rotationAward = evmAwardId(31337n, vault, `0x${"a".padStart(64, "0")}`);
   await send(asset, "mint(address,uint256)", [owner, "100000000"]);
   await send(asset, "approve(address,uint256)", [vault, "100000000"]);
@@ -1236,23 +1236,12 @@ try {
     ),
     { retired: false, transactionId: paidTx },
   );
+  // A fresh signed successor binds immediately, with no host-clock advance.
   await assert.rejects(
     dispatchPayment(db, makeExecutor(), rotationAward, new Date()),
-    /24 hours/,
+    /awaits finality/,
   );
-  const realNow = Date.now;
-  try {
-    Date.now = () => realNow() + 25 * 60 * 60 * 1000;
-    await assert.rejects(
-      dispatchPayment(db, makeExecutor(), rotationAward, new Date()),
-      /awaits finality/,
-    );
-  } finally {
-    Date.now = realNow;
-  }
   await rpc("anvil_mine", ["0x40"]);
-  await rpc("evm_increaseTime", [Number(delay)]);
-  await rpc("anvil_mine", ["0x1"]);
   await dispatchPayment(db, makeExecutor(), rotationAward, new Date());
   await rpc("anvil_mine", ["0x40"]);
   await scan();
@@ -1698,7 +1687,7 @@ try {
   await rpc("anvil_mine", ["0x40"], rcRpcUrl);
   await assert.rejects(
     dispatchPayment(db, rcExecutor(), rcAward, new Date()),
-    /activates at/,
+    /commit delay/,
   );
   await rpc("evm_increaseTime", [Number(delay)], rcRpcUrl);
   await rpc("anvil_mine", ["0x1"], rcRpcUrl);
@@ -1966,7 +1955,7 @@ try {
     await new Promise(() => {});
   }
   console.log(
-    "Local EVM workflow passed (Base on 31337, Robinhood Chain Testnet on 46630): escrow, signed consent, separate signed execution, durable ambiguous-send recovery, finalized binding retry, finalized scanner replay, safe unsigned retirement, delayed successor rotation, exact net balances; Robinhood Chain Testnet registry preflight (chain id, mainnet and wrong-RPC refusals, 2,000,000 gas ceiling), chain = robinhood ledger, separate wallet lineages, binding chain id and claim chain guards, cross-labelled record refusals, per-network balances, and a paid award.",
+    "Local EVM workflow passed (Base on 31337, Robinhood Chain Testnet on 46630): escrow, signed consent, separate signed execution, durable ambiguous-send recovery, finalized binding retry, finalized scanner replay, safe unsigned retirement, immediate successor rotation, exact net balances; Robinhood Chain Testnet registry preflight (chain id, mainnet and wrong-RPC refusals, 2,000,000 gas ceiling), chain = robinhood ledger, separate wallet lineages, binding chain id and claim chain guards, cross-labelled record refusals, per-network balances, and a paid award.",
   );
 } finally {
   sql.close();
