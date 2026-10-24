@@ -259,8 +259,9 @@ try {
   // recipient, accrue a real 2% withdrawal fee, and run the Worker.
   const [registrar, authority] = (await rpc("eth_accounts", [])) as string[];
   const vaultAbi = parseAbi([
-    "function create(bytes32,address,address,address) returns (address)",
-    "function vaults(bytes32,address) view returns (address)",
+    "function create(bytes32,address,uint8) returns (address)",
+    "function vaultKey(address,bytes32,address,uint8) pure returns (bytes32)",
+    "function vaults(bytes32) view returns (address)",
     "function approve(address,uint256) returns (bool)",
     "function deposit(uint128)",
     "function withdrawUnused(uint128)",
@@ -279,7 +280,7 @@ try {
   };
   const view = async (
     to: string,
-    functionName: "vaults" | "accruedFees",
+    functionName: "vaultKey" | "vaults" | "accruedFees",
     args: readonly unknown[] = [],
   ) =>
     decodeFunctionResult({
@@ -330,11 +331,17 @@ try {
     encodeFunctionData({
       abi: vaultAbi,
       functionName: "create",
-      args: [projectKey, AERO, registrar as Hex, registrar as Hex],
+      args: [projectKey, AERO, 1],
     }),
   );
+  const vaultKey = await view(factory, "vaultKey", [
+    registrar,
+    projectKey,
+    AERO,
+    1,
+  ]);
   const vault = (
-    (await view(factory, "vaults", [projectKey, AERO])) as unknown as string
+    (await view(factory, "vaults", [vaultKey])) as unknown as string
   ).toLowerCase();
   const gross = 250n * 10n ** 18n;
   await rpc("anvil_impersonateAccount", [HOLDER]);
