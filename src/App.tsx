@@ -3005,7 +3005,7 @@ function AppContent({ route }: { route: Route }) {
   } else if (route.kind === "funding-project") {
     const project = findProject(route.projectId ?? "");
     content = project ? (
-      <ProjectFundingPage project={project} />
+      <ProjectFundingPage key={project.id} project={project} />
     ) : (
       <NotFound title="Project not found" />
     );

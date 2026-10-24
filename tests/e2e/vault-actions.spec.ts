@@ -1358,6 +1358,20 @@ test("owner creates, registers and funds a vault through the real API", async ({
       path: info.outputPath("owner-vault-funded.png"),
       fullPage: true,
     });
+    // Follow the same client-side transition used by Link and browser history.
+    await page.evaluate((slug) => {
+      history.pushState({}, "", `/projects/${slug}/funding`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    }, template.slug);
+    await expect(page.getByRole("heading", { level: 1 })).toContainText(
+      template.name,
+    );
+    await expect(
+      page.getByRole("region", { name: /^Fund or withdraw/ }),
+    ).toContainText(deployment.vault);
+    await expect(
+      page.getByRole("region", { name: /^Fund or withdraw/ }),
+    ).not.toContainText(created.vault);
     await page.goto(`${origin}/projects/${project.slug}/manage`, {
       waitUntil: "networkidle",
     });
