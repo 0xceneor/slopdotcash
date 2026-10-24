@@ -13,7 +13,10 @@ import { sqliteD1 } from "../../tests/sqlite-d1";
 import { sha256Hex } from "../../workers/identity/crypto";
 import type { JournalStore } from "../../workers/payment-executor/core";
 import { signMonthlyAllocation } from "../../workers/payment-executor/monthly";
-import { runMonthlyCoordinator } from "../../workers/payments/index";
+import {
+  runMonthlyCommitments,
+  runMonthlyCoordinator,
+} from "../../workers/payments/index";
 import {
   CloudflareProjectPersistence,
   type ProjectD1Database,
@@ -1035,6 +1038,37 @@ test("monthly signing preserves its first intent through retry and refuses a cha
   expect(() =>
     sqlite.exec("DELETE FROM monthly_payment_authorizations"),
   ).toThrow("permanent");
+  let dispatches = 0;
+  const dispatcher = {
+    PAYMENTS_DB: db,
+    REGISTRY_DB: db,
+    PAYMENT_NETWORKS: '["base-sepolia"]',
+    PAYMENT_RPC_URLS: "{}",
+    MONTHLY_PAYMENT_SCHEDULE: JSON.stringify(schedule),
+    EVM_PAYMENT_EXECUTOR: {
+      fetch: async (request: Request) => {
+        expect(new URL(request.url).pathname).toBe("/v1/commit-monthly");
+        expect(await request.json()).toEqual(first);
+        dispatches++;
+        return Response.json({
+          transactionId: `0x${"ab".repeat(32)}`,
+          alreadyCommitted: false,
+        });
+      },
+    },
+  };
+  await runMonthlyCommitments(dispatcher, afterCutoff);
+  expect(dispatches).toBe(1);
+  await expect(
+    runMonthlyCommitments(
+      {
+        ...dispatcher,
+        EVM_PAYMENT_EXECUTOR: { fetch: async () => Response.json({}) },
+      },
+      afterCutoff,
+    ),
+  ).rejects.toThrow("Monthly commitment failures");
+  expect(count("payment_obligations")).toBe(0);
   // A saved intent survives an interrupted signer and cannot be replaced.
   const [key, value] = [...records.entries()][0] as [
     string,
