@@ -2,9 +2,17 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { privateKeyToAccount } from "viem/accounts";
 import type { D1TransactionalDatabase as D1Database } from "../../backend/d1";
 import type { PaymentExecutor } from "../../backend/payments/dispatch";
+import type { MonthlyAttestationRequest } from "../../backend/payments/monthly-attestation";
+import {
+  CloudflareProjectPersistence,
+  type ProjectD1Database,
+} from "../../backend/projects/cloudflare-persistence";
+import { publicRestrictionOf } from "../../backend/projects/enforcement";
 import { securityPaymentDatabase } from "../../backend/security/payment-database";
 import { solanaBase58 } from "../../contracts/solana/adapter";
 import { readBoundedJson } from "../../src/lib/browser-json";
+import { paymentDeploymentRecord } from "../../src/lib/escrow-policy.mjs";
+import { parseMonthlySchedule } from "../../src/lib/payments/monthly-allocation";
 import {
   createEvmAttester,
   createEvmExecutor,
@@ -14,6 +22,7 @@ import {
   retireUnsignedAttempt,
   type Signer,
 } from "./core";
+import { signMonthlyAllocation } from "./monthly";
 import {
   SIGNER_STACKS,
   signerStack,
@@ -38,6 +47,8 @@ interface Namespace {
 interface Environment {
   PAYMENT_SCOPE?: "security-bounty";
   PAYMENTS_DB: D1Database;
+  REGISTRY_DB?: ProjectD1Database;
+  MONTHLY_PAYMENT_SCHEDULE?: string;
   PAYMENT_DEPLOYMENTS: string;
   PAYMENT_RPC_URLS: string;
   SIGNER_ROLE: "attester" | "relayer";
@@ -73,6 +84,7 @@ export class PaymentSignerJournal {
       request.method !== "POST" ||
       ![
         "/v1/pay",
+        "/v1/monthly-authorization",
         "/v1/complete-bind",
         "/v1/attempt-status",
         "/v1/cancel-unsubmitted",
@@ -80,6 +92,109 @@ export class PaymentSignerJournal {
     )
       return new Response("Not found", { status: 404 });
     try {
+      if (pathname === "/v1/monthly-authorization") {
+        if (
+          this.env.SIGNER_ROLE !== "attester" ||
+          this.env.PAYMENT_SCOPE === "security-bounty" ||
+          !this.env.REGISTRY_DB
+        )
+          return new Response("Not found", { status: 404 });
+        const input = (await readBoundedJson(
+          request,
+          4096,
+          "monthly authorization",
+        )) as MonthlyAttestationRequest;
+        const stack = signerStack(this.env.SIGNER_STACK);
+        if (
+          !input ||
+          typeof input.projectId !== "string" ||
+          typeof input.period !== "string" ||
+          typeof input.network !== "string" ||
+          typeof input.snapshotSha256 !== "string" ||
+          !stackServesNetwork(stack, input.network)
+        )
+          throw new Error("Invalid monthly authorization request");
+        const schedule = parseMonthlySchedule(
+          this.env.MONTHLY_PAYMENT_SCHEDULE,
+        );
+        if (!schedule) throw new Error("Monthly schedule required");
+        const registry = new CloudflareProjectPersistence(this.env.REGISTRY_DB);
+        const pinned = JSON.parse(this.env.PAYMENT_DEPLOYMENTS) as Record<
+          string,
+          unknown
+        >[];
+        const secrets = SIGNER_STACKS[stack];
+        const authorization = await signMonthlyAllocation(
+          {
+            db: database,
+            getProject: (id) => registry.getProject(id),
+            restricted: async (project) =>
+              publicRestrictionOf(project, await registry.listEnforcements())
+                .state !== "clear",
+            networks: pinned.map((d) => String(d.network)),
+            schedule,
+            now: () => new Date(),
+            journal: this.state.storage,
+            verifyDeployment: async (plan) => {
+              if (plan.family !== this.env.CHAIN_FAMILY)
+                throw new Error("Wrong chain family");
+              const expected = paymentDeploymentRecord(
+                input.projectId,
+                plan.deployment,
+              );
+              const matches = pinned.filter(
+                (d) =>
+                  d.projectId === input.projectId &&
+                  d.network === input.network &&
+                  d.vault === plan.deployment.vault,
+              );
+              if (
+                matches.length !== 1 ||
+                Object.entries(expected).some(
+                  ([key, value]) =>
+                    JSON.stringify(matches[0][key]) !== JSON.stringify(value),
+                )
+              )
+                throw new Error(
+                  "Monthly deployment differs from pinned configuration",
+                );
+              const target = {
+                network: input.network,
+                vault: plan.deployment.vault,
+              };
+              if (plan.family === "evm")
+                await preflightEvmDeployment(this.env, target);
+              else await preflightSolanaDeployment(this.env, target);
+            },
+            sign: async (plan) => {
+              if (plan.family === "evm") {
+                const key = this.env[secrets.evmSecret];
+                if (!key) throw new Error("Signer unavailable");
+                return (
+                  await privateKeyToAccount(key).sign({
+                    hash: `0x${plan.messageHex}`,
+                  })
+                ).slice(2);
+              }
+              const encoded = this.env[secrets.solanaSecret];
+              if (!encoded || !/^[a-f0-9]{64}$/.test(encoded))
+                throw new Error("Signer unavailable");
+              const seed = Uint8Array.from(encoded.match(/../g) ?? [], (b) =>
+                Number.parseInt(b, 16),
+              );
+              const message = Uint8Array.from(
+                plan.messageHex.match(/../g) ?? [],
+                (b) => Number.parseInt(b, 16),
+              );
+              return Array.from(ed25519.sign(message, seed), (b) =>
+                b.toString(16).padStart(2, "0"),
+              ).join("");
+            },
+          },
+          input,
+        );
+        return Response.json(authorization);
+      }
       const input = (await readBoundedJson(
         request,
         4096,

@@ -810,7 +810,6 @@ describe("monthly attestation input", () => {
       {
         db,
         ...projects(),
-        recipientsRestricted: async () => options.blocked ?? false,
         networks: ["base-sepolia"],
         schedule,
         now: options.now ?? afterCutoff,
@@ -859,7 +858,6 @@ describe("monthly attestation input", () => {
   test("rechecks restrictions and the owner's opt-out after the month was frozen", async () => {
     vault("1000");
     await coordinate(afterCutoff);
-    await rejects(prepare({ blocked: true }), "recipient_restricted");
     restricted = true;
     await rejects(prepare(), "project_restricted");
     restricted = false;
@@ -870,6 +868,26 @@ describe("monthly attestation input", () => {
       .run(project.id, OWNER, afterCutoff.toISOString());
     await rejects(prepare(), "automatic_off");
     expect(count("monthly_payment_obligations")).toBe(2);
+  });
+  test("omits funding-time exclusions while preserving awards funded before a later ban", async () => {
+    seedParticipationBan(
+      sqlite,
+      { githubId: B, githubLogin: "second" },
+      { githubId: "900000072", githubLogin: "moderator" },
+      beforeCutoff.toISOString(),
+    );
+    vault("1000");
+    await coordinate(afterCutoff);
+    const initial = await prepare();
+    expect(initial.entries.map((e) => e.githubUserId)).toEqual([A]);
+    expect(initial.totalGrossBase).toBe("600");
+    seedParticipationBan(
+      sqlite,
+      { githubId: A, githubLogin: "first" },
+      { githubId: "900000072", githubLogin: "moderator" },
+      afterCutoff.toISOString(),
+    );
+    expect(await prepare()).toEqual(initial);
   });
   test("rejects a forged frozen payload even when its metadata still names the real project", async () => {
     vault("1000");
@@ -916,7 +934,6 @@ test("monthly signing preserves its first intent through retry and refuses a cha
   const deps = {
     db,
     ...projects(),
-    recipientsRestricted: async () => false,
     networks: ["base-sepolia"],
     schedule,
     now: () => afterCutoff,
@@ -972,7 +989,6 @@ test("monthly signing never publishes when the signer fails or an opt-out arrive
   const deps = {
     db,
     ...projects(),
-    recipientsRestricted: async () => false,
     networks: ["base-sepolia"],
     schedule,
     now: () => afterCutoff,

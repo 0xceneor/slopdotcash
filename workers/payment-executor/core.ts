@@ -200,7 +200,7 @@ export async function authorizeRegistry(
 /** The one reviewed deployment for this network and vault; no RPC, no secrets. */
 function selectDeployment(
   env: Pick<ExecutorEnvironment, "PAYMENT_DEPLOYMENTS">,
-  input: DispatchPayment,
+  input: Pick<DispatchPayment, "network" | "vault">,
 ): Omit<Deployment, "rpcUrl"> {
   const configs = JSON.parse(env.PAYMENT_DEPLOYMENTS) as Omit<
     Deployment,
@@ -225,7 +225,7 @@ function selectReviewedEvmDeployment(
     ExecutorEnvironment,
     "PAYMENT_DEPLOYMENTS" | "ALLOW_LOCAL_TEST_CHAIN"
   >,
-  input: DispatchPayment,
+  input: Pick<DispatchPayment, "network" | "vault">,
 ): Omit<Deployment, "rpcUrl"> & { chain: EscrowChain } {
   const selected = selectDeployment(env, input);
   const policy = Object.hasOwn(ESCROW_NETWORKS, selected.network)
@@ -259,7 +259,7 @@ export async function preflightEvmDeployment(
     ExecutorEnvironment,
     "PAYMENT_DEPLOYMENTS" | "PAYMENT_RPC_URLS" | "ALLOW_LOCAL_TEST_CHAIN"
   >,
-  input: DispatchPayment,
+  input: Pick<DispatchPayment, "network" | "vault">,
 ): Promise<Deployment> {
   const selected = selectReviewedEvmDeployment(env, input);
   if (!/^[1-9][0-9]{0,9}$/.test(selected.gasCeiling ?? ""))

@@ -142,6 +142,7 @@ export function paymentStack({
   const configs = {};
   for (const role of roles) {
     const signer = role !== "dispatcher";
+    const monthlyAttester = role === "attester" && scope === "ordinary";
     configs[role] = {
       ...common,
       name: names[role],
@@ -154,8 +155,9 @@ export function paymentStack({
             : "../payments/index.ts",
       ),
       // Signers sign only for the deployments pinned here at review time. The
-      // dispatcher reads its vaults from the registry database (REGISTRY_DB).
-      ...(signer
+      // monthly attester also checks current registry policy before signing;
+      // the dispatcher discovers its vaults from that registry.
+      ...(signer && !monthlyAttester
         ? {}
         : {
             d1_databases: [
@@ -179,6 +181,9 @@ export function paymentStack({
             SIGNER_ROLE: role,
             SIGNER_STACK: stack,
             CHAIN_FAMILY: family,
+            ...(monthlyAttester && monthlySchedule !== undefined
+              ? { MONTHLY_PAYMENT_SCHEDULE: monthlySchedule }
+              : {}),
           }
         : {
             PAYMENT_NETWORKS: JSON.stringify([network]),

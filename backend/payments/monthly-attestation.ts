@@ -51,14 +51,13 @@ function reject(code: string, message: string): never {
 
 /** The caller must re-run this immediately before signing and publishing.
  * The chain still enforces its live cap, opt-out, authority and monthly window.
- * Recipient restrictions are mandatory, including current account enforcement.
+ * The recorded funding-time decisions preserve already-funded awards.
  */
 export async function prepareMonthlyAttestation(
   deps: {
     db: D1TransactionalDatabase;
     getProject(id: string): Promise<ProjectRecord | null>;
     restricted(project: ProjectRecord): Promise<boolean>;
-    recipientsRestricted(ids: readonly string[]): Promise<boolean>;
     networks: readonly string[];
     schedule: MonthlySchedule;
     now: Date;
@@ -168,8 +167,6 @@ export async function prepareMonthlyAttestation(
     if (excluded.has(award.githubUserId))
       reject("recipient_restricted", "An allocation recipient is excluded.");
   }
-  if (await deps.recipientsRestricted([...ids]))
-    reject("recipient_restricted", "An allocation recipient is restricted.");
   const canonical = buildExecutionSnapshot({
     base: {
       projectId: project.id,
@@ -192,6 +189,46 @@ export async function prepareMonthlyAttestation(
   });
   if (canonical.text !== run.snapshot)
     reject("invalid_allocation", "The frozen allocation is not canonical.");
+  // Eligibility was decided atomically when obligations were funded. A later
+  // account ban must not revoke that funded right. Every omitted snapshot
+  // award needs its immutable funding-time exclusion record.
+  const exclusions = await deps.db
+    .prepare(
+      "SELECT json_group_array(json_object('githubUserId',github_user_id,'sourceDigest',source_digest,'network',network,'vault',vault)) items FROM monthly_payment_exclusions WHERE project_id=? AND period=?",
+    )
+    .bind(project.id, period)
+    .first<{ items: string }>();
+  const omitted = JSON.parse(exclusions?.items ?? "[]") as {
+    githubUserId: string;
+    sourceDigest: string;
+    network: string;
+    vault: string;
+  }[];
+  if (
+    omitted.some(
+      (r) =>
+        r.network !== request.network ||
+        r.vault !== deployment.vault ||
+        !snapshot.awards.some(
+          (a) =>
+            a.githubUserId === r.githubUserId &&
+            a.sourceDigest === r.sourceDigest,
+        ),
+    )
+  )
+    reject(
+      "obligations_changed",
+      "An exclusion does not match the frozen allocation.",
+    );
+  const omittedSources = new Set(omitted.map((r) => r.sourceDigest));
+  const eligible = snapshot.awards.filter(
+    (a) => !omittedSources.has(a.sourceDigest),
+  );
+  if (eligible.length === 0)
+    reject("empty_allocation", "No eligible award needs a chain commitment.");
+  const totalGrossBase = eligible
+    .reduce((total, a) => total + BigInt(a.grossBase), 0n)
+    .toString();
   // Compare every obligation, not just the existence of the month marker.
   const obligations = await deps.db
     .prepare(
@@ -208,8 +245,8 @@ export async function prepareMonthlyAttestation(
     vault: string;
   }[];
   if (
-    rows.length !== snapshot.awards.length ||
-    snapshot.awards.some(
+    rows.length !== eligible.length ||
+    eligible.some(
       (a) =>
         !rows.some(
           (r) =>
@@ -227,7 +264,7 @@ export async function prepareMonthlyAttestation(
       "The funded obligations do not match the frozen allocation.",
     );
   const network = ESCROW_NETWORKS[request.network];
-  const entries = snapshot.awards.map((a) => ({
+  const entries = eligible.map((a) => ({
     githubUserId: a.githubUserId,
     grossMicro: a.grossBase,
     sourceDigest:
@@ -260,7 +297,7 @@ export async function prepareMonthlyAttestation(
         deployment.projectPda,
         period,
         allocationRoot,
-        snapshot.totalGrossBase,
+        totalGrossBase,
         deployment.networkDomain,
       ),
       (b) => b.toString(16).padStart(2, "0"),
@@ -272,7 +309,7 @@ export async function prepareMonthlyAttestation(
     family: network.family,
     allocationRoot,
     messageHex,
-    totalGrossBase: snapshot.totalGrossBase,
+    totalGrossBase,
     entries,
   };
 }

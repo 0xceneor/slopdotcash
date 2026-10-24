@@ -76,7 +76,7 @@ const int64 = (value: Uint8Array, offset: number) =>
 /** Rejects mainnet unless reviewed, and a wrong RPC genesis, before the hosted wrapper reads a signer seed. */
 export async function preflightSolanaDeployment(
   env: Preflight,
-  input: DispatchPayment,
+  input: Pick<DispatchPayment, "network" | "vault">,
 ): Promise<SolanaEscrowConfig> {
   const rows = JSON.parse(env.PAYMENT_DEPLOYMENTS) as (SolanaEscrowConfig & {
     chain: string;
