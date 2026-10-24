@@ -296,7 +296,11 @@ export function startGitHubApiFixture(port) {
       /^\/repos\/([^/]+\/[^/]+)\/security-advisories(?:\/(GHSA-[^/]+))?$/u.exec(
         path,
       );
-    if (request.method === "GET" && reports && request.headers.authorization === `Bearer ${E2E_ADVISORY_READ_TOKEN}`) {
+    if (
+      request.method === "GET" &&
+      reports &&
+      request.headers.authorization === `Bearer ${E2E_ADVISORY_READ_TOKEN}`
+    ) {
       if (
         request.headers.authorization !== `Bearer ${E2E_ADVISORY_READ_TOKEN}`
       ) {
@@ -304,7 +308,12 @@ export function startGitHubApiFixture(port) {
         response.end('{"message":"Resource not accessible"}');
         return;
       }
-      const list = [...(advisories.get(reports[1].toLowerCase()) ?? []), ...privateIntake.advisories.filter(entry => entry.repository === reports[1].toLowerCase()).map(entry => entry.advisory)];
+      const list = [
+        ...(advisories.get(reports[1].toLowerCase()) ?? []),
+        ...privateIntake.advisories
+          .filter((entry) => entry.repository === reports[1].toLowerCase())
+          .map((entry) => entry.advisory),
+      ];
       const found = reports[2]
         ? list.find((entry) => entry.ghsa_id === reports[2])
         : list;
@@ -312,7 +321,7 @@ export function startGitHubApiFixture(port) {
         "content-type": "application/json",
       });
       response.end(JSON.stringify(found ?? { message: "Not Found" }));
-        return;
+      return;
     }
     try {
       if (await handlePrivateIntake(privateIntake, request, response, url))

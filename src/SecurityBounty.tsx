@@ -877,7 +877,8 @@ const SUBMISSION_LABELS: Record<SecurityCase["submissionState"], string> = {
 
 const EVENT_LABELS: Record<string, string> = {
   submit: "Reporter submitted privately; GitHub receipt verified",
-  "submit-direct": "Reporter linked their GitHub report; GitHub receipt verified",
+  "submit-direct":
+    "Reporter linked their GitHub report; GitHub receipt verified",
   claim: "Reporter linked the GitHub report",
   record: "Maintainer recorded the GitHub report",
   "verify-link": "Maintainer verified the GitHub report",
@@ -1347,7 +1348,6 @@ function SubmissionsPanel({
     </section>
   );
 }
-
 
 type FieldSpec =
   | {
@@ -2449,11 +2449,18 @@ export function SecurityCasesPage() {
         {automatic ? (
           <section aria-labelledby="security-link" className="admin-section">
             <h2 id="security-link">Already reported on GitHub? Verify it</h2>
-            <p className="admin-status">GitHub's own record proves you are the author and keeps the original receipt time.</p>
+            <p className="admin-status">
+              GitHub's own record proves you are the author and keeps the
+              original receipt time.
+            </p>
             <DirectVerifyForm programProjects={programProjects} />
           </section>
         ) : automatic === false ? (
-          <p className="admin-status">Automatic private intake is not available. Use the project's private GitHub report form. A security maintainer can import the verified receipt.</p>
+          <p className="admin-status">
+            Automatic private intake is not available. Use the project's private
+            GitHub report form. A security maintainer can import the verified
+            receipt.
+          </p>
         ) : null}
         {maintained.size > 0 ? (
           <section aria-labelledby="security-import" className="admin-section">

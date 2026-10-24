@@ -25,7 +25,6 @@ import type {
 import { notifySecurityCase } from "../notifications/events";
 import { cachedPublicResponse, type EdgeCache } from "../projects/edge-cache";
 import { readJsonObject } from "../trace/validation";
-import type { IntakeConfig } from "./intake-grant";
 import type { AdvisoryReader, GithubPrivateReport } from "./advisories";
 import {
   analysisMayStart,
@@ -33,6 +32,7 @@ import {
   runCaseAnalysis,
   type SecurityAnalyzer,
 } from "./analysis";
+import type { IntakeConfig } from "./intake-grant";
 import { prepareSecuritySettlement, securitySettlementView } from "./payments";
 import { handleSubmissionRoute } from "./submissions";
 export type SecurityD1Database = D1TransactionalDatabase<D1Statement>;
@@ -168,11 +168,6 @@ const GROSS_MINOR = /^[1-9]\d{0,15}$/u;
  * private vulnerability report, rather than a person (migration 0061).
  */
 const GITHUB_VERIFIER = "github";
-/**
- * Repeated receipt checks within this window reuse the last answer. A
- * transport bound against repeated GitHub reads, not a policy.
- */
-const RECEIPT_CHECK_INTERVAL_MS = 10_000;
 /** A browser that kept an older readiness answer must check again. */
 export const INTAKE_READINESS_TTL_SECONDS = 30;
 
@@ -1036,7 +1031,8 @@ export function inboxStatements(
   };
   const recipients = [
     ...(REPORTER_EVENT_KINDS.has(input.kind) ? [input.reporterGithubId] : []),
-    ...(input.kind === "receive" || input.kind === "claim" ||
+    ...(input.kind === "receive" ||
+    input.kind === "claim" ||
     input.kind === "submit" ||
     input.kind === "submit-direct"
       ? ids("technical")
@@ -1135,7 +1131,7 @@ export function caseInsertStatement(
  * Starts the private analysis of a newly verified case. It runs after the
  * response where the platform allows it, and inline otherwise.
  */
-async function scheduleAnalysis(
+export async function scheduleAnalysis(
   deps: SecurityApiDependencies,
   caseId: string,
 ): Promise<void> {
@@ -2642,7 +2638,10 @@ async function intakeReadiness(
       programStatus: terms.status,
       // Pause or closure stops new paid research, never the private route.
       paidParticipation: terms.status === "open" && !closed ? "open" : "closed",
-      handoffUrl: state === "ready" ? `https://github.com/${terms.intake.repository}/security/advisories/new` : null,
+      handoffUrl:
+        state === "ready"
+          ? `https://github.com/${terms.intake.repository}/security/advisories/new`
+          : null,
     },
     `public, max-age=0, s-maxage=${INTAKE_READINESS_TTL_SECONDS}`,
   );

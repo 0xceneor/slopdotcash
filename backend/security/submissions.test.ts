@@ -45,6 +45,7 @@ const PROGRAM = {
     network: null,
     grossMinor: "1000000",
   },
+  funding: { state: "pledged" },
   sponsor: { name: "Slop", githubId: null },
   approvers: {
     technical: [MAINTAINER, MAINTAINER_2],
@@ -512,8 +513,8 @@ describe("private intake: send outcomes", () => {
       receivedAtSource: "github-verified",
       receivedAt: advisory.advisory.created_at,
       view: "reporter",
-      nextAction: "Triage new private report",
-      nextActionDueAt: "2026-10-24T10:00:00.000Z",
+      nextStep: "Waiting for the project owner's response.",
+      nextStepDueAt: "2026-10-24T10:00:00.000Z",
     });
     expect(JSON.stringify(view.body)).not.toContain("autoAnalysis");
     expect(JSON.stringify(view.body)).not.toContain("urgent");
@@ -1092,17 +1093,24 @@ describe("private intake: direct GitHub reports", () => {
       { summary: "Filed", description: "x" },
       "2026-10-20T08:30:00.000Z",
     );
-    const recorded = await t.call(MAINTAINER, "POST", "security-cases", {
-      mode: "record",
-      projectId: PROJECT,
-      advisory: advisory.ghsa_id,
-      reporterGithubId: OTHER.githubId,
-      reporterGithubLogin: OTHER.githubLogin,
-      receivedAt: "2026-10-20T09:00:00.000Z",
-      confirmation: true,
-      idempotencyKey: t.key(),
-    });
-    expect(recorded.status).toBe(201);
+    // A legacy, maintainer-attested receipt predates automatic intake.
+    t.sqlite
+      .query(
+        "INSERT INTO security_cases (id, project_id, advisory_repository, advisory_ghsa, reporter_github_id, reporter_github_login, submission_state, received_at, verified_at, verified_by_github_id, receipt_state, remediation_state, award_state, payment_state, disclosure_state, recognition, appeal_state, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, 'received', 'not-started', 'not-applicable', 'not-applicable', 'embargoed', 'private', 'none', 1, ?, ?)",
+      )
+      .run(
+        "sc_legacy00001",
+        PROJECT,
+        REPO,
+        advisory.ghsa_id,
+        OTHER.githubId,
+        OTHER.githubLogin,
+        "2026-10-20T09:00:00.000Z",
+        "2026-10-20T09:00:00.000Z",
+        MAINTAINER.githubId,
+        "2026-10-20T09:00:00.000Z",
+        "2026-10-20T09:00:00.000Z",
+      );
     const created = await t.create(REPORTER, {
       origin: "direct",
       advisory: advisory.ghsa_id,
