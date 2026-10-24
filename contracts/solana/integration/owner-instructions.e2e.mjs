@@ -51,7 +51,8 @@ test("edge owner instructions create distinct vaults with atomic monthly choice 
   );
   await mintTo(provider.connection, owner, mint, source.address, owner, 30n);
   const genesisHash = await provider.connection.getGenesisHash();
-  const projectDigest = hash("edge-owner-project");
+  const projectId = "edge-owner-project";
+  const projectDigest = hash(`slop-project:${projectId}`);
   const base = {
     programId: program.programId.toBase58(),
     owner: owner.publicKey.toBase58(),
@@ -82,13 +83,17 @@ test("edge owner instructions create distinct vaults with atomic monthly choice 
     { name: "default", monthlyCap: "20" },
     {
       name: "opt-out",
-      projectDigest: hash("edge-owner-opt-out"),
+      projectId: "edge-owner-opt-out",
       monthlyCap: "20",
       automaticMonthly: false,
     },
     { name: "bounty", payoutPolicy: "security-bounty" },
   ]) {
-    const input = { ...base, ...choice };
+    const input = {
+      ...base,
+      ...choice,
+      projectDigest: hash(`slop-project:${choice.projectId ?? projectId}`),
+    };
     const plan = buildInitializeVaultInstructions(input);
     const bounty = input.payoutPolicy === "security-bounty";
     const expectedProject = PublicKey.findProgramAddressSync(
@@ -167,7 +172,7 @@ test("edge owner instructions create distinct vaults with atomic monthly choice 
       ...deployment,
       rpcUrl: provider.connection.rpcEndpoint,
       genesisHash,
-      projectId: `edge-owner-${choice.name}`,
+      projectId: choice.projectId ?? projectId,
       network: "solana-localnet",
       mint: input.mint,
     };
