@@ -1,5 +1,6 @@
 /** Edge-safe vault creation. The caller verifies the reviewed program and Config. */
 import type { PayoutPolicy } from "../../src/lib/payments/contracts";
+import { solanaDigest } from "./adapter";
 import {
   bytes,
   encoder,
@@ -24,15 +25,6 @@ export interface SolanaVaultCreation {
   payoutPolicy?: PayoutPolicy;
   monthlyCap?: string;
   automaticMonthly?: boolean;
-}
-
-function digest(value: string): Uint8Array {
-  const plain = value.replace(/^0x/, "");
-  if (!/^[a-fA-F0-9]{64}$/.test(plain))
-    throw new Error("Expected a 32-byte project or network digest");
-  return Uint8Array.from(plain.match(/../g) ?? [], (pair) =>
-    Number.parseInt(pair, 16),
-  );
 }
 
 function delay(value: string, maximum: bigint): Uint8Array {
@@ -70,7 +62,7 @@ export function buildInitializeVaultInstructions(input: SolanaVaultCreation) {
     cap = le(BigInt(input.monthlyCap));
   }
   bytes(input.mint);
-  const projectDigest = digest(input.projectDigest);
+  const projectDigest = solanaDigest(input.projectDigest);
   const projectPda = pda(input.programId, [
     encoder.encode("project"),
     bytes(input.owner),
@@ -97,7 +89,7 @@ export function buildInitializeVaultInstructions(input: SolanaVaultCreation) {
       data: instructionData(
         "initialize",
         projectDigest,
-        digest(input.networkDomain),
+        solanaDigest(input.networkDomain),
         bytes(input.identityAuthority),
         bytes(input.feeRecipient),
         delay(input.bindingDelaySeconds, 30n * 86400n),
