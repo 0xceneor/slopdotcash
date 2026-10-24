@@ -187,10 +187,10 @@ try {
   await runOnce(env);
   expect(state(), "finalized", "3 after reconcile");
 
-  // 4. Below the minimum value: skipped, nothing signed.
+  // 4. Below the minimum value: pending, nothing signed.
   await seed(10n ** 18n); // 1 AERO, under the 1 USDC minimum
   await runOnce(env);
-  expect(state(), "skipped", "4 below minimum");
+  expect(state(), "pending", "4 below minimum");
 
   // 5. Price moved between quote and signing: refused before signing.
   await seed(49n * 10n ** 18n);
@@ -238,7 +238,7 @@ try {
         "finalized",
         "finalized",
         "finalized",
-        "skipped",
+        "pending",
         "failed",
         "finalized",
         "no_route",

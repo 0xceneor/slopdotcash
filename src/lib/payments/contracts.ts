@@ -36,7 +36,6 @@ export interface AccountPayment extends PaymentAsset {
 export type MonthlyAwardState =
   | "excluded"
   | "underfunded"
-  | "excluded"
   | "awaiting-reservation"
   | "reserved"
   | "paid";

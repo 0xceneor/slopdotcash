@@ -261,6 +261,8 @@ export default function OwnerAwards({
                   ? `Unless you finalize earlier, the current allocations are finalized at ${new Date(view.cutoffAt).toLocaleString()}.`
                   : "Automatic payment starts with a later month, so finalize this month yourself when it is ready."
               : "Finalize each month yourself."}
+            {project.reward.paymentMode !== "enabled" &&
+              " Payments are disabled for this project, so no award is paid until payments are enabled."}
           </p>
           <button
             className="button secondary-button"

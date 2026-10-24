@@ -1,0 +1,198 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { Keypair, PublicKey } from "@solana/web3.js";
+import {
+  preloadArgs,
+  programId,
+  projectData,
+  sha256Seed,
+} from "./legacy-project.mjs";
+
+/**
+ * Monthly states that no live validator can reach, which test-e2e.sh preloads so the e2e
+ * suite runs the program against real bytes. Public seeds: test use only.
+ *
+ * Expired: a current-layout Project with an admitted month that is already 30 days past its window,
+ * which no live validator can reach. test-e2e.sh preloads both so expire_month runs against
+ * real bytes. The month owes 3 USDC of its 5 USDC total; the project owes 1 USDC more for
+ * other months.
+ */
+export const expiredProject = Keypair.fromSeed(
+  sha256Seed("slop-e2e-expired-project"),
+).publicKey;
+export const EXPIRED_PERIOD = 202001;
+const month = PublicKey.findProgramAddressSync(
+  [
+    Buffer.from("month"),
+    expiredProject.toBuffer(),
+    Buffer.from(new Uint32Array([EXPIRED_PERIOD]).buffer),
+  ],
+  programId,
+)[0];
+
+function project() {
+  const data = Buffer.concat([projectData(), Buffer.alloc(16)]);
+  // Its own owner, so no owner listing of the legacy project includes it.
+  Keypair.fromSeed(sha256Seed("slop-e2e-expired-owner"))
+    .publicKey.toBuffer()
+    .copy(data, 8);
+  data.writeBigUInt64LE(4_000_000n, 200); // reserved
+  data.writeBigUInt64LE(4_000_000n, 324); // monthly_outstanding
+  return data;
+}
+function monthData() {
+  const data = Buffer.alloc(109);
+  Buffer.from("1170c1902bd6fc6b", "hex").copy(data, 0);
+  expiredProject.toBuffer().copy(data, 8);
+  data.writeUInt32LE(EXPIRED_PERIOD, 40);
+  data.writeBigUInt64LE(2_000_000n, 76); // committed
+  data.writeBigUInt64LE(5_000_000n, 84); // total
+  data.writeBigInt64LE(1_580_774_400n, 100); // frozen_at, 4 February 2020
+  return data;
+}
+
+const sha256 = (...parts) => {
+  const hash = createHash("sha256");
+  for (const part of parts) hash.update(part);
+  return hash.digest();
+};
+const u64 = (value) => {
+  const bytes = Buffer.alloc(8);
+  bytes.writeBigUInt64LE(BigInt(value));
+  return bytes;
+};
+export const sourceDigest = (name) => sha256(`source:${name}`).toString("hex");
+/**
+ * The program's Merkle sum tree over [actor, gross, source digest hex] leaves, built here
+ * because the adapter refuses an actor-0 leaf. An odd last node moves up unchanged.
+ */
+export function allocationTree(leaves) {
+  const tree = [
+    leaves.map(([actor, gross, source]) => ({
+      hash: sha256(
+        Buffer.from([0]),
+        u64(actor),
+        u64(gross),
+        Buffer.from(source, "hex"),
+      ),
+      total: BigInt(gross),
+    })),
+  ];
+  while (tree.at(-1).length > 1) {
+    const level = tree.at(-1);
+    const next = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const [left, right] = [level[i], level[i + 1]];
+      next.push(
+        right
+          ? {
+              hash: sha256(
+                Buffer.from([1]),
+                left.hash,
+                u64(left.total),
+                right.hash,
+                u64(right.total),
+              ),
+              total: left.total + right.total,
+            }
+          : left,
+      );
+    }
+    tree.push(next);
+  }
+  return {
+    root: tree.at(-1)[0].hash.toString("hex"),
+    total: tree.at(-1)[0].total.toString(),
+    proof(index) {
+      const proof = [];
+      for (const level of tree.slice(0, -1)) {
+        const sibling = index % 2 === 1 ? index - 1 : index + 1;
+        if (sibling < level.length)
+          proof.push({
+            hash: level[sibling].hash.toString("hex"),
+            total: level[sibling].total.toString(),
+          });
+        index = Math.floor(index / 2);
+      }
+      return proof;
+    },
+  };
+}
+
+/**
+ * Cross-month: an earlier month of the e2e project "monthly-cross" that already committed
+ * three sources to actor 901 for 5 USDC each. Only commit_monthly_award writes the
+ * ["monthly-source", project, source] marker, and no live validator holds two recordable
+ * months of one project, so the earlier month and its markers are preloaded. The test
+ * writes each source's origin and obligation with the same commit_with_fee path.
+ */
+export const CROSS_ACTOR = 901;
+export const CROSS_GROSS = 5_000_000;
+export const CROSS_SOURCES = ["cross-equal", "cross-more", "cross-other"];
+export const EARLIER_PERIOD = 202001;
+const owner = Keypair.fromSecretKey(
+  Uint8Array.from(JSON.parse(readFileSync(process.env.ANCHOR_WALLET, "utf8"))),
+).publicKey;
+export const crossProject = PublicKey.findProgramAddressSync(
+  [
+    Buffer.from("project"),
+    owner.toBuffer(),
+    sha256(`monthly-cross${process.env.SLOP_E2E_RUN ?? ""}`),
+    Buffer.from([0]),
+  ],
+  programId,
+)[0];
+function earlierMonth() {
+  const tree = allocationTree(
+    CROSS_SOURCES.map((name) => [CROSS_ACTOR, CROSS_GROSS, sourceDigest(name)]),
+  );
+  const data = Buffer.alloc(109);
+  Buffer.from("1170c1902bd6fc6b", "hex").copy(data, 0);
+  crossProject.toBuffer().copy(data, 8);
+  data.writeUInt32LE(EARLIER_PERIOD, 40);
+  Buffer.from(tree.root, "hex").copy(data, 44);
+  data.writeBigUInt64LE(BigInt(tree.total), 76); // committed: every award
+  data.writeBigUInt64LE(BigInt(tree.total), 84); // total
+  data.writeBigInt64LE(1_580_774_400n, 100); // frozen_at
+  return data;
+}
+const monthAddress = (projectKey, period) =>
+  PublicKey.findProgramAddressSync(
+    [
+      Buffer.from("month"),
+      projectKey.toBuffer(),
+      Buffer.from(new Uint32Array([period]).buffer),
+    ],
+    programId,
+  )[0];
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  // BindingVeto discriminator: the empty marker account.
+  const marker = Buffer.from("20b51e0e0a5b1d9e", "hex");
+  console.log(
+    preloadArgs([
+      ["expired-project", expiredProject, programId, project()],
+      ["expired-month", month, programId, monthData()],
+      [
+        "earlier-month",
+        monthAddress(crossProject, EARLIER_PERIOD),
+        programId,
+        earlierMonth(),
+      ],
+      ...CROSS_SOURCES.map((name) => [
+        `monthly-source-${name}`,
+        PublicKey.findProgramAddressSync(
+          [
+            Buffer.from("monthly-source"),
+            crossProject.toBuffer(),
+            Buffer.from(sourceDigest(name), "hex"),
+          ],
+          programId,
+        )[0],
+        programId,
+        marker,
+      ]),
+    ]).join(" "),
+  );
+}

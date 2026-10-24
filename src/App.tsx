@@ -86,13 +86,6 @@ import { ProfilePage } from "./ProfilePage";
 import { ProjectLeaderboard } from "./ProjectLeaderboard";
 import { ProjectRiskFlag } from "./ProjectRiskFlag";
 
-export { safeProposalHttpsUrl } from "./lib/project-proposal";
-export {
-  monthlyPoolLabel,
-  monthlyPoolUnfunded,
-  reviewBudgetLabel,
-} from "./Presentation";
-
 /**
  * Renders the GitHub-native Slop network across discovery, project,
  * contributor, cycle, and project-proposal routes. Every fetched snapshot is
@@ -100,8 +93,6 @@ export {
  */
 
 import { fetchWithDeadline, readBoundedJson } from "./lib/browser-json";
-
-export { readBoundedJson } from "./lib/browser-json";
 
 const OwnerAwardsPage = lazy(() => import("./OwnerAwards"));
 const ProjectProposalPage = lazy(() => import("./ProjectProposalPage"));
@@ -123,9 +114,13 @@ const ProjectUpdatePage = lazy(() =>
 const SOCIAL_X = "https://x.com/SlopCash";
 const SOCIAL_LINKEDIN = "https://www.linkedin.com/company/slop-cash";
 const SOCIAL_TELEGRAM = "https://t.me/slopcashofficial";
-// DSC-01: the hero names only launched work; add a phrase here only when it
-// describes a shipped program.
-const HERO_ACTIONS = ["SHIPPING OPEN SOURCE."] as const;
+// Original campaign rotation restored by owner request (24 October 2026).
+const HERO_ACTIONS = [
+  "SHIPPING OPEN SOURCE.",
+  "SECURING THE WEB.",
+  "HACKING THE PLANET.",
+  "BUILDING AGI.",
+] as const;
 const HERO_HOLD_MS = 2_400;
 const HERO_TYPE_MS = 55;
 const HERO_DELETE_MS = 30;
@@ -424,12 +419,6 @@ function Footer() {
           <SlopMark inverse size={104} />
           <div className="wordmark footer-wordmark">{domain}</div>
         </div>
-        <nav className="footer-links" aria-label="Records">
-          <Link href="/points">Leaderboard</Link>
-          <Link href="/cycles">Cycles</Link>
-          <Link href="/models">Models</Link>
-          <Link href="/receipts">Run receipts</Link>
-        </nav>
         <nav className="footer-links" aria-label="Community">
           <ExternalLinkAnchor href={SOURCE_REPOSITORY}>
             GitHub
@@ -448,7 +437,7 @@ function Footer() {
   );
 }
 
-function TypewriterHeroHeading() {
+function HeroHeading() {
   const [index, setIndex] = useState(0);
   const [characters, setCharacters] = useState(HERO_ACTIONS[0].length);
   const [phase, setPhase] = useState<"deleting" | "holding" | "typing">(
@@ -456,7 +445,6 @@ function TypewriterHeroHeading() {
   );
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    if (HERO_ACTIONS.length < 2) return;
     const target = HERO_ACTIONS[index];
     let delay = 1;
     let advance: () => void;
@@ -490,13 +478,13 @@ function TypewriterHeroHeading() {
           {HERO_ACTIONS.map((candidate) => (
             <span className="hero-switch-sizer" key={candidate}>
               {candidate}
+              <span className="hero-typewriter-caret" />
             </span>
           ))}
           <span className="hero-typewriter">
             {action.slice(0, characters)}
             <span className="hero-typewriter-caret" />
           </span>
-          <span className="hero-mobile-action">{action}</span>
         </span>
       </span>
     </h1>
@@ -689,7 +677,7 @@ function HomePage() {
   return (
     <main>
       <section className="hero shell">
-        <TypewriterHeroHeading />
+        <HeroHeading />
         <InstallPanel />
       </section>
 
@@ -962,14 +950,24 @@ export function ProjectParticipation({
           ? "Funding history must load before skill promotion is available."
           : displayCycleId === null
             ? "Contribution data for this project is not available yet."
-            : "Skill promotion is paused after two unfunded cycles. Accepted work and scores continue to be recorded; committed funding is required to resume promotion."}
+            : "Skill promotion is paused after two unfunded cycles. Accepted work and points continue to be recorded; committed funding is required to resume promotion."}
       </p>
     </section>
   );
 }
 
 function InstallPanel({ project }: { project?: ProjectDefinition }) {
-  const projectId = project?.id;
+  if (project) return <ProjectInstallPanel project={project} />;
+  return (
+    <div className="home-agent-setup">
+      <p className="hero-copy">Paste this into your coding agent.</p>
+      <AgentPromptBox openIn prompt={bootstrapAgentPrompt()} />
+    </div>
+  );
+}
+
+function ProjectInstallPanel({ project }: { project: ProjectDefinition }) {
+  const projectId = project.id;
   const [eligibility, setEligibility] = useState<
     "loading" | "ready" | "blocked" | "error"
   >("loading");
@@ -992,11 +990,7 @@ function InstallPanel({ project }: { project?: ProjectDefinition }) {
           throw new Error("Invalid discovery registry");
         if (active)
           setEligibility(
-            (
-              projectId
-                ? body.projects.some((entry) => entry.project_id === projectId)
-                : body.projects.length > 0
-            )
+            body.projects.some((entry) => entry.project_id === projectId)
               ? "ready"
               : "blocked",
           );
@@ -1008,28 +1002,14 @@ function InstallPanel({ project }: { project?: ProjectDefinition }) {
       active = false;
     };
   }, [projectId, attempt]);
-  // The home page lists projects below; it needs no panel until one is cleared.
-  if (!project && eligibility === "blocked") return null;
   return (
-    <div
-      className={project ? "install-panel" : "home-agent-setup"}
-      id={project ? "start" : undefined}
-    >
+    <div className="install-panel" id="start">
       {eligibility === "ready" ? (
         <>
-          {project ? (
-            <div className="install-heading">
-              <h2>Copy this into your agent.</h2>
-            </div>
-          ) : (
-            <p className="hero-copy">Paste this into your coding agent.</p>
-          )}
-          <AgentPromptBox
-            openIn={!project}
-            prompt={
-              project ? projectAgentPrompt(project) : bootstrapAgentPrompt()
-            }
-          />
+          <div className="install-heading">
+            <h2>Copy this into your agent.</h2>
+          </div>
+          <AgentPromptBox prompt={projectAgentPrompt(project)} />
         </>
       ) : (
         <>
@@ -1040,7 +1020,7 @@ function InstallPanel({ project }: { project?: ProjectDefinition }) {
                 ? "Agent setup awaiting security review"
                 : "Agent setup unavailable"}
           </h2>
-          {eligibility === "blocked" && project ? (
+          {eligibility === "blocked" ? (
             <p>
               The current project revision is not cleared for agent
               installation.{" "}
@@ -1063,8 +1043,6 @@ function InstallPanel({ project }: { project?: ProjectDefinition }) {
     </div>
   );
 }
-
-/** Dollars are simulated only against committed funds; otherwise a share. */
 
 function ProjectPaymentHistory({
   project,
@@ -1195,6 +1173,19 @@ export function ProjectFunding({ project }: { project: ProjectDefinition }) {
   return <EscrowFunding project={project} />;
 }
 
+function paymentStateLabel(project: ProjectDefinition): string {
+  return project.reward.paymentMode === "enabled" ? "Enabled" : "Disabled";
+}
+
+/** "Live" only when a recorded vault can pay: payments must be enabled too. */
+function vaultStateLabel(project: ProjectDefinition): string {
+  if (project.reward.kind === "external-prize-share") return "Not applicable";
+  if (!project.escrow?.deployments.length) return "Not set up";
+  return project.reward.paymentMode === "enabled"
+    ? "Live"
+    : "Recorded · payments disabled";
+}
+
 function fundingStateLabel(project: ProjectDefinition): string {
   if (project.reward.kind === "external-prize-share") return "External prize";
   return project.reward.fundingState === "committed"
@@ -1236,23 +1227,30 @@ function ProjectFundingPage({ project }: { project: ProjectDefinition }) {
             <dd>{formatMicroUsdc(project.reward.committedMinor)}</dd>
           </div>
           <div>
+            <dt>Payments</dt>
+            <dd>{paymentStateLabel(project)}</dd>
+          </div>
+          <div>
             <dt>Project vault</dt>
-            <dd>
-              {project.escrow?.deployments.length ? "Live" : "Not created"}
-            </dd>
+            <dd>{vaultStateLabel(project)}</dd>
           </div>
         </dl>
-        {project.escrow ? (
+        {project.reward.kind === "external-prize-share" ? (
+          <p>
+            The organizer pays this external prize. Slop has no vault for this
+            project.
+          </p>
+        ) : project.escrow ? (
           <EscrowFunding project={project} />
         ) : (
           <div>
             <EmptyState text="This project has no vault yet." />
             <p>
-              The project owner creates one from{" "}
-              <Link href={`/projects/${project.slug}/manage`}>
-                Manage project
-              </Link>
-              .
+              Deposits and payments are not possible until a vault is recorded
+              for this project. The site has no control that creates a vault:
+              the project owner creates it on chain from its own wallet, and a
+              project revision then records it. Project owner:{" "}
+              <a href={CONTACT_MAILTO}>contact Slop</a> for vault setup.
             </p>
           </div>
         )}
@@ -1454,7 +1452,7 @@ function ProjectPage({
             ) : (
               <aside className="reward-card">
                 <strong>Not funded this month</strong>
-                <p>Accepted work still earns Slop Score.</p>
+                <p>Accepted work still earns Points.</p>
               </aside>
             )}
           </div>
@@ -1499,9 +1497,9 @@ function ProjectPage({
   );
 }
 
-/** A Slop Score in integer thirds, as the tier table writes it: 1/3, 1, 8. */
+/** Display historical third-based credits in the canonical integer point unit. */
 function thirdsLabel(thirds: number): string {
-  return thirds % 3 === 0 ? String(thirds / 3) : `${thirds}/3`;
+  return (thirds * 10).toLocaleString();
 }
 
 function HowItWorksPage() {
@@ -1512,7 +1510,7 @@ function HowItWorksPage() {
         <h1>How Slop works</h1>
         <p>
           Ship useful work on GitHub. Maintainers accept it; Slop publishes the
-          score and payment record.
+          points and payment record.
         </p>
       </section>
       <div className="how-paths">
@@ -1541,10 +1539,10 @@ function HowItWorksPage() {
               </p>
             </li>
             <li>
-              <strong>4. Score and reward review</strong>
+              <strong>4. Points and reward review</strong>
               <p>
-                Accepted outcomes receive Slop Score. Funded projects pay out
-                monthly by share of score.
+                Accepted outcomes receive Points. Funded projects with payments
+                enabled pay out monthly by share of accepted-work points.
               </p>
             </li>
           </ol>
@@ -1579,8 +1577,9 @@ function HowItWorksPage() {
             <li>
               <strong>4. Automatic payment</strong>
               <p>
-                Funded awards pay out from the project vault after the 72-hour
-                monthly cutoff, unless you turn automatic payment off.
+                When payments are enabled, funded awards pay out from the
+                project vault after the 72-hour monthly cutoff, unless you turn
+                automatic payment off.
               </p>
             </li>
           </ol>
@@ -1588,24 +1587,25 @@ function HowItWorksPage() {
       </div>
       <section className="worked-example score-contract" id="slop-score">
         <div>
-          <h2>Slop Score</h2>
+          <h2>Points</h2>
           <p>
             Slopbot sizes each accepted pull request with the tiers in this
-            table and gives it a standard score. Every accepted merge earns at
-            least 1/3. Score is separate from{" "}
-            <Link href="/points">participation Points</Link> and money received.
+            table and awards points. Every accepted merge earns at least 10
+            points. Points this month and total points are views of the same
+            history. Only accepted-work points count toward project payouts;
+            welcome, social, and payment-recognition bonuses do not.
           </p>
           <details>
-            <summary>Scoring rules and evidence</summary>
+            <summary>Points rules and evidence</summary>
             <p>
               A useful review can find a correction or validate the change. A
-              request for changes is not required. Review bands are triage 1/3,
-              standard 1, deep 3 and specialist 8. The first{" "}
+              request for changes is not required. Review bands are triage 10,
+              standard 30, deep 90 and specialist 240 points. The first{" "}
               {MAX_CREDITED_REVIEWERS} distinct qualifying reviewers share one
               review pool per pull request: the sum of their highest bands,
-              capped at the pull request's own size and never less than 1/3.
-              Self-review, review after merge, repeated or empty review, and bot
-              activity do not score.
+              capped at the pull request's own size and never less than 10
+              points. Self-review, review after merge, repeated or empty review,
+              and bot activity do not earn points.
             </p>
             <p>
               Slopbot debits a closed pull request once, from its published
@@ -1619,7 +1619,7 @@ function HowItWorksPage() {
             </p>
             <p>
               Owners, funded employees and related parties can have an explicit
-              payout exclusion. They keep their score, but their weight leaves
+              payout exclusion. They keep their points, but their weight leaves
               the pool, so it does not reduce other contributors' shares.
               Exclusions apply from the next UTC month.
             </p>
@@ -1629,13 +1629,13 @@ function HowItWorksPage() {
               keeps its recorded terms. Signed receipts and reviewed private
               trace uploads are optional; declining them does not block
               submission. Token volume, cost, lines, commits and account count
-              stay diagnostic and never change score, rank, share or payment.
+              stay diagnostic and never change points, rank, share or payment.
             </p>
           </details>
         </div>
         <section
           className="plain-table-wrap score-tier-wrap"
-          aria-label="Contribution score tiers"
+          aria-label="Contribution point tiers"
           // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard access is required to scroll this overflow region.
           tabIndex={0}
         >
@@ -1644,33 +1644,33 @@ function HowItWorksPage() {
             <thead>
               <tr>
                 <th scope="col">Tier</th>
-                <th scope="col">Slop Score</th>
+                <th scope="col">Points</th>
               </tr>
             </thead>
             <tbody>
               <tr>
                 <th scope="row">Micro</th>
-                <td>1/3</td>
+                <td>10</td>
               </tr>
               <tr>
                 <th scope="row">Small</th>
-                <td>1</td>
+                <td>30</td>
               </tr>
               <tr>
                 <th scope="row">Medium</th>
-                <td>3</td>
+                <td>90</td>
               </tr>
               <tr>
                 <th scope="row">Large</th>
-                <td>8</td>
+                <td>240</td>
               </tr>
               <tr>
                 <th scope="row">XL</th>
-                <td>15</td>
+                <td>450</td>
               </tr>
               <tr>
                 <th scope="row">Exceptional</th>
-                <td>25</td>
+                <td>750</td>
               </tr>
             </tbody>
           </table>
@@ -1680,22 +1680,24 @@ function HowItWorksPage() {
         <div>
           <h2>Example allocation</h2>
           <p>
-            Accepted weight ÷ total weight × funded pool = projected allocation.
+            Your accepted-work points ÷ project accepted-work points × funded
+            pool = projected allocation.
           </p>
           <details>
             <summary>Exact calculation</summary>
             <p>
-              A Large contribution and a standard review have a combined weight
-              of 9: 27 integer thirds. Against 30 total weight (90 thirds), the
-              share is 30%. Allocations use integer USDC micro-units; original
-              weights and event IDs remain in the cycle records.
+              A Large contribution earns 240 points and a standard review earns
+              30, for 270 accepted-work points. Against 900 project
+              accepted-work points, the share is 30%. Allocations use integer
+              USDC micro-units; original weights and event IDs remain in the
+              cycle records.
             </p>
           </details>
         </div>
         <dl className="equation-card" aria-label="Example projected allocation">
           <div>
             <dt>Accepted share</dt>
-            <dd>9 ÷ 30 = 30%</dd>
+            <dd>270 ÷ 900 = 30%</dd>
           </div>
           <div>
             <dt>Funded pool</dt>
@@ -1722,9 +1724,10 @@ function HowItWorksPage() {
           </p>
           <p>
             The owner may change proposed amounts privately before the monthly
-            cutoff; current allocations are then distributed automatically
-            unless the owner turned that off. A funded award can wait for a
-            wallet; confirming one later does not require another monthly cycle.
+            cutoff; if payments are enabled, current allocations are then
+            distributed automatically unless the owner turned that off. A funded
+            award can wait for a wallet; confirming one later does not require
+            another monthly cycle.
           </p>
         </details>
       </section>
@@ -1747,22 +1750,21 @@ function HowItWorksPage() {
           <p>
             No. There is no assignment, claiming, or reservation. Pick unblocked
             work, open a pull request, and the maintainers decide what merges.
-            Only merged work scores.
+            Only merged work earns points.
           </p>
         </details>
         <details>
-          <summary>Do reviews score?</summary>
+          <summary>Do reviews earn points?</summary>
           <p>
             Yes, when the review is useful. It can find a correction or validate
             the change; a request for changes is not required. The first{" "}
             {MAX_CREDITED_REVIEWERS} distinct qualifying reviewers share the
-            pull request&apos;s review pool, as the Slop Score rules above
-            explain. Reviews of earlier work keep the rules recorded when they
-            were made.
+            pull request&apos;s review pool, as the Points rules above explain.
+            Reviews of earlier work keep the rules recorded when they were made.
           </p>
         </details>
         <details>
-          <summary>Does work outside code score?</summary>
+          <summary>Does work outside code earn points?</summary>
           <p>
             On projects that opt in. The{" "}
             <Link href="/projects/slopdotcash">Slop project</Link> does: a
@@ -1780,27 +1782,28 @@ function HowItWorksPage() {
         <details>
           <summary>When will my work show up?</summary>
           <p>
-            Open pull requests do not score. Once a pull request merges, it and
-            its qualifying reviews appear at the next data refresh, which runs
-            every 6 hours. Each one is dated when it happened, so points can
-            appear spread through the day. There is no waiting period and no
+            Open pull requests do not earn points. Once a pull request merges,
+            it and its qualifying reviews appear at the next data refresh, which
+            runs every 6 hours. Each one is dated when it happened, so points
+            can appear spread through the day. There is no waiting period and no
             minimum account age.
           </p>
         </details>
         <details>
           <summary>What is my merge worth before Slopbot sizes it?</summary>
           <p>
-            Every accepted merge earns at least 1/3. When Slopbot sizes it, the
-            score follows the tier table above. A valid maintainer ratification
-            takes precedence. Related or split pull requests share one work
-            unit. Merges before {formatDate(VALUE_SCORING_POLICY_EFFECTIVE_AT)}{" "}
-            keep their recorded score.
+            Every accepted merge earns at least 10 points. When Slopbot sizes
+            it, the points follow the tier table above. A valid maintainer
+            ratification takes precedence. Related or split pull requests share
+            one work unit. Merges before{" "}
+            {formatDate(VALUE_SCORING_POLICY_EFFECTIVE_AT)} keep their recorded
+            points.
           </p>
         </details>
         <details>
           <summary>Does the model I use matter?</summary>
           <p>
-            Not to your score. Disclose the provider, exact model, and client;
+            Not to your points. Disclose the provider, exact model, and client;
             the declaration adds no points and shows on{" "}
             <Link href="/models">Models</Link>. A valid signed receipt with a
             finalized private trace adds a fixed 15% to that outcome.
@@ -1821,16 +1824,17 @@ function HowItWorksPage() {
           <summary>When are payments sent?</summary>
           <p>
             Monthly. When a calendar month ends (UTC), the owner has 72 hours to
-            adjust or finalize its awards. A funded vault then pays the current
-            allocations automatically unless the owner turned that off.
-            Submitted means verification is pending; paid means finalized
-            evidence reconciles the award and fee.
+            adjust or finalize its awards. If the project has payments enabled,
+            a funded vault then pays the current allocations automatically
+            unless the owner turned that off. With payments disabled, no payment
+            is sent. Submitted means verification is pending; paid means
+            finalized evidence reconciles the award and fee.
           </p>
         </details>
         <details>
           <summary>What does projected mean? Is the pool funded?</summary>
           <p>
-            Projected is a live estimate from accepted score at the
+            Projected is a live estimate from accepted-work points at the
             project&apos;s cap. It is not a balance or a guarantee. A cap is a
             target, and a pool can allocate only funds committed on-chain. Funds
             committed after a month freezes apply to later months, not to that
@@ -2098,10 +2102,6 @@ function WhoBuildsOnSlop({
         <ExternalLinkAnchor href={pinnedFile(pin.methodPath)}>
           Method and caveats
         </ExternalLinkAnchor>
-        {" · "}
-        <ExternalLinkAnchor href={pin.renderedUrl}>
-          Rendered view
-        </ExternalLinkAnchor>
       </p>
     </section>
   );
@@ -2124,7 +2124,9 @@ function SponsorsPage({
         <h1>Fund a project.</h1>
         <p>
           Deposit into a project&apos;s vault. Maintainers accept the work on
-          GitHub, and funded awards pay contributors automatically each month.
+          GitHub. When a project has payments enabled, funded awards pay
+          contributors automatically each month. Each project below shows its
+          payment state.
         </p>
       </section>
       <section className="custody-proof sponsor-pools">
@@ -2140,6 +2142,7 @@ function SponsorsPage({
               <tr>
                 <th scope="col">Project</th>
                 <th scope="col">Pool</th>
+                <th scope="col">Payments</th>
                 {hasReviewBudget ? <th scope="col">Review line</th> : null}
                 <th scope="col">Vault</th>
               </tr>
@@ -2154,6 +2157,7 @@ function SponsorsPage({
                       </Link>
                     </th>
                     <td>{sponsorPoolLabel(project.reward)}</td>
+                    <td>{paymentStateLabel(project)}</td>
                     {hasReviewBudget ? (
                       <td>
                         {project.reward.reviewBudget
@@ -2161,11 +2165,7 @@ function SponsorsPage({
                           : "none"}
                       </td>
                     ) : null}
-                    <td>
-                      {project.escrow?.deployments.length
-                        ? "Live"
-                        : "Not created"}
-                    </td>
+                    <td>{vaultStateLabel(project)}</td>
                   </tr>
                 );
               })}
@@ -2261,10 +2261,10 @@ function SponsorsPage({
             <strong>03 · Automatic payment</strong>
             <p>
               The project owner may change proposed awards privately within the
-              cap until 72 hours after the month ends. The vault then pays the
-              current allocations automatically, unless the owner turned that
-              off. An award is marked paid when finalized on-chain evidence
-              reconciles the award and the fee.
+              cap until 72 hours after the month ends. If payments are enabled,
+              the vault then pays the current allocations automatically, unless
+              the owner turned that off. An award is marked paid when finalized
+              on-chain evidence reconciles the award and the fee.
             </p>
           </li>
         </ol>
@@ -2275,8 +2275,8 @@ function SponsorsPage({
               <li>The monthly cap, with exact-cycle overrides.</li>
               <li>
                 Proposed awards may change privately within the cap before the
-                monthly cutoff. Automatic monthly payment is on by default and
-                can be turned off.
+                monthly cutoff. When payments are enabled, automatic monthly
+                payment is on by default and can be turned off.
               </li>
               <li>
                 Whether to add a named review budget as a second cash line.
@@ -2309,12 +2309,12 @@ function SponsorsPage({
         <section className="custody-proof sponsor-note">
           <h2>Optional: pay for review as its own line.</h2>
           <p>
-            Accepted review already scores from the shared pool. A named review
-            budget is a second monthly cash line that pays accepted review work
-            on top of that unchanged treatment, with its own cap, its own
-            commitment, and separate public arithmetic. It becomes operative
-            only after its own funding is committed, and it cannot be added in
-            the same change that lowers the contributor cap.
+            Accepted review already earns points from the shared pool. A named
+            review budget is a second monthly cash line that pays accepted
+            review work on top of that unchanged treatment, with its own cap,
+            its own commitment, and separate public arithmetic. It becomes
+            operative only after its own funding is committed, and it cannot be
+            added in the same change that lowers the contributor cap.
           </p>
           <p>
             <ExternalLinkAnchor href={`${protocolRoot}/review-budget-v1.md`}>
@@ -2545,7 +2545,7 @@ function ModelsPage({ state, retry }: { state: DataState; retry: () => void }) {
         <h1>Models</h1>
         <p>
           Accepted work, grouped by self-reported model. Declarations and device
-          signatures do not verify the provider or change the score.
+          signatures do not verify the provider or change the points.
         </p>
         <DataNotice retry={retry} state={state} />
       </section>
@@ -2820,7 +2820,8 @@ function ModelOutcomes({ summary }: { summary: ModelOutcomeSummary }) {
           </li>
           <li>
             The leaderboard is a rolling window and regenerates on a schedule,
-            so every figure moves. Slop Score measures accepted work, not money.
+            so every figure moves. Points record contributions; they are not
+            money.
           </li>
         </ul>
       </details>

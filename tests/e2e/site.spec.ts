@@ -10,7 +10,6 @@ import { type APIRequestContext, test as base, expect } from "@playwright/test";
 import { preparePullRequestLedger } from "../../scripts/prepare-pr-ledger";
 import { assertCycleIndex, type CycleIndex } from "../../src/lib/cycle-index";
 import { deploymentOrigins, deploymentTier } from "../../src/lib/deployment";
-import { createGlobalLeaders } from "../../src/lib/global-leaderboard";
 import { communityProjects } from "../../src/lib/home-projects";
 import {
   assertLeaderboardSnapshot,
@@ -104,17 +103,13 @@ async function loadCycles(request: APIRequestContext): Promise<CycleIndex> {
   return value;
 }
 
-test("equal contributors share cycle and profile ranks", async ({
-  page,
-  request,
-}) => {
+test("equal contributors share cycle ranks", async ({ page, request }) => {
   // The local preview is not an allowed origin for the unrelated wallet API.
   await page.route(
     `${deployment.api}/api/v1/wallet-claims/actors/*/current`,
     (route) => route.fulfill({ json: null }),
   );
   const snapshot = await loadSnapshot(request);
-  const cycles = await loadCycles(request);
   const publishedTie = snapshot.leaders.findIndex(
     (leader, index) =>
       index > 0 &&
@@ -262,21 +257,10 @@ test("equal contributors share cycle and profile ranks", async ({
     `#${expectedRank + tiedLeaders.length}`,
   );
 
-  const leaders = createGlobalLeaders(snapshot, views, cycles);
-  const profileIndex = leaders.findIndex(
-    (leader, index) => index > 0 && leader.score === leaders[index - 1].score,
-  );
-  if (profileIndex < 0)
-    throw new Error("Public snapshot has no tied overall contributors");
-  for (const leader of leaders.slice(profileIndex - 1, profileIndex + 1)) {
-    await page.goto(`/contributors/${encodeURIComponent(leader.actor.login)}`);
-    const rank = page.getByText("all-time rank", { exact: true }).locator("..");
-    await expect(rank).toBeVisible();
-    await expect(rank.locator("strong")).toHaveText(`#${profileIndex}`);
-  }
+
 });
 
-test("discovers projects and one score-ranked homepage leaderboard", async ({
+test("discovers projects and one points-ranked homepage leaderboard", async ({
   page,
 }) => {
   await page.route("**/.well-known/slop/projects.json", (route) =>
@@ -334,7 +318,7 @@ test("discovers projects and one score-ranked homepage leaderboard", async ({
     exact: true,
   });
   await expect(
-    leaderboard.getByRole("columnheader", { name: "Score", exact: true }),
+    leaderboard.getByRole("columnheader", { name: "Points", exact: true }),
   ).toHaveAttribute("aria-sort", "descending");
   // The home leaderboard has no filter controls; a shared link still selects history.
   await expect(leaderboard.getByRole("group", { name: "Period" })).toHaveCount(
@@ -346,7 +330,9 @@ test("discovers projects and one score-ranked homepage leaderboard", async ({
   const pointValues = await leaderboard
     .locator("tbody tr td:nth-child(3)")
     .allTextContents();
-  const totals = pointValues.map((value) => Number(value.replaceAll(",", "")));
+  const totals = pointValues.map((value) =>
+    Number.parseInt(value.replaceAll(",", ""), 10),
+  );
   expect(totals.length).toBeGreaterThan(0);
   expect(totals).toEqual([...totals].sort((a, b) => b - a));
   const firstLogin = await leaderboard
@@ -960,6 +946,123 @@ test("reaches and reads older inbox notifications without losing the page", asyn
   await expect(page.locator(".inbox-item")).toHaveCount(100);
 });
 
+test("the inbox keeps read, acknowledged and email outcomes distinct and puts email settings after the notices", async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  const notice = (
+    i: number,
+    emailDelivery: string | undefined,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    eventKey: `project-revision:delivery:${i}`,
+    kind: "project_revision",
+    subject: `delivery-${i}`,
+    detail: null,
+    actionPath: "/projects/eliza",
+    sourceAt: `2026-10-22T0${i}:00:00.000Z`,
+    createdAt: `2026-10-22T0${i}:00:00.000Z`,
+    readAt: i % 2 === 0 ? null : "2026-10-22T09:00:00.000Z",
+    ...(emailDelivery ? { emailDelivery } : {}),
+    ...extra,
+  });
+  const notifications = [
+    notice(1, "sent"),
+    notice(2, "delivered"),
+    notice(3, "failed"),
+    notice(4, "uncertain"),
+    notice(5, "queued"),
+    notice(6, undefined),
+    {
+      ...notice(7, "sent"),
+      eventKey: "security-case:case-0001:triage",
+      kind: "security_case",
+      subject: "case-0001",
+      actionPath: "/security",
+      acknowledgedAt: null,
+    },
+  ];
+  await page.route(/\/api\/v1\/notifications(?:\?.*)?$/u, (route) =>
+    route.fulfill({
+      json: { notifications, unread: 3, nextCursor: null },
+    }),
+  );
+  await page.route("**/api/v1/notifications/email", (route) =>
+    route.fulfill({ json: { enabled: false, availability: "unverified" } }),
+  );
+  await page.goto("/inbox", { waitUntil: "networkidle" });
+  const item = (subject: string) =>
+    page.locator(".inbox-item", { hasText: subject });
+  await expect(item("delivery-1").locator(".inbox-delivery")).toHaveText(
+    "Email: sent",
+  );
+  await expect(item("delivery-1").locator(".inbox-state")).toHaveText("Read");
+  await expect(item("delivery-2").locator(".inbox-delivery")).toHaveText(
+    "Email: delivered",
+  );
+  await expect(item("delivery-2").locator(".inbox-state")).toHaveText("Unread");
+  await expect(item("delivery-3").locator(".inbox-delivery")).toHaveText(
+    "Email: failed",
+  );
+  await expect(item("delivery-4").locator(".inbox-delivery")).toHaveText(
+    "Email: uncertain",
+  );
+  await expect(item("delivery-5").locator(".inbox-delivery")).toHaveText(
+    "Email: queued",
+  );
+  await expect(item("delivery-6").locator(".inbox-delivery")).toHaveCount(0);
+  // A private notice stays generic: the provider-accepted email does not
+  // stand in for the explicit acknowledgment.
+  const security = item("case-0001");
+  await expect(security.locator(".inbox-delivery")).toHaveText("Email: sent");
+  await expect(
+    security.getByRole("button", { name: /^Acknowledge:/u }),
+  ).toBeVisible();
+  const preferences = page.getByRole("region", { name: "Email preferences" });
+  await expect(preferences).toContainText(
+    "does not use your GitHub profile email, so retrying will not add one",
+  );
+  await expect(
+    preferences.getByRole("button", { name: "Retry email preferences" }),
+  ).toHaveCount(0);
+  // Optional settings come after the notices and their actions.
+  const order = await page.evaluate(() => {
+    const list = document.querySelector(".inbox-list");
+    const settings = document.querySelector(
+      "[aria-labelledby='inbox-email-heading']",
+    );
+    return list && settings
+      ? list.compareDocumentPosition(settings) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      : 0;
+  });
+  expect(order).toBeGreaterThan(0);
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
+  await page.screenshot({
+    path: test.info().outputPath("inbox-delivery-states.png"),
+    fullPage: true,
+  });
+  await page.unroute("**/api/v1/notifications/email");
+  await page.route("**/api/v1/notifications/email", (route) =>
+    route.fulfill({ json: { enabled: false, availability: "unavailable" } }),
+  );
+  await page.reload({ waitUntil: "networkidle" });
+  await expect(
+    preferences.getByRole("button", { name: "Retry email preferences" }),
+  ).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("an admin leaves an unset reward asset unchanged until choosing it", async ({
   page,
 }) => {
@@ -1047,7 +1150,7 @@ test("an admin leaves an unset reward asset unchanged until choosing it", async 
   await expect(changes).toContainText("listingTier");
 });
 
-test("project standings and sponsor links keep the intended destination", async ({
+test("project pages omit full standings and sponsor links keep their destination", async ({
   page,
 }) => {
   await page.goto("/projects/eliza", { waitUntil: "networkidle" });
@@ -1055,14 +1158,7 @@ test("project standings and sponsor links keep the intended destination", async 
     name: "Full standings",
     exact: true,
   });
-  await expect(standings).toHaveAttribute("href", /project=eliza/u);
-  await standings.click();
-  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
-    "Leaderboard",
-  );
-  await expect(page.getByLabel("Project", { exact: true })).toHaveValue(
-    "eliza",
-  );
+  await expect(standings).toHaveCount(0);
   await page.goto("/sponsors", { waitUntil: "networkidle" });
   await expect(
     page.getByRole("link", { name: "Eliza", exact: true }),

@@ -450,6 +450,98 @@ test("owner revisions publish presentation at once, rescan skill inputs and appl
   expect(budget.body.error).toBe("financial_change_restricted");
 });
 
+test("an owner revision cannot record a vault; a reviewed admin revision can", async () => {
+  const { persistence, call, create } = registry();
+  await create("open-registry", "example/open-registry");
+  const current = await persistence.getProject("open-registry");
+  if (current?.manifest.reward.kind !== "monthly-pool")
+    throw new Error("monthly reward expected");
+  // An unverified vault record on an unfunded project: the funding page
+  // offers a deposit for every recorded vault, so this must never publish.
+  const withVault = {
+    ...current.manifest,
+    reward: { ...current.manifest.reward, feeBasisPoints: 200 },
+    escrow: {
+      schemaVersion: "1",
+      effectiveCycle: "2026-11",
+      chain: "ethereum",
+      feeBasisPoints: 200,
+      withdrawalFeeBasisPoints: 200,
+      feeMode: "deduct-from-gross",
+      deployments: [
+        {
+          network: "ethereum" as const,
+          vault: "0x1000000000000000000000000000000000000001",
+          programId: null,
+          upgradeAuthority: null,
+          projectPda: null,
+          networkDomain: null,
+          asset: "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48",
+          owner: "0x2000000000000000000000000000000000000002",
+          identityAuthority: "0x3000000000000000000000000000000000000003",
+          feeRecipient: "0x4000000000000000000000000000000000000004",
+          deploymentTransaction: `0x${"ab".repeat(32)}`,
+          sourceCommit: "0123456789abcdef0123456789abcdef01234567",
+          codeSha256: "ab".repeat(32),
+          bindingDelaySeconds: "60",
+          rotationDelaySeconds: null,
+          factory: "0x5000000000000000000000000000000000000005",
+          factoryCodeSha256: "cd".repeat(32),
+          registrar: "0x6000000000000000000000000000000000000006",
+        },
+      ],
+    },
+  };
+  const owner = await call("PUT", "projects/open-registry", OWNER, {
+    manifest: withVault,
+    expectedRevision: current.revision,
+  });
+  expect(owner.status).toBe(422);
+  expect(owner.body).toEqual({
+    error: "financial_change_restricted",
+    message:
+      "Vault records do not change through owner self-service; a reviewed admin revision records a verified vault",
+  });
+  expect((await persistence.getProject("open-registry"))?.manifest.escrow).toBe(
+    undefined,
+  );
+  // The reviewed admin exception path still records the vault.
+  const admin = await call(
+    "PUT",
+    "admin/projects/open-registry/manifest",
+    ADMIN,
+    {
+      manifest: withVault,
+      expectedRevision: current.revision,
+      reason: "Record the reviewed Ethereum vault",
+    },
+  );
+  expect(admin.status).toBe(200);
+  const recorded = await persistence.getProject("open-registry");
+  expect(recorded?.manifest.escrow?.deployments).toEqual(
+    withVault.escrow.deployments,
+  );
+  // The owner may not change the recorded vault either.
+  if (!recorded) throw new Error("project expected");
+  const changed = await call("PUT", "projects/open-registry", OWNER, {
+    manifest: {
+      ...recorded.manifest,
+      escrow: {
+        ...withVault.escrow,
+        deployments: [
+          {
+            ...withVault.escrow.deployments[0],
+            vault: "0x7000000000000000000000000000000000000007",
+          },
+        ],
+      },
+    },
+    expectedRevision: recorded.revision,
+  });
+  expect(changed.status).toBe(422);
+  expect(changed.body.error).toBe("financial_change_restricted");
+});
+
 test("a payout exclusion starts with the next UTC month on every revision path", async () => {
   const { persistence, call, create, deps } = registry();
   await create("open-registry", "example/open-registry");

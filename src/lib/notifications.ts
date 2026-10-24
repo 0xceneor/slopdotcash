@@ -32,6 +32,22 @@ export const NOTIFICATION_KINDS = [
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
+/**
+ * The recipient-visible email outcome of one notice (PRD section 9). `sent`
+ * means the provider accepted the message, never that it reached an inbox;
+ * only independent receipt evidence makes it `delivered`. `uncertain` is a
+ * send whose outcome is unknown until it is reconciled.
+ */
+export const EMAIL_DELIVERY_STATES = [
+  "queued",
+  "sent",
+  "delivered",
+  "failed",
+  "uncertain",
+] as const;
+
+export type EmailDelivery = (typeof EMAIL_DELIVERY_STATES)[number];
+
 export interface Notification {
   /** Stable source event identity; a replay of the event reuses it. */
   eventKey: string;
@@ -50,6 +66,8 @@ export interface Notification {
   readAt: string | null;
   /** Security-event acknowledgment is separate from the inbox read state. */
   acknowledgedAt?: string | null;
+  /** Present only when an email delivery for this notice exists. */
+  emailDelivery?: EmailDelivery;
 }
 
 export interface NotificationsResponse {
@@ -90,7 +108,9 @@ function isNotification(value: unknown): value is Notification {
     (n.readAt === null || isTimestamp(n.readAt)) &&
     (n.acknowledgedAt === undefined ||
       n.acknowledgedAt === null ||
-      isTimestamp(n.acknowledgedAt))
+      isTimestamp(n.acknowledgedAt)) &&
+    (n.emailDelivery === undefined ||
+      EMAIL_DELIVERY_STATES.includes(n.emailDelivery as EmailDelivery))
   );
 }
 
@@ -217,5 +237,21 @@ export function notificationAction(n: Notification): string {
       return "Open payouts";
     case "wallet_changed":
       return "Review wallets";
+  }
+}
+
+/** One plain label for the email outcome; read and acknowledged stay separate. */
+export function emailDeliveryLabel(state: EmailDelivery): string {
+  switch (state) {
+    case "queued":
+      return "Email: queued";
+    case "sent":
+      return "Email: sent";
+    case "delivered":
+      return "Email: delivered";
+    case "failed":
+      return "Email: failed";
+    case "uncertain":
+      return "Email: uncertain";
   }
 }

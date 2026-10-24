@@ -99,9 +99,10 @@ function setup() {
     event,
     rows,
     sent,
-    advance: () => {
-      now = new Date(now.getTime() + 60_000);
+    advance: (ms = 60_000) => {
+      now = new Date(now.getTime() + ms);
     },
+    now: () => now,
     unavailable: () => {
       available = false;
     },
@@ -223,6 +224,132 @@ test("optional-mail ambiguity retries only with attempt-bound independent eviden
   await dispatchActivityMail(h.mail);
   expect(h.rows()[0].state).toBe("exhausted");
   expect(h.rows()[0].attempts).toBe(5);
+  h.sqlite.close();
+});
+
+test("an essential notice retries a not-yet-effective destination on a bounded schedule; optional mail does not", async () => {
+  const h = setup();
+  const initial = await h.call("GET");
+  await h.call("POST", {
+    enabled: true,
+    destinationVersion: initial.body.destinationVersion,
+  });
+  // The operator record exists but takes effect in ten minutes.
+  h.mail.config.recipients["101"].verifiedAt = new Date(
+    h.now().getTime() + 600_000,
+  ).toISOString();
+  h.event("optional-before-effective");
+  h.event("wallet-before-effective", "wallet_changed");
+  await dispatchActivityMail(h.mail);
+  expect(h.sent).toHaveLength(0);
+  const states = () =>
+    h.sqlite
+      .query(
+        "SELECT essential,state,attempts FROM activity_notification_outbox ORDER BY essential",
+      )
+      .all();
+  expect(states()).toEqual([
+    { essential: 0, state: "suppressed", attempts: 1 },
+    { essential: 1, state: "retrying", attempts: 1 },
+  ]);
+  // Not due yet: the one-minute backoff holds the next attempt.
+  await dispatchActivityMail(h.mail);
+  expect(states()[1]).toEqual({ essential: 1, state: "retrying", attempts: 1 });
+  for (const wait of [60_000, 120_000, 240_000]) {
+    h.advance(wait);
+    await dispatchActivityMail(h.mail);
+  }
+  expect(h.sent).toHaveLength(0);
+  expect(states()[1]).toEqual({ essential: 1, state: "retrying", attempts: 4 });
+  h.advance(480_000);
+  await dispatchActivityMail(h.mail);
+  expect(h.sent).toHaveLength(1);
+  expect(h.sent[0]).toContain("security notice");
+  expect(states()[1]).toEqual({
+    essential: 1,
+    state: "provider-accepted",
+    attempts: 5,
+  });
+  h.sqlite.close();
+});
+
+test("an essential notice exhausts after five non-send attempts and an absent record is suppressed", async () => {
+  const h = setup();
+  h.mail.config.recipients["101"].verifiedAt = new Date(
+    h.now().getTime() + 86_400_000,
+  ).toISOString();
+  h.event("wallet-never-effective", "wallet_changed");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await dispatchActivityMail(h.mail);
+    h.advance(3_600_000);
+  }
+  await dispatchActivityMail(h.mail);
+  expect(h.rows()[0]).toMatchObject({ state: "exhausted", attempts: 5 });
+  const events = h.sqlite
+    .query(
+      "SELECT state FROM activity_notification_delivery_events ORDER BY id",
+    )
+    .all();
+  expect(events).toEqual([
+    { state: "retrying" },
+    { state: "retrying" },
+    { state: "retrying" },
+    { state: "retrying" },
+    { state: "exhausted" },
+  ]);
+  h.sqlite
+    .query(
+      "INSERT INTO notifications(event_key,recipient_github_id,kind,subject,action_path,source_at,created_at) VALUES ('wallet-claim:absent','303','wallet_changed','base','/account#wallets',?,?)",
+    )
+    .run(h.now().toISOString(), h.now().toISOString());
+  await dispatchActivityMail(h.mail);
+  expect(
+    h.sqlite
+      .query(
+        "SELECT state,attempts FROM activity_notification_outbox WHERE recipient_github_id='303'",
+      )
+      .get(),
+  ).toEqual({ state: "suppressed", attempts: 1 });
+  expect(h.sent).toHaveLength(0);
+  h.sqlite.close();
+});
+
+test("opt-out cancels optional mail that is waiting for a reconciled retry", async () => {
+  const h = setup();
+  const initial = await h.call("GET");
+  await h.call("POST", {
+    enabled: true,
+    destinationVersion: initial.body.destinationVersion,
+  });
+  h.event("retry-then-opt-out");
+  h.mail.sendEmail = async () => {
+    throw new Error("unknown transport outcome");
+  };
+  await dispatchActivityMail(h.mail);
+  const row = h.rows()[0];
+  expect(row.state).toBe("ambiguous");
+  expect(
+    await reconcileSecurityMail(
+      h.mail,
+      {
+        deliveryId: row.id,
+        attempt: 1,
+        destinationDigest: row.destination_digest,
+        outcome: "not-accepted",
+        evidenceReference: "provider-negative-receipt",
+      },
+      "activity",
+    ),
+  ).toBe(true);
+  expect(h.rows()[0].state).toBe("retrying");
+  expect((await h.call("POST", { enabled: false })).status).toBe(200);
+  expect(h.rows()[0].state).toBe("suppressed");
+  h.mail.sendEmail = async (_from, _to, mime) => {
+    h.sent.push(mime);
+  };
+  h.advance(3_600_000);
+  await dispatchActivityMail(h.mail);
+  expect(h.sent).toHaveLength(0);
   h.sqlite.close();
 });
 

@@ -1643,14 +1643,17 @@ export function penaltyProjectOf(repository: string): string {
 
 /**
  * Binds each unreversed feed debit to a closed, unmerged pull request of the
- * census. GitHub, not the feed, supplies the author and the closure month. A
- * debit for a pull request outside the census (closed before the window, or
- * reopened) is not applied. A debit whose recorded author differs from the
- * GitHub author fails the snapshot instead of debiting another person.
+ * census. GitHub supplies the author; the debit keeps the UTC month that
+ * Slopbot recorded once when it closed the pull request, so a later reopen and
+ * close never moves it to another month (PRD section 7). A debit for a pull
+ * request outside the census (currently open), or recorded outside the
+ * scoring window, is not applied. A debit whose recorded author differs from
+ * the GitHub author fails the snapshot instead of debiting another person.
  */
 function publishedPenalties(
   records: readonly PenaltyFeedRecord[],
   closed: readonly PullRequestRecord[],
+  window: { from: string; to: string },
 ): PublishedPenalty[] {
   const census = new Map(closed.map((pull) => [pull.id, pull]));
   const seen = new Set<string>();
@@ -1666,7 +1669,9 @@ function publishedPenalties(
       typeof record.tableVersion !== "string" ||
       !/^slopbot-penalties-v[1-9][0-9]*$/u.test(record.tableVersion) ||
       !Number.isSafeInteger(record.debitThirds) ||
-      record.debitThirds < 1
+      record.debitThirds < 1 ||
+      !isUtcIsoTimestamp(record.recordedAt) ||
+      record.period !== record.recordedAt.slice(0, 7)
     )
       throw new Error("Penalty feed record is malformed");
     if (seen.has(record.itemNodeId))
@@ -1675,6 +1680,12 @@ function publishedPenalties(
     const pull = census.get(record.itemNodeId);
     if (!pull?.closedAt || pull.mergedAt !== null || !pull.author) continue;
     if (isBotActor(pull.author)) continue;
+    const recordedAt = parseIsoTime(record.recordedAt);
+    if (
+      recordedAt < parseIsoTime(window.from) ||
+      recordedAt >= parseIsoTime(window.to)
+    )
+      continue;
     if (githubUserIdFromNodeId(pull.author.id) !== record.authorGithubId)
       throw new Error(
         `Penalty author does not match the GitHub author of ${pull.url}`,
@@ -1683,7 +1694,7 @@ function publishedPenalties(
       id: `${pull.id}:penalty`,
       actor: pull.author,
       repository: repositoryIdFromUrl(pull.url),
-      occurredAt: pull.closedAt,
+      occurredAt: new Date(recordedAt).toISOString(),
       category: record.category,
       tableVersion: record.tableVersion,
       debitThirds: record.debitThirds,
@@ -4627,6 +4638,7 @@ function createSnapshotWithReviewCutoff(
   const penalties = publishedPenalties(
     input.penalties ?? [],
     closedUnmergedPullRequests,
+    { from: input.windowFrom, to: input.windowTo },
   );
   const deductions = penaltyDeductions(
     publishedLedger,
@@ -4803,16 +4815,21 @@ function assertPositiveInteger(
   }
 }
 
+function isUtcIsoTimestamp(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) &&
+    Number.isFinite(Date.parse(value)) &&
+    new Date(value).toISOString().slice(0, 19) === value.slice(0, 19)
+  );
+}
+
 function assertIsoTimestamp(
   value: unknown,
   path: string,
 ): asserts value is string {
   assertString(value, path);
-  if (
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value) ||
-    !Number.isFinite(Date.parse(value)) ||
-    new Date(value).toISOString().slice(0, 19) !== value.slice(0, 19)
-  ) {
+  if (!isUtcIsoTimestamp(value)) {
     throw new Error(`${path} must be a UTC ISO-8601 timestamp`);
   }
 }

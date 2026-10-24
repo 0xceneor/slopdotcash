@@ -713,8 +713,8 @@ p {
   text-wrap: balance;
 }
 
-.hero-switch-sizer,
-.hero-typewriter {
+.hero-typewriter,
+.hero-switch-sizer {
   grid-area: 1 / 1;
 }
 
@@ -725,10 +725,6 @@ p {
 .hero-typewriter {
   position: relative;
   align-self: start;
-}
-
-.hero-mobile-action {
-  display: none;
 }
 
 .hero-typewriter-caret {
@@ -1575,8 +1571,7 @@ small {
   justify-content: center;
 }
 
-.command-box button,
-.manifest-preview button {
+.command-box button {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -1590,8 +1585,7 @@ small {
   font-weight: 700;
 }
 
-.command-box button svg,
-.manifest-preview button svg {
+.command-box button svg {
   width: 14px;
   height: 14px;
 }
@@ -1993,43 +1987,6 @@ small {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.manifest-preview {
-  min-width: 0;
-  border-radius: var(--radius);
-  overflow: hidden;
-  background: var(--band);
-  color: var(--band-ink);
-}
-
-.manifest-preview > div {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 14px 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-  color: #aaa398;
-  font-size: 13px;
-}
-
-.manifest-preview textarea {
-  width: 100%;
-  height: 680px;
-  overflow: auto;
-  margin: 0;
-  padding: 22px;
-  border: 0;
-  outline-offset: -4px;
-  background: transparent;
-  color: inherit;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  resize: none;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
 .agent-handoff {
   display: flex;
   align-items: end;
@@ -2379,15 +2336,6 @@ small {
     font-size: clamp(36px, 11.5vw, 52px);
     letter-spacing: -0.04em;
     line-height: 0.9;
-  }
-
-  .hero-typewriter {
-    display: none;
-  }
-
-  .hero-mobile-action {
-    display: block;
-    grid-area: 1 / 1;
   }
 
   .hero-copy {
@@ -3748,8 +3696,7 @@ small {
   font-size: 14px;
 }
 
-.proposal-advanced,
-.manifest-preview {
+.proposal-advanced {
   min-width: 0;
   padding: 14px 18px;
   border: 1px solid var(--line-strong);
@@ -3762,22 +3709,12 @@ small {
   gap: 16px;
 }
 
-.proposal-advanced summary,
-.manifest-preview summary {
+.proposal-advanced summary {
   min-height: 44px;
   display: flex;
   align-items: center;
   font-weight: 700;
   cursor: pointer;
-}
-
-.manifest-preview textarea {
-  width: 100%;
-  height: 420px;
-  margin-top: 12px;
-  font-family: var(--brand-font-data);
-  font-size: 13px;
-  resize: vertical;
 }
 
 .checkbox-field {
@@ -3861,7 +3798,6 @@ small {
   margin: 0;
 }
 
-.handoff-alternatives,
 .wizard-actions,
 .proposal-reset {
   display: flex;
@@ -3870,7 +3806,6 @@ small {
   gap: 10px;
 }
 
-.handoff-alternatives span,
 .proposal-reset span {
   color: var(--muted);
   font-size: 14px;
@@ -5041,4 +4976,114 @@ small {
 
 .owner-award-list dd {
   margin: 0;
+}
+
+/* Compact owner setup checks; text and icons both communicate state. */
+.owner-section.project-setup-status {
+  display: block;
+}
+.project-setup-status > .handoff-actions {
+  margin: 16px 0;
+}
+
+.setup-checks {
+  margin: 1.5rem 0 0;
+  border: 1px solid var(--input-border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.setup-check {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  padding: 18px 20px;
+}
+.setup-check + .setup-check {
+  border-top: 1px solid var(--input-border);
+}
+.setup-check dt {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  flex-wrap: wrap;
+}
+.setup-check dt > svg {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+.setup-check dd {
+  margin: 0;
+}
+.setup-check small,
+.setup-funding-note {
+  color: var(--muted);
+  font-size: 0.875rem;
+  font-weight: 400;
+}
+.setup-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+.setup-badge svg {
+  flex-shrink: 0;
+}
+.setup-badge--ready {
+  color: #b4e4c1;
+  background: #1a3022;
+}
+.setup-badge--pending {
+  color: #ded8cc;
+  background: #2c2923;
+}
+.setup-badge--warning {
+  color: #ffce91;
+  background: #38291b;
+}
+.setup-check--funding {
+  align-items: flex-start;
+}
+.setup-check--funding dd {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.setup-funding-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.setup-details {
+  margin-top: 16px;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+.setup-details summary {
+  cursor: pointer;
+  width: fit-content;
+  padding: 6px 0;
+}
+.setup-details dt {
+  font-weight: 600;
+  margin-top: 12px;
+}
+.setup-details dd {
+  margin: 4px 0 0;
+}
+@media (max-width: 480px) {
+  .setup-check {
+    padding: 16px;
+  }
+  .setup-check--funding dd {
+    align-items: flex-start;
+    width: 100%;
+  }
 }

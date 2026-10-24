@@ -114,7 +114,7 @@ test("Money received standings preserve unavailable data and recover on retry", 
   ).toBe(true);
   await page.screenshot({ path: info.outputPath("payments-unavailable.png") });
   // Other metrics remain usable while the independent payment source fails.
-  await standings.getByRole("button", { name: "Score", exact: true }).click();
+  await standings.getByRole("button", { name: "Points", exact: true }).click();
   await expect(standings.locator("tbody tr").first()).toBeVisible();
   await expect(
     standings.locator("tbody tr").first().locator("td").last(),
@@ -249,9 +249,9 @@ test("global standings still accept project, sort and contributor filters", asyn
     standings.getByRole("row").filter({ hasText: "synthetic-slop" }),
   ).toBeVisible();
   await expect(page).toHaveURL(/q=synthetic-slop/);
-  await standings.getByRole("button", { name: "Score", exact: true }).click();
+  await standings.getByRole("button", { name: "Points", exact: true }).click();
   await expect(
-    standings.getByRole("columnheader", { name: "Score", exact: true }),
+    standings.getByRole("columnheader", { name: "Points", exact: true }),
   ).toHaveAttribute("aria-sort", "descending");
   await standings
     .getByRole("button", { name: "Money received", exact: true })

@@ -9,7 +9,6 @@ import {
 } from "./lib/payments/monthly-allocation";
 import { createProjectView, type ProjectView } from "./lib/project-view";
 import { findProject, type ProjectDefinition } from "./lib/projects.mjs";
-import { formatThirds } from "./lib/reviewer-leaders";
 import type { CycleIndexState } from "./lib/use-cycle-index";
 import type { DataState } from "./lib/use-snapshot";
 import {
@@ -254,7 +253,7 @@ function ArchivedCycleLeaderboard({ cycle }: { cycle: CycleIndexEntry }) {
             <thead>
               <tr className="leader-row archived-leader-head">
                 <th scope="col">Contributor</th>
-                <th scope="col">Score</th>
+                <th scope="col">Points</th>
                 {cycle.kind === "external-prize-share" ? (
                   <th scope="col">External prize share</th>
                 ) : (
@@ -280,9 +279,9 @@ function ArchivedCycleLeaderboard({ cycle }: { cycle: CycleIndexEntry }) {
                     </Link>
                   </th>
                   <td>
-                    {formatThirds(
-                      contributor.scoreThirds ?? contributor.score * 3,
-                    )}
+                    {(
+                      (contributor.scoreThirds ?? contributor.score * 3) * 10
+                    ).toLocaleString()}
                   </td>
                   {cycle.kind === "external-prize-share" ? (
                     <td>{(contributor.sharePartsPerMillion ?? 0) / 10_000}%</td>

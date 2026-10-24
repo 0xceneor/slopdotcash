@@ -132,6 +132,33 @@ export async function recordDelivery(
   ]);
 }
 
+/**
+ * A claimed attempt that made no provider call is a definite non-send, so a
+ * retry cannot duplicate mail. Backoff doubles from one minute, and the fifth
+ * attempt exhausts. A thrown send is never routed here: it stays ambiguous
+ * until independent evidence reconciles it.
+ */
+export async function retryWithoutProviderCall(
+  deps: Pick<SecurityMailDependencies, "db" | "now">,
+  row: Pick<Delivery, "id" | "attempts">,
+  channel: "security" | "activity" = "security",
+): Promise<"retrying" | "exhausted"> {
+  const state = row.attempts + 1 >= MAX_ATTEMPTS ? "exhausted" : "retrying";
+  await deps.db
+    .prepare(
+      `UPDATE ${channel}_notification_outbox SET next_attempt_at = ? WHERE id = ?`,
+    )
+    .bind(
+      new Date(
+        deps.now().getTime() + Math.min(3600, 60 * 2 ** row.attempts) * 1000,
+      ).toISOString(),
+      row.id,
+    )
+    .run();
+  await recordDelivery(deps, row, state, null, channel);
+  return state;
+}
+
 export async function destinationDigest(value: object): Promise<string> {
   return sha256Hex(JSON.stringify(value));
 }
@@ -231,20 +258,7 @@ export async function dispatchSecurityMail(
     }
     const destination = deps.config.recipients[row.recipient_github_id];
     if (!destination || Date.parse(destination.verifiedAt) > now.getTime()) {
-      // No provider call occurred: retry is safe and bounded.
-      const state = row.attempts + 1 >= MAX_ATTEMPTS ? "exhausted" : "retrying";
-      await deps.db
-        .prepare(
-          "UPDATE security_notification_outbox SET next_attempt_at = ? WHERE id = ?",
-        )
-        .bind(
-          new Date(
-            now.getTime() + Math.min(3600, 60 * 2 ** row.attempts) * 1000,
-          ).toISOString(),
-          row.id,
-        )
-        .run();
-      await recordDelivery(deps, row, state);
+      const state = await retryWithoutProviderCall(deps, row);
       if (state === "exhausted") await escalate(deps, row);
       continue;
     }

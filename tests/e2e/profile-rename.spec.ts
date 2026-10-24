@@ -105,13 +105,13 @@ test("a renamed contributor keeps archived cycles", async ({ page }, info) => {
   });
   const pastCycle = history.getByRole("link");
   await expect(pastCycle).toHaveAttribute("href", "/cycles/eliza/2026-07");
-  await expect(pastCycle).toContainText("7 score");
+  await expect(pastCycle).toContainText("210 points");
   await expect(pastCycle).toContainText("$1");
-  // July Eliza events are replaced by the archived 7, plus 10 from Delta
-  // Star. Resolving identity must not recalculate or double-count the score.
+  // Historical accepted work stays on its archived project record. The
+  // separate aggregate score no longer appears beside canonical Points.
   await expect(
     page.getByTitle("Closed cycles and ledger events outside those cycles"),
-  ).toHaveText("17");
+  ).toHaveCount(0);
   await pastCycle.focus();
   await expect(pastCycle).toBeFocused();
   await page.keyboard.press("Enter");
@@ -144,7 +144,7 @@ test("a different actor reusing an old login does not inherit its history", asyn
   );
   await expect(
     page.getByTitle("Closed cycles and ledger events outside those cycles"),
-  ).toHaveText("10");
+  ).toHaveCount(0);
   await expect(
     page.getByRole("heading", { name: current.login, exact: true }),
   ).toBeVisible();
@@ -181,7 +181,7 @@ test("an inactive new owner does not inherit archived records or wallet lookups"
   ).toBeVisible();
   await expect(
     page.getByTitle("Closed cycles and ledger events outside those cycles"),
-  ).toHaveText("17");
+  ).toHaveCount(0);
   expect(walletRequests).toEqual(["/api/v1/wallet-claims/actors/1/current"]);
 });
 
@@ -197,7 +197,7 @@ test("a directory-verified historical contributor keeps archived links", async (
   ).toBeVisible();
   await expect(
     page.getByTitle("Closed cycles and ledger events outside those cycles"),
-  ).toHaveText("7");
+  ).toHaveCount(0);
 });
 
 test("historical names alone do not identify a current contributor or wallet", async ({
@@ -384,13 +384,15 @@ for (const staleMembership of [false, true]) {
         await expect(page.getByRole("status")).toContainText(
           "could not be verified",
         );
-        await expect(page.getByText("points", { exact: true })).toHaveCount(0);
+        await expect(
+          page.getByText("total points", { exact: true }),
+        ).toHaveCount(0);
         expect(walletRequests).toEqual([]);
         return;
       }
       await expect(
         page
-          .getByText("points", { exact: true })
+          .getByText("total points", { exact: true })
           .locator("..")
           .locator("strong"),
       ).toHaveText("5");
@@ -495,10 +497,10 @@ for (const scenario of [
           page.getByTitle(
             "Closed cycles and ledger events outside those cycles",
           ),
-        ).toHaveText("7");
+        ).toHaveCount(0);
         await expect(
           page
-            .getByText("points", { exact: true })
+            .getByText("total points", { exact: true })
             .locator("..")
             .locator("strong"),
         ).toHaveText("5");
@@ -510,7 +512,9 @@ for (const scenario of [
           page.getByRole("heading", { name: "Past cycles" }),
         ).toHaveCount(0);
         await expect(page.getByText(/Past wallet/)).toHaveCount(0);
-        await expect(page.getByText("points", { exact: true })).toHaveCount(0);
+        await expect(
+          page.getByText("total points", { exact: true }),
+        ).toHaveCount(0);
         await expect(
           page.getByTitle(
             "Closed cycles and ledger events outside those cycles",

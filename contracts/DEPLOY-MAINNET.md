@@ -500,8 +500,9 @@ separately. Attach the report to the release issue.
 
 1. Open a pull request that changes only this network's value in
    `mainnet-execution.mjs` to `true` and updates
-   `mainnet-execution.test.ts` to match. Link the audit, the testnet evidence
-   and the readiness report from step 3.3.
+   `mainnet-execution.test.ts` to match. Link the owner's audit waiver (PRD
+   section 11, "External reviews"), the testnet evidence and the readiness
+   report from step 3.3.
 2. The repository owner reviews and merges it (PAY-05). Deploy the attester
    Worker from that reviewed commit only.
 3. Run the readiness report again. `factory`, `attester` and `rpc` must
@@ -510,7 +511,9 @@ separately. Attach the report to the release issue.
 ### 3.5 First payout and reconciliation
 
 1. Approve one small award on one project of this network through the normal
-   review flow. Wait for the contributor's wallet binding and its delay.
+   review flow. Wait for the contributor's wallet binding. It activates
+   immediately; the binding delay is zero (PRD section 11, "Contract
+   timelocks").
 2. The executor of the project, or a permissionless executor, submits the
    payment with its own relayer key. Slop does not submit it, and does not
    send a manual transfer with any key.

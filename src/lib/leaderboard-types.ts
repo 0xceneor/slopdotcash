@@ -336,19 +336,24 @@ export interface PenaltyFeedRecord {
   category: string;
   tableVersion: string;
   debitThirds: number;
+  /** The UTC month (YYYY-MM) Slopbot recorded once for the debit. */
+  period: string;
+  /** When Slopbot recorded the close; its UTC month is `period`. */
   recordedAt: string;
 }
 
 /**
  * A debit bound to a closed, unmerged pull request in the snapshot census.
- * GitHub supplies the author and the closure time; the debit reduces only
- * that actor's score for the same project and UTC month, never below zero.
+ * GitHub supplies the author; Slopbot's recorded close time supplies the
+ * month. The debit reduces only that actor's score for the same project and
+ * UTC month, never below zero.
  */
 export interface PublishedPenalty {
   id: string;
   actor: GitHubActor;
   repository: RepositoryId;
-  /** GitHub's closure time; its UTC month is the debited month. */
+  /** Slopbot's recorded close time; its UTC month is the debited month. A
+   * later reopen and close on GitHub never changes it. */
   occurredAt: string;
   category: string;
   tableVersion: string;

@@ -281,7 +281,7 @@ function validateEscrowPolicy(value, feeBasisPoints) {
     !/^\d{4}-(?:0[1-9]|1[0-2])$/.test(value.effectiveCycle) ||
     !isEscrowChain(value.chain) ||
     value.feeBasisPoints !== feeBasisPoints ||
-    // Escrow v2 (PRD section 18): the unused-fund withdrawal fee equals the
+    // Escrow v2 (PRD section 6): the unused-fund withdrawal fee equals the
     // 2% payout fee, floor(gross / 50) per withdrawal (#907). The contracts
     // enforce both.
     value.withdrawalFeeBasisPoints !== ESCROW_WITHDRAWAL_FEE_BASIS_POINTS ||
@@ -392,8 +392,9 @@ function validateEscrowPolicy(value, feeBasisPoints) {
     )
       throw new TypeError("Escrow program does not match the network");
     // The owner proposes and the rotation authority confirms a new identity
-    // authority; the notice period gives every binding made with a stolen
-    // key time to be vetoed. Base fixes 7 days in the factory contract.
+    // authority. The production rotation delay is zero (PRD section 11,
+    // "Contract timelocks"), so a rotation gives no veto window for bindings
+    // made with a stolen key. EVM contracts fix it at zero.
     if (
       chainFamily(value.chain) === "solana" &&
       (typeof deployment.rotationDelaySeconds !== "string" ||
@@ -405,8 +406,10 @@ function validateEscrowPolicy(value, feeBasisPoints) {
       throw new TypeError(
         "Escrow rotation delay is missing or below the production minimum",
       );
-    // A new or rotated destination binding waits this long before it can pay,
-    // so the owner can cancel a binding made with a stolen identity key.
+    // A new or rotated destination binding waits this long before it can pay.
+    // The production minimum is zero (PRD section 11, "Contract timelocks"),
+    // so a binding made with a stolen identity key can pay before the owner
+    // cancels it.
     if (
       typeof deployment.bindingDelaySeconds !== "string" ||
       !/^(0|[1-9][0-9]{0,9})$/.test(deployment.bindingDelaySeconds) ||

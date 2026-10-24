@@ -42,6 +42,8 @@ Setup has four steps: Repository, Contribution rules, Rewards, Review. Funding t
 
 Projects start without routine admin approval after complete setup, verified GitHub authority, Slopbot installation, and either a successful security scan or the permanent existing-project exemption in section 8. Funding is optional and has a separate status. Contributor skills check for malicious code and injection risks before installation or execution. They report risks and stop the local workflow. Two distinct contributor flags pause the project and remove it from available work. A clean fresh scan reinstates a project that flags alone paused.
 
+The home page always offers the generic agent setup instructions, including when discovery is unavailable or no project is cleared. Project-specific installation still checks project restrictions and clearance.
+
 Generate each skill from its single template and project revision. Check for updates and install only verified updates from the trusted source. Recheck project restrictions and live GitHub before installation, work selection, execution, and submission. Do not install or work on flagged projects. Respect assignments, reviews, drafts, and claims. Do not invent work for points.
 
 PRs explain the problem, requirement, result, implementation choice, and real evidence. Include Made via @slopdotcash and exact provider/model/client. A signed run receipt is optional and never blocks submission. After opening a PR, the contributor skill records a pull_request_opened event that names the PR node ID through the author's own authenticated Slop session (recorded attribution decision, section 11). Follow the effective trace policy; contributors inspect/redact permitted private uploads. Usage totals never set rewards. Economic changes are prospective; preserve funded awards. Agents should, if they can use computer use or browser use, star and fork the repos they are working on.
@@ -74,32 +76,34 @@ A project-operated or permissionless executor submits payments; Slop operates no
 
 Automatically sell project-token fees into USDC when the fee wallet receives them. Convert only received fees, never contributor principal or vault funds. Proceeds return to the same fee wallet. Each network uses one dedicated fee-claim and conversion key, held as a Worker secret and limited by per-run and daily caps; Slop owners manually sweep USDC proceeds to separate owner-controlled software wallets. The owner chose local `.env` custody for those sweep-wallet keys; they are not cold storage and are not held by the conversion Worker. The same key may submit permissionless fee claims on reviewed vaults, moving only accrued fees to that same fee wallet (owner approval, 24 October 2026). It never holds a vault role, withdraws free funds, or touches contributor principal, reserved awards, or payments. Verify the reviewed deployment and configured fee recipient before a claim; unknown or mismatched state must stop the claim. Reconcile uncertain sends before retrying, and verify the fee receipt before conversion. A remote signer may replace it later. Use approved routes and bounded slippage. If a route, liquidity, or signer is unavailable, retain the token and show the conversion as pending or failed. This supersedes the earlier Robinhood USDG conversion target; verify a supported USDC asset and route before activation there.
 
-## 7. Scores, discovery, and clear pages
+## 7. Points, discovery, and clear pages
 
-Keep two measures distinct: Slop Score for accepted-work value and earned points and Money received for verified ordinary payments.
+Use one public Points measure; do not show a separate Slop Score. Accepted-work credits already convert into the points journal and must not be added a second time. Money received remains a separate record of verified payments. Owner decision, 24 October 2026: consolidate score into Points. Only accepted-work points for the project and payment period determine reward shares. Welcome, social, payment-recognition and other participation bonuses never affect payouts. Monthly and lifetime totals are views of the same points history. Preserve funded awards, historical payment calculations and source identifiers; old score fields are compatibility encodings, not another public metric.
 
-Default rankings to Slop Score. Preserve equal ranks, shareable filters, exact periods, and source coverage. Missing data is not zero.
+The homepage cycles the original campaign phrases with typing and deletion (owner decision, 24 October 2026). Keep a stable accessible heading and disable the animation for reduced motion.
 
-Share merge credit with verified commit authors. Do not reward the same commit twice. Credit useful reviews separately; a recipient's own review earns no credit. Split review credit among up to the first five distinct qualifying reviewers, not five comments from the same person. Each pull request's review pool is the sum of the credited reviewers' highest review bands, capped at the pull request's own assessed size credit, with a minimum of one third. Shares follow each reviewer's highest band, with largest-remainder integer thirds; ties go to the earlier first qualifying review, then the review node ID. Every accepted merge earns at least one third, including a merge assessed at zero. This policy applies to work accepted from 2026-11-01T00:00:00Z; earlier work keeps its recorded terms.
+Default rankings to Points. Preserve equal ranks, shareable filters, exact periods, and source coverage. Missing data is not zero.
+
+Share merge credit with verified commit authors. Do not reward the same commit twice. Credit useful reviews separately; a recipient's own review earns no credit. Split review credit among up to the first five distinct qualifying reviewers, not five comments from the same person. Each pull request's review pool is the sum of the credited reviewers' highest review bands, capped at the pull request's own assessed size credit, with a minimum of 10 points. Shares follow each reviewer's highest band, with largest-remainder allocation in 10-point increments; ties go to the earlier first qualifying review, then the review node ID. Every accepted merge earns at least 10 points, including a merge assessed at zero. This policy applies to work accepted from 2026-11-01T00:00:00Z; earlier work keeps its recorded terms.
 
 A useful review can identify a correction or validate the change. A request for changes is not required. Repeated, empty, or duplicate reviews earn no extra credit.
 
-Slopbot determines the value of each PR based on T-shirt sizing and assigns a standardized score.
+Slopbot determines the value of each PR based on T-shirt sizing and assigns accepted-work points.
 
 Record qualifying penalties and reversals once. Reopen, appeal, and retry cannot multiply a debit. Slopbot applies penalties from one published penalty table. The repository owner approves the table once; later changes are prospective. An upheld appeal reverses a penalty once. Penalties include spam, malicious PRs, and PRs that clearly violate the guidelines of the project.
 
-Published penalty table (approved 24 October 2026, in Slop Score thirds):
+Published penalty table (approved 24 October 2026, in points):
 
 | Slopbot category | Action | Debit |
 | --- | --- | --- |
-| Spam | Close | 3 |
-| Scam or malicious | Close; moderator reviews the account | 24 |
-| Clear violation of a quoted project rule | Close | 1 |
+| Spam | Close | 30 |
+| Scam or malicious | Close; moderator reviews the account | 240 |
+| Clear violation of a quoted project rule | Close | 10 |
 | Low quality | Close (closure-eligible authors only) | 0 |
 | Duplicate | Close | 0 |
 | Out of scope | Label | 0 |
 
-A debit reduces only that UTC month's score and never takes it below zero. A debit never changes an approved, scheduled, or paid award. Maintainers and authors outside the closure scope receive no penalty.
+A debit reduces only that UTC month's accepted-work points and never takes it below zero. A debit never changes an approved, scheduled, or paid award. Maintainers and authors outside the closure scope receive no penalty.
 
 Exclude Slopbot from scoring and human rankings.
 
@@ -107,7 +111,7 @@ Use explicit payout exclusions for owners, funded employees, and related parties
 
 Slopbot triages each dispute first and drafts a resolution; a moderator decides escalated disputes. Awards use an honor and reputation model. Owners may change proposed amounts; do not publish adjustment history or require a public explanation. Keep only the records needed for allocation, dispute handling, and payment reconciliation. A ban does not erase a funded award.
 
-Slopbot assesses size and value from the PR and its evidence. Use the existing size bands (integer thirds): micro 1, small 3, medium 9, large 24, XL 45, exceptional 75. Retain the review bands: triage 1, standard 3, deep 9, specialist 24. Keep source, rubric, model, and corrections with the score. Preserve historical awards and prevent duplicate credit across stacked or indirect merges.
+Slopbot assesses size and value from the PR and its evidence. Use these accepted-work point bands: micro 10, small 30, medium 90, large 240, XL 450, exceptional 750. Review bands are triage 10, standard 30, deep 90, specialist 240. These are the existing credit amounts expressed in points, not additional awards. Keep source, rubric, model, and corrections with the points. Preserve historical awards and prevent duplicate credit across stacked or indirect merges.
 
 Make Featured and Community projects easy to find. Show real funding, suitable work, and freshness. Featuring does not guarantee payment.
 

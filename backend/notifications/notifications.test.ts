@@ -4,6 +4,7 @@
 // source event to prove that a replay never adds a second notification.
 import { describe, expect, test } from "bun:test";
 import { readdirSync } from "node:fs";
+import { parseNotificationsResponse } from "../../src/lib/notifications";
 import type { ProjectDefinition } from "../../src/lib/projects.mjs";
 import { sqliteD1 } from "../../tests/sqlite-d1";
 import type { D1TransactionalDatabase as D1Database } from "../d1";
@@ -585,6 +586,68 @@ describe("notifications API", () => {
     ).toBe(403);
     expect(((await call(read([]))) as Response).status).toBe(400);
     expect(((await call(read(["x"]))) as Response).status).toBe(400);
+  });
+
+  test("each notice reports its own email outcome without delivery details", async () => {
+    const { call, sqlite } = setup(APPLICANT);
+    const insert = sqlite.prepare(
+      "INSERT INTO notifications (event_key,recipient_github_id,kind,subject,action_path,source_at,created_at) VALUES (?,?,'project_revision','alpha','/projects/alpha',?,?)",
+    );
+    const outbox = sqlite.prepare(
+      "INSERT INTO activity_notification_outbox (event_key,recipient_github_id,essential,state,next_attempt_at,destination_digest,provider_reference,created_at,updated_at) VALUES (?,?,0,?,?,?,?,?,?)",
+    );
+    const states = [
+      ["provider-accepted", "sent"],
+      ["delivered", "delivered"],
+      ["bounced", "failed"],
+      ["exhausted", "failed"],
+      ["ambiguous", "uncertain"],
+      ["retrying", "queued"],
+      ["suppressed", undefined],
+    ] as const;
+    states.forEach(([state], i) => {
+      const key = `project-revision:alpha:${i}`;
+      insert.run(key, APPLICANT, T, T);
+      outbox.run(
+        key,
+        APPLICANT,
+        state,
+        T,
+        "d".repeat(64),
+        "private-provider-reference",
+        T,
+        T,
+      );
+    });
+    insert.run("project-revision:alpha:no-mail", APPLICANT, T, T);
+    const response = (await call(
+      new Request(`${origin}/api/v1/notifications`),
+    )) as Response;
+    const text = await response.text();
+    expect(text).not.toContain("d".repeat(64));
+    expect(text).not.toContain("private-provider-reference");
+    const body = JSON.parse(text) as {
+      notifications: { eventKey: string; emailDelivery?: string }[];
+    };
+    const byKey = new Map(
+      body.notifications.map((n) => [n.eventKey, n.emailDelivery]),
+    );
+    states.forEach(([, expected], i) => {
+      expect(byKey.get(`project-revision:alpha:${i}`)).toBe(expected);
+    });
+    expect(byKey.has("project-revision:alpha:no-mail")).toBe(true);
+    expect(byKey.get("project-revision:alpha:no-mail")).toBeUndefined();
+    // The wallet notice queued its essential delivery with the source change.
+    expect(byKey.get("wallet-claim:a")).toBe("queued");
+    expect(parseNotificationsResponse(body).notifications).toHaveLength(
+      body.notifications.length,
+    );
+    expect(() =>
+      parseNotificationsResponse({
+        ...body,
+        notifications: [{ ...body.notifications[0], emailDelivery: "opened" }],
+      }),
+    ).toThrow();
   });
 
   test("a signed-out request gets 401 and other paths are not handled", async () => {

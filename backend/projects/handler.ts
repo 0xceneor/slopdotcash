@@ -304,7 +304,8 @@ function monthsThrough(rewardStartAt: string, last: string): string[] {
  * the existing `cycleCaps` override, so the new amount starts with the next
  * cycle. A closed month waits up to three days for its proposal, which reads
  * the newest revision, so the closed months need the override too. Funded money keeps its network,
- * asset, vault and routes, and no separate review budget can be added.
+ * asset, vault and routes, no separate review budget can be added, and no
+ * owner revision adds or changes a vault record.
  */
 function prospectiveFinancialChange(
   previous: ProjectDefinition,
@@ -333,6 +334,22 @@ function prospectiveFinancialChange(
       422,
       "financial_change_restricted",
       "Funding routes and security bounty programs do not change through owner self-service",
+    );
+  // This API does not read chain state, so it cannot verify that a vault
+  // record names a vault from the reviewed factory or program with the
+  // project's owner, asset and purpose. A sponsor deposits to every recorded
+  // vault, so an owner revision never adds or changes one; a reviewed admin
+  // revision records a verified vault.
+  if (
+    !sameValue(
+      previous.escrow?.deployments ?? [],
+      next.escrow?.deployments ?? [],
+    )
+  )
+    fail(
+      422,
+      "financial_change_restricted",
+      "Vault records do not change through owner self-service; a reviewed admin revision records a verified vault",
     );
   const funded =
     before.fundingState === "committed" ||

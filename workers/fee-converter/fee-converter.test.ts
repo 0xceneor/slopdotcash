@@ -1,8 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import { ed25519 } from "@noble/curves/ed25519.js";
+import {
+  PROJECT_DISCRIMINATOR,
+  PROJECT_SIZE,
+  type SolanaEscrowConfig,
+  solanaBase58,
+  solanaVaultAddress,
+} from "../../contracts/solana/adapter";
+import { ata } from "../../contracts/solana/transactions";
 import { parseConfig } from "./config";
 import {
   type ChainClient,
   type ConversionRow,
+  type FeeVault,
   message,
   type PreparedSend,
   type Quote,
@@ -12,6 +22,7 @@ import {
   type SendStatus,
 } from "./core";
 import worker, { runOnce, triggerAt } from "./index";
+import { createSolanaClient, parseTransaction } from "./solana";
 import { sqliteD1 } from "./sqlite-d1";
 import { D1ConversionStore, projectRewardTokens, projectVaults } from "./store";
 
@@ -436,17 +447,31 @@ describe("conversion policy", () => {
     expect(h.rows().map((row) => row.token)).toEqual([TOKEN]);
   });
 
-  test("small amounts are skipped below the minimum and below the gas multiple", async () => {
+  test("small amounts stay pending below the minimum and below the gas multiple", async () => {
     const h = harness({ mode: "dry_run" });
     h.chain.balances.set(TOKEN, 4_000_000n);
-    await runNetwork(h.network, h.deps);
+    const first = await runNetwork(h.network, h.deps);
+    expect(first.records).toMatchObject({ pending: 1, skipped: 0 });
     h.chain.balances.set(TOKEN, 6_000_000n);
     h.chain.quoteFor = (_t, amount) =>
       linearQuote(amount, { gasCostMicro: 700_000n });
     await runNetwork(h.network, h.deps);
-    expect(h.rows().map((row) => row.reason)).toEqual([
-      "below the minimum conversion value",
-      "below the gas-cost multiple",
+    expect(h.rows().map((row) => [row.state, row.reason])).toEqual([
+      ["pending", "below the minimum conversion value"],
+      ["pending", "below the gas-cost multiple"],
+    ]);
+    expect(h.chain.prepared).toBe(0);
+  });
+
+  test("a pending fee converts once a later receipt lifts it over the threshold", async () => {
+    const h = harness();
+    h.chain.balances.set(TOKEN, 4_000_000n);
+    await runNetwork(h.network, h.deps);
+    h.chain.balances.set(TOKEN, 9_000_000n);
+    await runNetwork(h.network, { ...h.deps, trigger: "receipts" });
+    expect(h.rows().map((row) => [row.state, row.amount_in])).toEqual([
+      ["pending", "4000000"],
+      ["submitted", "9000000"],
     ]);
   });
 
@@ -889,6 +914,60 @@ describe("D1 contract", () => {
     );
   });
 
+  test("a pending row needs its reason and is final", async () => {
+    const h = harness({ mode: "dry_run" });
+    const insert = (id: string, reason: string) =>
+      h.sqlite.exec(`INSERT INTO fee_conversions
+        (id, run_id, network, mode, fee_wallet, token, target_token, amount_in, state, reason,
+         created_at, updated_at)
+        VALUES ('${id}', 'run-pending', 'base', 'dry_run', '${WALLET}', '${TOKEN}', '${USDC}', '1',
+         'pending', ${reason}, 'now', 'now')`);
+    expect(() => insert("id-no-reason", "NULL")).toThrow(/CHECK/);
+    insert("id-pending", "'below the minimum conversion value'");
+    expect(() =>
+      h.sqlite.exec(
+        "UPDATE fee_conversions SET state = 'quoted' WHERE id = 'id-pending'",
+      ),
+    ).toThrow(/final/);
+  });
+
+  test("the pending migration keeps every earlier record and its guards", async () => {
+    const { Database } = await import("bun:sqlite");
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const dir = new URL("../../migrations/", import.meta.url);
+    const files = readdirSync(dir)
+      .filter((file) => file.endsWith(".sql"))
+      .sort();
+    const pendingMigration = "0076_fee_conversion_pending.sql";
+    const sqlite = new Database(":memory:");
+    for (const file of files.filter((file) => file < pendingMigration))
+      sqlite.exec(readFileSync(new URL(file, dir), "utf8"));
+    sqlite.exec(`INSERT INTO fee_conversions
+      (id, run_id, network, mode, fee_wallet, token, target_token, amount_in, state, reason,
+       created_at, updated_at)
+      VALUES ('id-earlier', 'run-earlier', 'base', 'dry_run', '${WALLET}', '${TOKEN}', '${USDC}',
+       '7', 'skipped', 'below the minimum conversion value', 'then', 'then')`);
+    sqlite.exec(readFileSync(new URL(pendingMigration, dir), "utf8"));
+    expect(
+      sqlite
+        .query("SELECT id, state, reason, amount_in FROM fee_conversions")
+        .all(),
+    ).toEqual([
+      {
+        id: "id-earlier",
+        state: "skipped",
+        reason: "below the minimum conversion value",
+        amount_in: "7",
+      },
+    ]);
+    expect(() => sqlite.exec("DELETE FROM fee_conversions")).toThrow(
+      /permanent/,
+    );
+    expect(() =>
+      sqlite.exec("UPDATE fee_conversions SET state = 'pending'"),
+    ).toThrow(/final/);
+  });
+
   test("candidate tokens come only from reviewed manifests on the network", async () => {
     const { db, sqlite } = sqliteD1();
     const THIRD = "0x3333333333333333333333333333333333333333";
@@ -929,8 +1008,15 @@ describe("D1 contract", () => {
     expect(
       (await projectRewardTokens(db, "base", ["base-mainnet"])).sort(),
     ).toEqual([TOKEN, OTHER, THIRD].sort());
-    expect((await projectVaults(db, ["base-mainnet"])).sort()).toEqual(
-      [WALLET, THIRD].sort(),
+    expect(
+      (await projectVaults(db, ["base-mainnet"]))
+        .map((entry) => [entry.projectId, entry.payoutPolicy, entry.vault])
+        .sort(),
+    ).toEqual(
+      [
+        ["bounty-only", "security-bounty", THIRD],
+        ["escrowed", "ordinary", WALLET],
+      ].sort(),
     );
     expect(await projectVaults(db, ["ethereum"])).toEqual([]);
     expect(await projectRewardTokens(db, "ethereum", ["ethereum"])).toEqual([
@@ -964,5 +1050,346 @@ describe("D1 contract", () => {
         ),
       ),
     ).toBe("failed. URL: <url>");
+  });
+});
+
+describe("Solana vault fee claims", () => {
+  const SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+  const MAINNET_GENESIS = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
+  const ATA_PROGRAM = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+  const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+  const SYSTEM_PROGRAM = "11111111111111111111111111111111";
+  const key = (n: number) => solanaBase58(new Uint8Array(32).fill(n));
+  const seed = new Uint8Array(32).fill(7);
+  const publicKey = ed25519.getPublicKey(seed);
+  const wallet = solanaBase58(publicKey);
+  const keypair = JSON.stringify([...seed, ...publicKey]);
+  const PROGRAM = key(11);
+  const PROJECT = key(12);
+  const VAULT = solanaVaultAddress(PROGRAM, PROJECT);
+  const VAULT_BALANCE = 50_000_000n;
+  const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+  const unb64 = (text: string) =>
+    Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+
+  function deployment(overrides: Record<string, unknown> = {}) {
+    return {
+      network: "solana-mainnet",
+      vault: VAULT,
+      programId: PROGRAM,
+      upgradeAuthority: key(16),
+      projectPda: PROJECT,
+      networkDomain: "ab".repeat(32),
+      asset: SOLANA_USDC,
+      owner: key(13),
+      identityAuthority: key(14),
+      feeRecipient: wallet,
+      rotationAuthority: key(15),
+      deploymentTransaction: "reviewed",
+      sourceCommit: "a".repeat(40),
+      codeSha256: "c".repeat(64),
+      bindingDelaySeconds: "0",
+      rotationDelaySeconds: "604800",
+      factory: null,
+      factoryCodeSha256: null,
+      registrar: null,
+      ...overrides,
+    };
+  }
+
+  function vault(
+    overrides: Record<string, unknown> = {},
+    payoutPolicy: FeeVault["payoutPolicy"] = "ordinary",
+  ): FeeVault {
+    const record = deployment(overrides);
+    return {
+      vault: record.vault as string,
+      projectId: "solana-project",
+      payoutPolicy,
+      deployment: record,
+    };
+  }
+
+  function projectBytes(accrued: bigint): Uint8Array {
+    const bytes = new Uint8Array(PROJECT_SIZE);
+    bytes.set(
+      Uint8Array.from(PROJECT_DISCRIMINATOR.match(/../g) ?? [], (pair) =>
+        Number.parseInt(pair, 16),
+      ),
+    );
+    new DataView(bytes.buffer).setBigUint64(316, accrued, true);
+    return bytes;
+  }
+
+  function tokenAccount(amount: bigint): Uint8Array {
+    const bytes = new Uint8Array(165);
+    new DataView(bytes.buffer).setBigUint64(64, amount, true);
+    return bytes;
+  }
+
+  /** A Solana RPC that knows one project with accrued fees in USDC. */
+  function solanaChain() {
+    const state = {
+      finalizedAccrued: 10_000_000n,
+      confirmedAccrued: 10_000_000n,
+      unfinalized: false,
+      /** Fee-wallet credit the claim receipt reports; null means the accrued fee. */
+      receipt: null as bigint | null,
+      sent: [] as string[],
+      verified: [] as SolanaEscrowConfig[],
+    };
+    const rpcFetch = (async (_url: string, init?: RequestInit) => {
+      const { method, params } = JSON.parse(String(init?.body)) as {
+        method: string;
+        params: unknown[];
+      };
+      const reply = (result: unknown) =>
+        Response.json({ jsonrpc: "2.0", id: 1, result });
+      switch (method) {
+        case "getAccountInfo":
+          return reply({
+            value: {
+              owner: PROGRAM,
+              data: [b64(projectBytes(state.confirmedAccrued)), "base64"],
+            },
+          });
+        case "getSignaturesForAddress":
+          return reply([
+            {
+              err: null,
+              confirmationStatus: state.unfinalized ? "confirmed" : "finalized",
+            },
+          ]);
+        case "getLatestBlockhash":
+          return reply({
+            value: { blockhash: key(20), lastValidBlockHeight: 500 },
+          });
+        case "getTokenAccountBalance":
+          return Response.json({
+            jsonrpc: "2.0",
+            id: 1,
+            error: { message: "Invalid param: could not find account" },
+          });
+        case "simulateTransaction":
+          return reply({
+            value: {
+              err: null,
+              accounts: [
+                {
+                  data: [b64(tokenAccount(state.confirmedAccrued)), "base64"],
+                },
+              ],
+            },
+          });
+        case "sendTransaction": {
+          const raw = unb64(params[0] as string);
+          state.sent.push(params[0] as string);
+          return reply(solanaBase58(raw.slice(1, 65)));
+        }
+        case "getSignatureStatuses":
+          return reply({
+            value: [{ err: null, confirmationStatus: "confirmed" }],
+          });
+        case "getTransaction": {
+          const credit = state.receipt ?? state.confirmedAccrued;
+          const balance = (owner: string, amount: bigint) => ({
+            owner,
+            mint: SOLANA_USDC,
+            uiTokenAmount: { amount: amount.toString() },
+          });
+          return reply({
+            meta: {
+              err: null,
+              preTokenBalances: [
+                balance(wallet, 0n),
+                balance(PROJECT, VAULT_BALANCE),
+              ],
+              postTokenBalances: [
+                balance(wallet, credit),
+                balance(PROJECT, VAULT_BALANCE - state.confirmedAccrued),
+              ],
+            },
+          });
+        }
+        case "getBlockHeight":
+          return reply(100);
+        default:
+          throw new Error(`unexpected RPC ${method}`);
+      }
+    }) as unknown as typeof fetch;
+    const network = parseConfig({
+      FEE_CONVERTER_MODE: "live",
+      FEE_CONVERTER_NETWORKS: "solana",
+      FEE_WALLET_SOLANA: wallet,
+      ...LIMITS,
+    });
+    const client = (signing: boolean) =>
+      createSolanaClient({
+        config: network.networks[0],
+        limits: network.limits,
+        jupiterApiUrl: "https://jupiter.invalid",
+        jupiterApiKey: null,
+        keypair: signing ? keypair : undefined,
+        fetch: rpcFetch,
+        sleep: async () => {},
+        verifyDeployment: async (escrow) => {
+          state.verified.push(escrow);
+          return projectBytes(state.finalizedAccrued);
+        },
+      });
+    return { state, client, network };
+  }
+
+  function solanaRun(mode: "dry_run" | "live") {
+    const chain = solanaChain();
+    const { db } = sqliteD1();
+    const events: Record<string, unknown>[] = [];
+    let id = 0;
+    const deps: RunDependencies = {
+      mode,
+      trigger: "recovery",
+      limits: chain.network.limits,
+      store: new D1ConversionStore(db),
+      now: () => new Date("2026-10-24T12:00:00Z"),
+      randomId: () => `id-${String(++id).padStart(6, "0")}`,
+      projectTokens: async () => [],
+      projectVaults: async () => [vault()],
+      client: () => chain.client(mode === "live"),
+      log: (event) => events.push(event),
+    };
+    return { ...chain, deps, events, config: chain.network.networks[0] };
+  }
+
+  test("accrued fees are read only after the reviewed deployment verifies", async () => {
+    const { state, client } = solanaChain();
+    const fees = client(false).vaultFees;
+    expect(await fees?.accrued(vault({}, "security-bounty"))).toEqual({
+      asset: SOLANA_USDC,
+      amount: 10_000_000n,
+    });
+    expect(state.verified).toEqual([
+      expect.objectContaining({
+        genesisHash: MAINNET_GENESIS,
+        programId: PROGRAM,
+        projectPda: PROJECT,
+        vault: VAULT,
+        mint: SOLANA_USDC,
+        feeRecipient: wallet,
+        payoutPolicy: "security-bounty",
+      }),
+    ]);
+    state.finalizedAccrued = 0n;
+    expect(await fees?.accrued(vault())).toBeNull();
+  });
+
+  test("another fee recipient, a forged vault or an incomplete record is never claimed", async () => {
+    const { state, client } = solanaChain();
+    const fees = client(true).vaultFees;
+    expect(await fees?.accrued(vault({ feeRecipient: key(40) }))).toBeNull();
+    await expect(fees?.accrued(vault({ vault: key(41) }))).rejects.toThrow(
+      /not the reviewed project's vault address/,
+    );
+    await expect(
+      fees?.accrued(vault({ rotationAuthority: undefined })),
+    ).rejects.toThrow(/lacks rotationAuthority/);
+    await expect(
+      fees?.accrued(vault({ network: "base-mainnet" })),
+    ).rejects.toThrow(/is not Solana/);
+    await expect(fees?.claim(vault({ feeRecipient: key(40) }))).rejects.toThrow(
+      /another fee recipient/,
+    );
+    expect(state.verified).toEqual([]);
+    expect(state.sent).toEqual([]);
+  });
+
+  test("a claim signs only claim_fees into the fee wallet's own token account", async () => {
+    const { state, client } = solanaChain();
+    const { txId } = (await client(true).vaultFees?.claim(vault())) ?? {};
+    expect(state.sent).toHaveLength(1);
+    const raw = unb64(state.sent[0]);
+    const parsed = parseTransaction(raw);
+    expect(parsed.signatureCount).toBe(1);
+    expect(parsed.requiredSignatures).toBe(1);
+    expect(parsed.staticKeys[0]).toBe(wallet);
+    expect(parsed.programs).toEqual([ATA_PROGRAM, PROGRAM]);
+    expect([...parsed.staticKeys].sort()).toEqual(
+      [
+        wallet,
+        ata(SOLANA_USDC, wallet),
+        PROJECT,
+        VAULT,
+        SOLANA_USDC,
+        ATA_PROGRAM,
+        PROGRAM,
+        TOKEN_PROGRAM,
+        SYSTEM_PROGRAM,
+      ].sort(),
+    );
+    const signature = raw.slice(1, 65);
+    expect(
+      ed25519.verify(signature, raw.slice(parsed.messageOffset), publicKey),
+    ).toBe(true);
+    expect(txId).toBe(solanaBase58(signature));
+  });
+
+  test("an unfinalized earlier claim or project transaction blocks a new claim", async () => {
+    const { state, client } = solanaChain();
+    const fees = client(true).vaultFees;
+    state.confirmedAccrued = 0n;
+    await expect(fees?.claim(vault())).rejects.toThrow(
+      /confirmed but not yet finalized/,
+    );
+    state.confirmedAccrued = 10_000_000n;
+    state.unfinalized = true;
+    await expect(fees?.claim(vault())).rejects.toThrow(/not yet finalized/);
+    expect(state.sent).toEqual([]);
+  });
+
+  test("a receipt that does not match the vault fee fails the claim", async () => {
+    const { state, client } = solanaChain();
+    state.receipt = 9_000_000n;
+    await expect(client(true).vaultFees?.claim(vault())).rejects.toThrow(
+      /receipt does not match the vault fee/,
+    );
+  });
+
+  test("a dry run reports the claim and signs nothing", async () => {
+    const run = solanaRun("dry_run");
+    const result = await runNetwork(run.config, run.deps);
+    expect(result.claimed).toBe(0);
+    expect(run.events).toContainEqual(
+      expect.objectContaining({
+        event: "fee_claim_quoted",
+        network: "solana",
+        vault: VAULT,
+        amount: "10000000",
+      }),
+    );
+    expect(run.state.sent).toEqual([]);
+  });
+
+  test("a live run claims once and a rerun finds nothing left to claim", async () => {
+    const run = solanaRun("live");
+    expect((await runNetwork(run.config, run.deps)).claimed).toBe(1);
+    expect(run.events).toContainEqual(
+      expect.objectContaining({ event: "fee_claim_included", vault: VAULT }),
+    );
+    run.state.finalizedAccrued = 0n;
+    run.state.confirmedAccrued = 0n;
+    expect((await runNetwork(run.config, run.deps)).claimed).toBe(0);
+    expect(run.state.sent).toHaveLength(1);
+  });
+
+  test("a fee below the dust threshold keeps accruing in the vault", async () => {
+    const run = solanaRun("live");
+    run.state.finalizedAccrued = 1_000_000n;
+    expect((await runNetwork(run.config, run.deps)).claimed).toBe(0);
+    expect(run.events).toContainEqual(
+      expect.objectContaining({
+        event: "fee_claim_skipped",
+        reason: "below the minimum conversion value",
+      }),
+    );
+    expect(run.state.sent).toEqual([]);
   });
 });

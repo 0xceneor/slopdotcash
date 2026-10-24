@@ -135,7 +135,10 @@ and listing tier, then classifies the change (`src/lib/project-revision-changes.
   month whose proposal has not run yet keeps its amount too; an unfunded project may change its network and asset
   (the open cycle then has no pool, because amounts do not carry over
   between assets), a funded project keeps them, and no separate review
-  budget can be added.
+  budget can be added. An owner revision never adds or changes an
+  `escrow.deployments` record: this API reads no chain state, so it cannot
+  verify the vault, and the funding page offers a deposit for every recorded
+  vault. A reviewed admin revision records a verified vault.
 
 `reward.payoutExclusions` lists owners, funded employees and related parties
 who receive no payout (PRD section 7). Each entry names the immutable GitHub

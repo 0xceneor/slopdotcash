@@ -34,8 +34,9 @@ alias only.
     pay any matured unpaid award before the owner can cancel. Protection rests
     on custody of this key (`docs/security/red-team-2026-10-24.md`). A rotation
     by the registrar replaces the key, and the attester cannot block it. Owner decision of 24 October 2026: after the reviewed contract
-    change and independent audit, it also signs each funded project's monthly
-    allocation root. The contract limits that commitment to the owner's
+    change, it also signs each funded project's monthly
+    allocation root (the owner waived the independent audit, PRD section 11
+    "External reviews"). The contract limits that commitment to the owner's
     monthly cap, one commitment per period, and the owner's opt-out; the
     attester still cannot withdraw, redirect, or pay funds.
   - One fee-wallet hot key per network (PRD TOK-07, MVP-07c, owner decision
@@ -306,7 +307,7 @@ human-gated work, and epics fail closed. Re-read live GitHub before acting.
 The rolling ledger covers a complete 35-day window, publishes exact bounds and
 record counts, and deduplicates immutable GitHub IDs. Exclude bots, self-review,
 post-merge review, and repeated low-value comments. Every accepted merge gets
-at least one-third point. Group split or related pull requests into one work
+at least 10 accepted-work points (one legacy credit-third). Group split or related pull requests into one work
 unit; do not apply account-level caps or diminishing credit.
 
 Unusual useful work may score only through a strict reviewed `evaluations/`
@@ -319,12 +320,15 @@ automatic monthly distribution.
 
 ## Participation points
 
-Slop Points are nonfinancial participation records governed by
+Slop Points are the single contribution and participation unit governed by
 `protocol/points-v1.md`. Welcome and verified X-connection awards are not accepted-work score.
 Verified payout recognition is fixed per recipient/project/cycle, never per dollar
 or transfer. X or Telegram control never confers GitHub, organization, or payment
 authority; a Telegram connection earns no points (PRD SOC-02).
-Never feed points into rewards or settlement. Preserve the append-only journal,
+Only accepted-work points for the project and period determine reward shares;
+never feed welcome, social or payout-recognition bonuses into rewards. Preserve
+historical settlements and compatibility fields without exposing a separate
+score metric. Preserve the append-only journal,
 source coverage, original contribution dates, and distinct recording dates.
 Generated points projections are build outputs; do not edit them by hand.
 
@@ -347,8 +351,9 @@ Automatic monthly payment is the PRD default for every project with funds
 committed in its vault. The owner sets the monthly amount during setup, can
 adjust allocations before execution, and can turn the default off; do not show
 adjustment history or require public reasons. Distribute the current
-allocations at the defined monthly cutoff if the owner has not done so. Define
-the UTC cutoff before activation. Keep internal reconciliation and prevent
+allocations at the monthly cutoff if the owner has not done so. The period is
+the calendar UTC month, starting with 2026-11, and the cutoff is 72 hours after
+the month ends (PRD sections 6 and 11). Keep internal reconciliation and prevent
 manual/automatic duplicate payments. Walletless funded awards remain reserved.
 Private reports are automatic; bounty awards and payouts remain discretionary.
 Slopbot triages disputes first, and a moderator decides escalated disputes.

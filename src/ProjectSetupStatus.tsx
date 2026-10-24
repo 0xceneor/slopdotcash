@@ -1,3 +1,12 @@
+import {
+  Bot,
+  Check,
+  CircleAlert,
+  Clock,
+  KeyRound,
+  ShieldCheck,
+  Wallet,
+} from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "./Link";
 import { checkProjectSetup } from "./lib/project-api";
@@ -19,7 +28,7 @@ const AUTHORITY: Record<
 > = {
   verified: "Confirmed",
   denied: "Not confirmed",
-  retry: "Not checked yet",
+  retry: "Unavailable",
 };
 const INSTALLATION: Record<
   ProjectSetupStatus["checks"]["installation"]["state"],
@@ -28,7 +37,7 @@ const INSTALLATION: Record<
   installed: "Installed",
   missing: "Not installed",
   suspended: "Suspended",
-  retry: "Not checked yet",
+  retry: "Unavailable",
 };
 const SCAN: Record<ProjectSetupStatus["checks"]["scan"]["state"], string> = {
   cleared: "Passed",
@@ -41,13 +50,21 @@ const SCAN: Record<ProjectSetupStatus["checks"]["scan"]["state"], string> = {
   unavailable: "Unavailable",
 };
 
-function fundingText(funding: ProjectSetupStatus["funding"]): string {
-  if (funding.mode === "none")
-    return "None. Contributors still earn Slop Score.";
-  const network =
-    REWARD_ASSET_NETWORKS[funding.network as keyof typeof REWARD_ASSET_NETWORKS]
-      ?.name ?? funding.network;
-  return `${formatMonthlyAmount(funding.monthlyAmountMinor, funding.decimals, funding.symbol)} per month on ${network} · ${funding.state === "committed" ? `in the vault · payments ${funding.payments}` : "deposit funds to start payouts"}`;
+function StatusBadge({
+  label,
+  tone,
+}: {
+  label: string;
+  tone: "ready" | "pending" | "warning";
+}) {
+  const Icon =
+    tone === "ready" ? Check : tone === "pending" ? Clock : CircleAlert;
+  return (
+    <span className={`setup-badge setup-badge--${tone}`}>
+      <Icon size={14} aria-hidden="true" />
+      {label}
+    </span>
+  );
 }
 
 /**
@@ -147,35 +164,132 @@ export function ProjectSetupStatusPanel({
               </button>
             ) : null}
           </div>
-          <dl className="proposal-facts">
-            <div>
-              <dt>GitHub access</dt>
+          <dl className="setup-checks">
+            <div className="setup-check">
+              <dt>
+                <KeyRound size={20} aria-hidden="true" />
+                GitHub access
+              </dt>
               <dd>
-                {AUTHORITY[setup.checks.authority.state]}.{" "}
-                {setup.checks.authority.message}
+                <StatusBadge
+                  label={AUTHORITY[setup.checks.authority.state]}
+                  tone={
+                    setup.checks.authority.state === "verified"
+                      ? "ready"
+                      : "warning"
+                  }
+                />
               </dd>
             </div>
-            <div>
-              <dt>Slopbot</dt>
+            <div className="setup-check">
+              <dt>
+                <Bot size={20} aria-hidden="true" />
+                Slopbot
+              </dt>
               <dd>
-                {INSTALLATION[setup.checks.installation.state]}.{" "}
-                {setup.checks.installation.message}
+                <StatusBadge
+                  label={INSTALLATION[setup.checks.installation.state]}
+                  tone={
+                    setup.checks.installation.state === "installed"
+                      ? "ready"
+                      : "warning"
+                  }
+                />
               </dd>
             </div>
-            <div>
-              <dt>Security scan</dt>
+            <div className="setup-check">
+              <dt>
+                <ShieldCheck size={20} aria-hidden="true" />
+                Security scan
+              </dt>
               <dd>
-                {setup.checks.scan.exempt
-                  ? "Exempt"
-                  : SCAN[setup.checks.scan.state]}
-                . {setup.checks.scan.message}
+                <StatusBadge
+                  label={
+                    setup.checks.scan.exempt
+                      ? "Grandfathered"
+                      : SCAN[setup.checks.scan.state]
+                  }
+                  tone={
+                    setup.checks.scan.exempt ||
+                    setup.checks.scan.state === "cleared"
+                      ? "ready"
+                      : ["queued", "unscanned"].includes(
+                            setup.checks.scan.state,
+                          )
+                        ? "pending"
+                        : "warning"
+                  }
+                />
               </dd>
             </div>
-            <div>
-              <dt>Funding (optional)</dt>
-              <dd>{fundingText(setup.funding)}</dd>
+            <div className="setup-check setup-check--funding">
+              <dt>
+                <Wallet size={20} aria-hidden="true" />
+                Funding <small>Optional</small>
+              </dt>
+              <dd>
+                {setup.funding.mode === "none" ? (
+                  <span className="setup-funding-note">
+                    Not configured · points only
+                  </span>
+                ) : (
+                  <>
+                    <strong>
+                      {formatMonthlyAmount(
+                        setup.funding.monthlyAmountMinor,
+                        setup.funding.decimals,
+                        setup.funding.symbol,
+                      )}{" "}
+                      / month
+                    </strong>
+                    <span className="setup-funding-note">
+                      {REWARD_ASSET_NETWORKS[
+                        setup.funding
+                          .network as keyof typeof REWARD_ASSET_NETWORKS
+                      ]?.name ?? setup.funding.network}
+                    </span>
+                    <span className="setup-funding-badges">
+                      <StatusBadge
+                        label={
+                          setup.funding.state === "committed"
+                            ? "Funded"
+                            : "Deposit needed"
+                        }
+                        tone={
+                          setup.funding.state === "committed"
+                            ? "ready"
+                            : "pending"
+                        }
+                      />
+                      <StatusBadge
+                        label={
+                          setup.funding.payments === "enabled"
+                            ? "Payments on"
+                            : "Payments off"
+                        }
+                        tone={
+                          setup.funding.payments === "enabled"
+                            ? "ready"
+                            : "pending"
+                        }
+                      />
+                    </span>
+                  </>
+                )}
+              </dd>
             </div>
           </dl>
+          <details className="setup-details">
+            <summary>Check details</summary>
+            <dl>
+              <dt>GitHub access</dt>
+              <dd>{setup.checks.authority.message}</dd>
+              <dt>Slopbot</dt>
+              <dd>{setup.checks.installation.message}</dd>
+              <dt>Security scan</dt>
+              <dd>{setup.checks.scan.message}</dd>
+            </dl>
+          </details>
         </>
       )}
       {error ? (

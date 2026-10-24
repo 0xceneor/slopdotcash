@@ -42,11 +42,12 @@ start_validator
 node --test --test-force-exit --test-isolation=none integration/production-delay.e2e.mjs
 stop_validator
 # Reuse the same production build for the funded lifecycle suite. The validator also
-# preloads a Project of the earlier 316-byte layout for the migrate_project check, and a
-# month past its expiry grace for the expire_month check.
+# preloads a Project of the earlier 316-byte layout for the migrate_project check, and
+# monthly states no live validator reaches: a month past its expiry grace and an earlier
+# month that already committed sources.
 read -ra legacy_accounts <<<"$(node integration/legacy-project.mjs)"
-read -ra expired_accounts <<<"$(node integration/expired-month.mjs)"
-start_validator "${legacy_accounts[@]}" "${expired_accounts[@]}"
+read -ra monthly_accounts <<<"$(node integration/monthly-preload.mjs)"
+start_validator "${legacy_accounts[@]}" "${monthly_accounts[@]}"
 bun build adapter.ts --target=node --outfile=.local/adapter.mjs
 bun build funding.ts --target=node --outfile=.local/funding.mjs
 bun build commitment.ts --target=node --outfile=.local/commitment.mjs

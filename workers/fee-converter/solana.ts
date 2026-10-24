@@ -4,20 +4,45 @@
  * signer and fee payer, every top-level program is on a short allowlist, and
  * a simulation must credit the fee wallet's USDC account with at least the
  * signed minimum.
+ *
+ * Vault fee claims (issue #905) call only the escrow program's permissionless
+ * `claim_fees` for a vault named in a reviewed manifest, after the deployment
+ * verifies at finalized commitment and its fee recipient is this fee wallet.
  */
 
 import { ed25519 } from "@noble/curves/ed25519.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { solanaBase58 } from "../../contracts/solana/adapter";
+import {
+  PROJECT_DISCRIMINATOR,
+  PROJECT_SIZE,
+  type SolanaEscrowConfig,
+  solanaAccount,
+  solanaBase58,
+  solanaUint,
+  solanaVaultAddress,
+  verifySolanaDeployment,
+} from "../../contracts/solana/adapter";
+import {
+  ata,
+  concat,
+  createAta,
+  instructionData,
+  message as legacyMessage,
+  TOKEN,
+} from "../../contracts/solana/transactions";
 import { decodeBase58Bytes } from "../../src/lib/base58";
+import { ESCROW_NETWORKS } from "../../src/lib/escrow-policy.mjs";
 import type { Limits, NetworkConfig } from "./config";
 import type {
+  AccruedFees,
   ChainClient,
   ConversionRow,
+  FeeVault,
   PreparedSend,
   Quote,
   QuoteResult,
   SendStatus,
+  VaultFeeClient,
 } from "./core";
 
 export const JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
@@ -50,6 +75,63 @@ export interface SolanaClientOptions {
    * blockhash before signing. The hosted Worker never sets this.
    */
   localBlockhash?: boolean;
+  /**
+   * Unit tests only: stands in for the finalized program, Config and project
+   * verification. The hosted Worker never sets it.
+   */
+  verifyDeployment?: (config: SolanaEscrowConfig) => Promise<Uint8Array>;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Project account offset of `accrued_fees` (contracts/solana/adapter.ts). */
+const ACCRUED_FEES_OFFSET = 316;
+/** Status polls after a claim is broadcast, CLAIM_POLL_MS apart. */
+const CLAIM_POLLS = 60;
+const CLAIM_POLL_MS = 2_000;
+
+/**
+ * The reviewed manifest deployment of one Solana vault as the adapter's
+ * escrow config. A missing or malformed field refuses the claim; the cluster
+ * genesis comes from the escrow network registry, never from the record.
+ */
+export function solanaEscrowConfig(
+  entry: FeeVault,
+  rpcUrl: string,
+): SolanaEscrowConfig {
+  const record = entry.deployment;
+  const text = (key: string): string => {
+    const value = record[key];
+    if (typeof value !== "string" || value.length === 0)
+      throw new Error(`reviewed Solana deployment lacks ${key}`);
+    return value;
+  };
+  const network = text("network");
+  const cluster = Object.hasOwn(ESCROW_NETWORKS, network)
+    ? ESCROW_NETWORKS[network as keyof typeof ESCROW_NETWORKS]
+    : undefined;
+  if (cluster?.family !== "solana" || typeof cluster.genesisHash !== "string")
+    throw new Error(`reviewed deployment network ${network} is not Solana`);
+  return {
+    payoutPolicy: entry.payoutPolicy,
+    rpcUrl,
+    genesisHash: cluster.genesisHash,
+    programId: text("programId"),
+    projectPda: text("projectPda"),
+    projectId: entry.projectId,
+    network,
+    networkDomain: text("networkDomain"),
+    vault: text("vault"),
+    mint: text("asset"),
+    owner: text("owner"),
+    identityAuthority: text("identityAuthority"),
+    feeRecipient: text("feeRecipient"),
+    rotationAuthority: text("rotationAuthority"),
+    codeSha256: text("codeSha256"),
+    upgradeAuthority:
+      record.upgradeAuthority === null ? null : text("upgradeAuthority"),
+    bindingDelaySeconds: text("bindingDelaySeconds"),
+    rotationDelaySeconds: text("rotationDelaySeconds"),
+  };
 }
 
 function compactLength(bytes: Uint8Array, offset: number): [number, number] {
@@ -296,7 +378,7 @@ export function createSolanaClient(
     return quote;
   }
 
-  async function usdcBalance(account: string): Promise<bigint> {
+  async function tokenAccountBalance(account: string): Promise<bigint> {
     const result = await rpc<{ value: { amount: string } } | null>(
       "getTokenAccountBalance",
       [account, { commitment: "confirmed" }],
@@ -308,8 +390,226 @@ export function createSolanaClient(
     return result ? BigInt(result.value.amount) : 0n;
   }
 
+  async function broadcast(rawTx: string): Promise<void> {
+    const raw = fromBase64(rawTx);
+    const parsed = parseTransaction(raw);
+    const expected = solanaBase58(
+      raw.slice(parsed.messageOffset - 64, parsed.messageOffset),
+    );
+    const result = await rpc<string>("sendTransaction", [
+      rawTx,
+      { encoding: "base64", skipPreflight: true, maxRetries: 5 },
+    ]);
+    if (result !== expected) throw new Error("Broadcast signature mismatch");
+  }
+
+  const verifyDeployment = options.verifyDeployment ?? verifySolanaDeployment;
+  const sleep =
+    options.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+
+  /**
+   * Verifies the reviewed deployment at finalized commitment (cluster,
+   * program bytes, the pinned Config and every project authority, including
+   * that the project's fee recipient is the reviewed one) and returns its
+   * config with the finalized project bytes. Null when the vault pays another
+   * fee recipient. Unknown or mismatched state throws, so no claim follows.
+   */
+  async function verifiedVault(entry: FeeVault) {
+    const escrow = solanaEscrowConfig(entry, config.rpcUrl);
+    // Another wallet's fees are not this run's to claim.
+    if (escrow.feeRecipient !== wallet) return null;
+    if (solanaVaultAddress(escrow.programId, escrow.projectPda) !== entry.vault)
+      throw new Error("vault is not the reviewed project's vault address");
+    if (entry.vault !== escrow.vault)
+      throw new Error("vault differs from its reviewed deployment record");
+    const project = await verifyDeployment(escrow);
+    return { escrow, project };
+  }
+
+  async function confirmedAccrued(escrow: SolanaEscrowConfig) {
+    const info = await rpc<{ value: unknown }>("getAccountInfo", [
+      escrow.projectPda,
+      { commitment: "confirmed", encoding: "base64" },
+    ]);
+    if (info.value === null) throw new Error("project account missing");
+    return solanaUint(
+      solanaAccount(
+        info.value,
+        escrow.programId,
+        PROJECT_SIZE,
+        PROJECT_DISCRIMINATOR,
+      ),
+      ACCRUED_FEES_OFFSET,
+    );
+  }
+
+  /** Token balance change of `owner`'s `mint` accounts in one transaction. */
+  const delta = (
+    meta: {
+      preTokenBalances: TokenBalance[];
+      postTokenBalances: TokenBalance[];
+    },
+    owner: string,
+    mint: string,
+  ) => {
+    const total = (balances: TokenBalance[]) =>
+      balances
+        .filter((b) => b.owner === owner && b.mint === mint)
+        .reduce((sum, b) => sum + BigInt(b.uiTokenAmount.amount), 0n);
+    return total(meta.postTokenBalances) - total(meta.preTokenBalances);
+  };
+
+  const vaultFees: VaultFeeClient = {
+    async accrued(entry): Promise<AccruedFees | null> {
+      const verified = await verifiedVault(entry);
+      if (!verified) return null;
+      const amount = solanaUint(verified.project, ACCRUED_FEES_OFFSET);
+      return amount === 0n ? null : { asset: verified.escrow.mint, amount };
+    },
+
+    // The claim pays one signature fee, priced like a swap's. The idempotent
+    // associated-account creation, when it runs, funds a rent deposit that
+    // stays in the fee wallet's own token account; it is not a network fee.
+    async claimCostMicro() {
+      return limits.solanaFeeMicro;
+    },
+
+    async claim(entry) {
+      if (!seed)
+        throw new Error("Signing is disabled without a fee-wallet key");
+      const verified = await verifiedVault(entry);
+      if (!verified) throw new Error("vault pays another fee recipient");
+      const { escrow } = verified;
+      const amount = solanaUint(verified.project, ACCRUED_FEES_OFFSET);
+      if (amount === 0n) throw new Error("no accrued fees to claim");
+      // Reconcile before sending. A claim confirmed but not yet finalized
+      // has already zeroed the confirmed counter, and any unfinalized project
+      // transaction (an earlier claim among them) waits for finality. A send
+      // lost before confirmation cannot land after its blockhash expires,
+      // well inside the 15-minute recovery interval, and the program moves
+      // only the counter's current value, so a repeat never pays twice.
+      if ((await confirmedAccrued(escrow)) === 0n)
+        throw new Error("an earlier claim is confirmed but not yet finalized");
+      const recent = await rpc<
+        { err: unknown; confirmationStatus: string | null }[]
+      >("getSignaturesForAddress", [
+        escrow.projectPda,
+        { commitment: "confirmed", limit: 25 },
+      ]);
+      if (
+        recent.some(
+          (s) => s.err === null && s.confirmationStatus !== "finalized",
+        )
+      )
+        throw new Error("an earlier project transaction is not yet finalized");
+
+      const feeAccount = ata(escrow.mint, wallet);
+      const latest = await rpc<{
+        value: { blockhash: string; lastValidBlockHeight: number };
+      }>("getLatestBlockhash", [{ commitment: "confirmed" }]);
+      const body = legacyMessage(wallet, latest.value.blockhash, [
+        createAta(wallet, escrow.mint, wallet),
+        {
+          program: escrow.programId,
+          accounts: [
+            { key: escrow.projectPda, write: true },
+            { key: escrow.mint, write: false },
+            { key: escrow.vault, write: true },
+            { key: feeAccount, write: true },
+            { key: TOKEN, write: false },
+          ],
+          data: instructionData("claim_fees"),
+        },
+      ]);
+      const before = await tokenAccountBalance(feeAccount);
+      const simulation = await rpc<{
+        value: {
+          err: unknown;
+          accounts: ({ data: [string, string] } | null)[] | null;
+        };
+      }>("simulateTransaction", [
+        toBase64(concat(Uint8Array.of(1), new Uint8Array(64), body)),
+        {
+          encoding: "base64",
+          sigVerify: false,
+          replaceRecentBlockhash: false,
+          commitment: "confirmed",
+          accounts: { encoding: "base64", addresses: [feeAccount] },
+        },
+      ]);
+      if (simulation.value.err !== null)
+        throw new Error(
+          `claim simulation failed: ${JSON.stringify(simulation.value.err).slice(0, 200)}`,
+        );
+      const simulated = simulation.value.accounts?.[0];
+      if (!simulated)
+        throw new Error("claim simulation did not credit the fee account");
+      const data = fromBase64(simulated.data[0]);
+      if (
+        new DataView(data.buffer, data.byteOffset).getBigUint64(64, true) -
+          before <
+        amount
+      )
+        throw new Error("claim simulation credited less than the accrued fee");
+
+      const signature = ed25519.sign(body, seed);
+      const txId = solanaBase58(signature);
+      await broadcast(toBase64(concat(Uint8Array.of(1), signature, body)));
+      for (let poll = 0; ; poll++) {
+        const statuses = await rpc<{
+          value: ({ err: unknown; confirmationStatus: string | null } | null)[];
+        }>("getSignatureStatuses", [
+          [txId],
+          { searchTransactionHistory: true },
+        ]);
+        const status = statuses.value[0];
+        if (status?.err) throw new Error(`claim ${txId} failed on chain`);
+        if (
+          status?.confirmationStatus === "confirmed" ||
+          status?.confirmationStatus === "finalized"
+        )
+          break;
+        if (!status) {
+          const height = await rpc<number>("getBlockHeight", [
+            { commitment: "finalized" },
+          ]);
+          if (height > latest.value.lastValidBlockHeight)
+            throw new Error(`claim ${txId} expired before inclusion`);
+        }
+        if (poll + 1 >= CLAIM_POLLS)
+          throw new Error(`claim ${txId} not confirmed in time`);
+        await sleep(CLAIM_POLL_MS);
+      }
+
+      // Verify the receipt before conversion: the vault paid the fee wallet
+      // at least the accrued fee, and exactly what the vault lost.
+      const transaction = await rpc<{
+        meta: {
+          err: unknown;
+          preTokenBalances: TokenBalance[];
+          postTokenBalances: TokenBalance[];
+        };
+      } | null>("getTransaction", [
+        txId,
+        {
+          commitment: "confirmed",
+          encoding: "json",
+          maxSupportedTransactionVersion: 0,
+        },
+      ]);
+      if (!transaction || transaction.meta.err !== null)
+        throw new Error(`claim ${txId} receipt is not available`);
+      const received = delta(transaction.meta, wallet, escrow.mint);
+      const paid = -delta(transaction.meta, escrow.projectPda, escrow.mint);
+      if (received < amount || received !== paid)
+        throw new Error(`claim ${txId} receipt does not match the vault fee`);
+      return { txId };
+    },
+  };
+
   return {
     address: () => (seed ? wallet : null),
+    vaultFees,
 
     async balance(token) {
       const result = await rpc<{
@@ -426,7 +726,7 @@ export function createSolanaClient(
         throw new Error("Jupiter returned an invalid block height");
 
       const usdcAccount = associatedTokenAccount(wallet, usdc);
-      const before = await usdcBalance(usdcAccount);
+      const before = await tokenAccountBalance(usdcAccount);
       const simulation = await rpc<{
         value: {
           err: unknown;
@@ -472,18 +772,7 @@ export function createSolanaClient(
       };
     },
 
-    async broadcast(rawTx) {
-      const raw = fromBase64(rawTx);
-      const parsed = parseTransaction(raw);
-      const expected = solanaBase58(
-        raw.slice(parsed.messageOffset - 64, parsed.messageOffset),
-      );
-      const result = await rpc<string>("sendTransaction", [
-        rawTx,
-        { encoding: "base64", skipPreflight: true, maxRetries: 5 },
-      ]);
-      if (result !== expected) throw new Error("Broadcast signature mismatch");
-    },
+    broadcast,
 
     async status(row: ConversionRow): Promise<SendStatus> {
       const statuses = await rpc<{
@@ -512,16 +801,10 @@ export function createSolanaClient(
           },
         ]);
         if (!transaction) return { kind: "pending" };
-        const total = (balances: TokenBalance[]) =>
-          balances
-            // The row's own target, so a send reconciles against the asset
-            // it was signed for.
-            .filter((b) => b.owner === wallet && b.mint === row.targetToken)
-            .reduce((sum, b) => sum + BigInt(b.uiTokenAmount.amount), 0n);
-        const delta =
-          total(transaction.meta.postTokenBalances) -
-          total(transaction.meta.preTokenBalances);
-        return { kind: "finalized", amountOut: delta > 0n ? delta : 0n };
+        // The row's own target, so a send reconciles against the asset it
+        // was signed for.
+        const credit = delta(transaction.meta, wallet, row.targetToken);
+        return { kind: "finalized", amountOut: credit > 0n ? credit : 0n };
       }
       const height = await rpc<number>("getBlockHeight", [
         { commitment: "finalized" },

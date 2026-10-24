@@ -1602,7 +1602,7 @@ test("an applicant publishes an application stored before self-service setup wit
   ).toHaveCount(1);
   await expect(
     page.locator("#your-projects li", { hasText: project.name }),
-  ).toContainText(`${project.name} · paused`);
+  ).toContainText(`${project.name} · Paused`);
   const again = await page.request.post(
     `/api/v1/project-applications/${applicationId}/publish`,
     {

@@ -52,7 +52,10 @@ Use the operator's issue or PR when supplied. Otherwise read the repository's
 `AGENTS.md`, `CONTRIBUTING.md` and README, then inspect live issues, open PRs,
 maintainer comments and recent merges.
 `node <skill-directory>/scripts/live-report.mjs` gives a read-only heuristic
-inventory. Respect assignees, linked PRs and active work; no platform claim is
+inventory; it holds back assigned or claimed work, issues with an open closing
+PR (draft or not), draft PRs, PRs with a review request, approval or requested
+changes on the current head. Respect assignments, reviews, drafts, claims and
+active work, and re-read each on GitHub before acting; no platform claim is
 created. Choose work inside `approvedScope` and `supportedTasks`: a reproduced
 defect, or a change a maintainer asked for. Do not choose coverage-only tests,
 preference refactors, unapproved features, placeholders or mock-only proof. If

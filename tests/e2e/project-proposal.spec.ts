@@ -6,7 +6,6 @@
  * application, and the browser never calls api.github.com.
  */
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
@@ -202,10 +201,8 @@ function observe(page: Page) {
 }
 
 test("drafts a project through the setup steps and creates it without an admin", async ({
-  context,
   page,
 }) => {
-  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const errors = observe(page);
   await routeGitHub(page);
   // The registry API itself runs in the @registry lane; here it is a fixture
@@ -335,18 +332,90 @@ test("drafts a project through the setup steps and creates it without an admin",
   await expect(contributorSkill).toHaveValue(
     /the requirement it serves[\s\S]+the implementation choice/u,
   );
-  const manifestDetails = page.locator("details.manifest-preview");
-  await expect(manifestDetails).not.toHaveAttribute("open", "");
   const handoff = page.getByRole("button", { name: /Create project/u });
+  await expect(
+    page.getByRole("button", { name: "Download manifest" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Copy manifest" })).toHaveCount(
+    0,
+  );
+  await expect(page.getByLabel("Project manifest JSON")).toHaveCount(0);
+  expect(
+    (
+      await new AxeBuilder({ page })
+        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+        .analyze()
+    ).violations,
+  ).toEqual([]);
 
-  const [download] = await Promise.all([
-    page.waitForEvent("download"),
-    page.getByRole("button", { name: "Download manifest" }).click(),
+  // Creation posts the reviewed manifest, criteria and monthly amount, then
+  // shows one setup status with the next action.
+  await handoff.click();
+  await expect(
+    page.getByRole("heading", { name: "Project created" }),
+  ).toBeVisible();
+  await expect(page.locator(".proposal-submitted")).toContainText(
+    "Referred by @example-referrer.",
+  );
+  await expect(
+    page.getByRole("heading", {
+      name: "Setup status: Waiting for the security scan",
+    }),
+  ).toBeVisible();
+  const setupPanel = page.locator(".project-setup-status");
+  await expect(setupPanel.locator(".setup-badge")).toContainText([
+    "Confirmed",
+    "Installed",
+    "Queued",
   ]);
-  const path = await download.path();
-  if (!path) throw new Error("Missing manifest download");
-  const manifest = JSON.parse(await readFile(path, "utf8"));
-  expect(manifest).toMatchObject({
+  const details = setupPanel.locator("details");
+  await expect(details).not.toHaveAttribute("open", "");
+  await details.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(details).toHaveAttribute("open", "");
+  await expect(details).toContainText("@example-maintainer has admin access");
+  await expectAccessibleSetup();
+  async function expectAccessibleSetup() {
+    expect(
+      (
+        await new AxeBuilder({ page })
+          .include(".project-setup-status")
+          .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
+          .analyze()
+      ).violations,
+    ).toEqual([]);
+  }
+  await page.screenshot({
+    path: test.info().outputPath("setup-status-badges.png"),
+    fullPage: true,
+  });
+  expect(submitted).toMatchObject({
+    referrer: "example-referrer",
+    // Whole USDC units; the server stores them in the asset's base units.
+    monthlyAmount: "2500",
+    manifest: {
+      id: "open-protein",
+      status: "paused",
+      listingTier: "community",
+      skill: {
+        id: "contribute-to-open-protein",
+        sourcePath: "skills/project-contributor-template",
+      },
+      reviewSkill: {
+        id: "review-open-protein-contributions",
+        sourcePath: "skills/project-reviewer-template",
+      },
+      contribution: {
+        approvedScope: "Accepted pull requests with verified tests.",
+        maintainerNotes: "",
+      },
+    },
+  });
+  // The posted manifest carries the verified repository, steward, reward and
+  // license facts the wizard read from GitHub.
+  const posted = (submitted as { manifest: Record<string, unknown> } | null)
+    ?.manifest;
+  expect(posted).toMatchObject({
     id: "open-protein",
     status: "paused",
     authority: {
@@ -374,63 +443,7 @@ test("drafts a project through the setup steps and creates it without an admin",
     },
     repositories: [{ id: "example/open-protein", integrationBranch: "trunk" }],
   });
-
-  await page.evaluate(() => {
-    Object.defineProperty(navigator, "clipboard", { value: undefined });
-  });
-  await page.getByRole("button", { name: "Copy manifest" }).click();
-  await expect(
-    page.getByRole("button", { name: "Copy unavailable; select the manifest" }),
-  ).toBeVisible();
-  await expect(manifestDetails).toHaveAttribute("open", "");
-  await expect(page.getByLabel("Project manifest JSON")).toHaveValue(
-    /"monthlyCapMinor": "2500000000"/u,
-  );
-  expect(
-    (
-      await new AxeBuilder({ page })
-        .withTags(["wcag2a", "wcag2aa", "wcag21aa"])
-        .analyze()
-    ).violations,
-  ).toEqual([]);
-
-  expect(manifest.reward).not.toHaveProperty("reviewBudget");
-  // Creation posts the reviewed manifest, criteria and monthly amount, then
-  // shows one setup status with the next action.
-  await handoff.click();
-  await expect(
-    page.getByRole("heading", { name: "Project created" }),
-  ).toBeVisible();
-  await expect(page.locator(".proposal-submitted")).toContainText(
-    "Referred by @example-referrer.",
-  );
-  await expect(
-    page.getByRole("heading", {
-      name: "Setup status: Waiting for the security scan",
-    }),
-  ).toBeVisible();
-  expect(submitted).toMatchObject({
-    referrer: "example-referrer",
-    // Whole USDC units; the server stores them in the asset's base units.
-    monthlyAmount: "2500",
-    manifest: {
-      id: "open-protein",
-      status: "paused",
-      listingTier: "community",
-      skill: {
-        id: "contribute-to-open-protein",
-        sourcePath: "skills/project-contributor-template",
-      },
-      reviewSkill: {
-        id: "review-open-protein-contributions",
-        sourcePath: "skills/project-reviewer-template",
-      },
-      contribution: {
-        approvedScope: "Accepted pull requests with verified tests.",
-        maintainerNotes: "",
-      },
-    },
-  });
+  expect(posted?.reward).not.toHaveProperty("reviewBudget");
 
   // The draft persists on this device without credentials and never claims
   // to be a listing. Clearing it needs a second confirmation.
@@ -568,13 +581,21 @@ test("Robinhood Chain drafts a USDG escrow manifest", async ({ page }) => {
   await page.getByRole("button", { name: "Next: Review" }).click();
   const preview = page.getByRole("article", { name: "Listing preview" });
   await expect(preview).toContainText("1,000 USDG on Robinhood Chain · pledge");
-  const [download] = await Promise.all([
-    page.waitForEvent("download"),
-    page.getByRole("button", { name: "Download manifest" }).click(),
-  ]);
-  const path = await download.path();
-  if (!path) throw new Error("Missing manifest download");
-  const manifest = JSON.parse(await readFile(path, "utf8"));
+  let manifest: Record<string, unknown> | null = null;
+  await routeCreation(page, (body) => {
+    manifest = body.manifest;
+    return {
+      status: 201,
+      json: {
+        project: { id: "open-protein", revision: 1, referrer: null },
+        setup: CREATED_SETUP,
+      },
+    };
+  });
+  await page.getByRole("button", { name: /Create project/u }).click();
+  await expect(
+    page.getByRole("heading", { name: "Project created" }),
+  ).toBeVisible();
   // USDG is the one Robinhood Chain asset, and the chain is escrow only.
   expect(manifest).toMatchObject({
     reward: {
@@ -815,13 +836,11 @@ for (const [name, expectedId] of [
     await page.getByLabel("Goal").fill("Make protein research reproducible.");
     await page.getByRole("button", { name: "Next: Rewards" }).click();
     await page.getByRole("button", { name: "Next: Review" }).click();
-    const [download] = await Promise.all([
-      page.waitForEvent("download"),
-      page.getByRole("button", { name: "Download manifest" }).click(),
-    ]);
-    const path = await download.path();
-    if (!path) throw new Error("Missing manifest download");
-    const manifest = JSON.parse(await readFile(path, "utf8"));
+    await page.getByRole("button", { name: "Create project" }).click();
+    await expect(
+      page.getByRole("heading", { name: "Project created" }),
+    ).toBeVisible();
+    const manifest = submitted as Record<string, unknown>;
     expect(() => validate(manifest)).not.toThrow();
     expect(manifest).toMatchObject({
       id: expectedId,
@@ -833,12 +852,6 @@ for (const [name, expectedId] of [
       },
       reviewSkill: { id: `review-${expectedId}-contributions` },
     });
-    expect(download.suggestedFilename()).toBe(`${expectedId}-project.json`);
-    await page.getByRole("button", { name: "Create project" }).click();
-    await expect(
-      page.getByRole("heading", { name: "Project created" }),
-    ).toBeVisible();
-    expect(submitted).toEqual(manifest);
     expect(errors).toEqual([]);
   });
 }

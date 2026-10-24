@@ -223,6 +223,7 @@ export async function fetchProjectPenalties(
         category: row.category,
         tableVersion: row.table_version,
         debitThirds: row.debit_thirds,
+        period: row.period,
         recordedAt: row.recorded_at,
       });
     }

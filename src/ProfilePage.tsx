@@ -13,7 +13,6 @@ import {
   type ScoreOpportunity,
 } from "./lib/leaderboard";
 import { findProject, type ProjectDefinition } from "./lib/projects.mjs";
-import { formatThirds } from "./lib/reviewer-leaders";
 import type { DataState } from "./lib/use-snapshot";
 import { ProfilePoints, useProfileMembership } from "./Points";
 import {
@@ -25,7 +24,6 @@ import {
   formatCycleMonth,
   formatDate,
   formatMicroUsdc,
-  formatScore,
 } from "./Presentation";
 import { useProfiles } from "./Profiles";
 import { RewardValue } from "./ProjectLeaderboard";
@@ -98,10 +96,6 @@ export function ProfilePage({
   const globalLeader = globalLeaders.find(
     (leader) => leader.actor.id === actor.id,
   );
-  const globalRank = globalLeader
-    ? globalLeaders.findIndex((leader) => leader.score === globalLeader.score) +
-      1
-    : null;
   const matches = state.views.flatMap((view) =>
     view.leaders
       .filter((leader) => leader.actor.id === actor.id)
@@ -144,7 +138,7 @@ export function ProfilePage({
   const penalties = (state.snapshot.penalties ?? []).filter(
     (penalty) => penalty.actor.id === actor.id,
   );
-  // The same open-month deductions as the Slop Score shown above.
+  // The same open-month deductions as the accepted-work credits.
   const appliedPenalties = openMonthScores(state.snapshot, state.cycleIndex)
     .deductions.byPenalty;
   const opportunities = actorOpportunities
@@ -156,10 +150,6 @@ export function ProfilePage({
         left.opportunity.id.localeCompare(right.opportunity.id),
     )
     .slice(0, PROFILE_OPPORTUNITY_LIMIT);
-  const score = globalLeader
-    ? formatScore(globalLeader.score)
-    : formatThirds(0);
-  const scoreLabel = "Slop Score";
   const historicalWallet = history.find(({ contributor }) => contributor.wallet)
     ?.contributor.wallet;
   const wallet =
@@ -190,22 +180,8 @@ export function ProfilePage({
         work={events}
         login={login}
         cycles={state.cycleIndex}
-        summary={
-          <>
-            {globalRank !== null ? (
-              <div>
-                <strong>#{globalRank}</strong>
-                <span>all-time rank</span>
-              </div>
-            ) : null}
-            <div>
-              <strong title="Closed cycles and ledger events outside those cycles">
-                {score}
-              </strong>
-              <span>{scoreLabel}</span>
-            </div>
-          </>
-        }
+
+
       >
         {matches.length > 0 ? (
           <section className="profile-card" aria-label="Projects">
@@ -229,9 +205,9 @@ export function ProfilePage({
                       <Link href={`/projects/${view.project.slug}`}>
                         <span className="project-bar-label">
                           <strong>{view.project.name}</strong>
-                          <small title={`Exact score ${leader.scoreThirds}/3`}>
-                            {formatThirds(leader.scoreThirds)} score ·{" "}
-                            <RewardValue leader={leader} view={view} />
+                          <small title="Accepted-work points">
+                            {(leader.scoreThirds * 10).toLocaleString()} points
+                            · <RewardValue leader={leader} view={view} />
                           </small>
                         </span>
                         <span className="project-bar-track" aria-hidden="true">
@@ -271,8 +247,11 @@ export function ProfilePage({
                   {PENALTY_CATEGORY_LABELS[penalty.category] ??
                     penalty.category}{" "}
                   · {formatCycleMonth(penalty.occurredAt.slice(0, 7))} · −
-                  {formatThirds(penalty.debitThirds)} point debit ·{" "}
-                  {formatThirds(appliedPenalties.get(penalty.id) ?? 0)} applied
+                  {(penalty.debitThirds * 10).toLocaleString()} point debit ·{" "}
+                  {(
+                    (appliedPenalties.get(penalty.id) ?? 0) * 10
+                  ).toLocaleString()}{" "}
+                  applied
                 </span>
               </li>
             ))}
@@ -306,7 +285,12 @@ export function ProfilePage({
                   <small>{formatCycleMonth(cycle.cycleId)}</small>
                 </span>
                 <span>
-                  <strong>{contributor.score} score</strong>
+                  <strong>
+                    {(
+                      (contributor.scoreThirds ?? contributor.score * 3) * 10
+                    ).toLocaleString()}{" "}
+                    points
+                  </strong>
                   <small>
                     <span
                       className={`payout-state payout-state-${contributor.state}`}

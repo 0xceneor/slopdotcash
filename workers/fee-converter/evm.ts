@@ -553,7 +553,7 @@ export function createEvmClient(options: EvmClientOptions): ChainClient & {
     },
 
     vaultFees: {
-      async accrued(vault) {
+      async accrued({ vault }) {
         const read = <F extends "accruedFees" | "feeRecipient" | "token">(
           functionName: F,
         ) =>
@@ -580,7 +580,7 @@ export function createEvmClient(options: EvmClientOptions): ChainClient & {
         };
       },
 
-      async claimCostMicro(vault) {
+      async claimCostMicro({ vault }) {
         const [gas, fees] = await Promise.all([
           client.estimateGas({
             account: wallet,
@@ -597,7 +597,7 @@ export function createEvmClient(options: EvmClientOptions): ChainClient & {
         return "noRoute" in priced ? null : priced.amountOut;
       },
 
-      async claim(vault) {
+      async claim({ vault }) {
         // One send at a time: a claim waits until no earlier fee-wallet
         // transaction is pending, so a resend can never race the first.
         const [latest, pending] = await Promise.all([

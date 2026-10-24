@@ -170,13 +170,22 @@ export function EscrowFunding({ project }: { project: ProjectDefinition }) {
           ` Withdrawing unused funds costs ${withdrawalFee}%.`}
       </p>
       {!deployed ? (
-        <p>This project has no vault yet.</p>
+        <p>
+          This project has no vault yet. Deposits and payments are not possible
+          until a project revision records the owner&apos;s vault.
+        </p>
       ) : (
         <>
           <p>
             Use the deposit action below to fund this project. Direct token
             transfers are not credited.
           </p>
+          {project.reward.paymentMode !== "enabled" ? (
+            <p role="note">
+              Payments are disabled for this project. No award is paid from the
+              vault until payments are enabled.
+            </p>
+          ) : null}
           {error ? (
             <p role="alert">{error}</p>
           ) : !vault ? (

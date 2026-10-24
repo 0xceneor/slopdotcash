@@ -1,5 +1,5 @@
 import type { Network } from "./config";
-import type { ConversionRow, ConversionStore } from "./core";
+import type { ConversionRow, ConversionStore, FeeVault } from "./core";
 
 type D1Value = string | number | null;
 interface D1Statement {
@@ -216,25 +216,44 @@ export async function projectRewardTokens(
   ].filter((asset): asset is string => typeof asset === "string");
 }
 
+const BOUNTY_DEPLOYMENTS = "$.securityBounty.settlement.deployments";
+
 /**
- * Ordinary and private bounty vaults named by D1 project manifests on the network's escrow keys.
- * Only these vaults are claimed; a vault is never discovered on chain.
+ * Ordinary and private bounty vaults named by D1 project manifests on the
+ * network's escrow keys, each with its reviewed deployment record. Only these
+ * vaults are claimed; a vault is never discovered on chain.
  */
 export async function projectVaults(
   db: FeeD1Database,
   escrowNetworks: readonly string[],
-): Promise<string[]> {
+): Promise<FeeVault[]> {
   const rows = await db
     .prepare(
-      `SELECT DISTINCT json_extract(d.value, '$.vault') AS vault
+      `SELECT projects.id AS project_id, scope.value AS scope, d.value AS deployment
          FROM projects,
-             json_each('["$.escrow.deployments","$.securityBounty.settlement.deployments"]') AS scope,
+             json_each('["$.escrow.deployments","${BOUNTY_DEPLOYMENTS}"]') AS scope,
              json_each(projects.manifest, scope.value) AS d
-        WHERE json_extract(d.value, '$.network') IN (SELECT value FROM json_each(?))`,
+        WHERE json_extract(d.value, '$.network') IN (SELECT value FROM json_each(?))
+          AND json_type(d.value, '$.vault') = 'text'
+        ORDER BY projects.id, scope.value`,
     )
     .bind(JSON.stringify(escrowNetworks))
-    .all<{ vault: unknown }>();
-  return rows.results
-    .map((row) => row.vault)
-    .filter((vault): vault is string => typeof vault === "string");
+    .all<{ project_id: string; scope: string; deployment: string }>();
+  // One entry per distinct reviewed record. A vault listed with two different
+  // records stays twice, and the chain check refuses the one that is wrong.
+  const vaults = new Map<string, FeeVault>();
+  for (const row of rows.results) {
+    const deployment = JSON.parse(row.deployment) as Record<string, unknown>;
+    const payoutPolicy =
+      row.scope === BOUNTY_DEPLOYMENTS ? "security-bounty" : "ordinary";
+    const key = `${payoutPolicy}\u0000${row.deployment}`;
+    if (vaults.has(key)) continue;
+    vaults.set(key, {
+      vault: deployment.vault as string,
+      projectId: row.project_id,
+      payoutPolicy,
+      deployment,
+    });
+  }
+  return [...vaults.values()];
 }

@@ -43,7 +43,17 @@ import {
   ensureConfig,
   expectedDeployment,
 } from "./deployment.mjs";
-import { EXPIRED_PERIOD, expiredProject } from "./expired-month.mjs";
+import {
+  allocationTree,
+  CROSS_ACTOR,
+  CROSS_GROSS,
+  CROSS_SOURCES,
+  crossProject,
+  EARLIER_PERIOD,
+  EXPIRED_PERIOD,
+  expiredProject,
+  sourceDigest,
+} from "./monthly-preload.mjs";
 
 const { AnchorProvider, Program, BN } = anchor;
 const provider = AnchorProvider.env();
@@ -2349,7 +2359,7 @@ const entriesOf = (names, actor) =>
   names.map((name, i) => ({
     githubUserId: String(actor + i),
     grossMicro: String((names.length - i) * 10_000_000),
-    sourceDigest: Buffer.from(hash(`source:${name}`)).toString("hex"),
+    sourceDigest: sourceDigest(name),
   }));
 const awardAt = (entry) =>
   pda(
@@ -2377,30 +2387,30 @@ async function after(time) {
   return chainTime();
 }
 
-// An admitted month blocks the owner's direct commits while any of its gross is
-// outstanding. The attester signs when it froze the allocation: a leaf whose source the
-// owner consumed by hand before the freeze can never commit, so anyone releases its reserve
-// to free balance. A source consumed after the freeze never releases, so removing an award
-// never becomes a refund. Each leaf settles once.
-test("monthly gate blocks direct commits; only a source consumed before the freeze releases, once", async () => {
-  const { stranger, period, n } = await monthlyPeriod();
-  const ownerCommit = (name, gross = 1) => commit(name, 999, gross);
-  const month = () => monthAt(n);
-  // Enables the monthly path and admits `entries` as frozen at `frozenAt`.
-  async function admit(entries, frozenAt) {
+// Enables the monthly path and admits `entries` as frozen at `frozenAt`. `tree` is the
+// adapter's allocation tree unless a test builds one the adapter refuses.
+const monthlyAdmission = (stranger, period, n) =>
+  async function admit(
+    entries,
+    frozenAt,
+    tree = {
+      root: solanaAllocationRoot(entries),
+      total: solanaAllocationTotal(entries),
+      proof: (index) => solanaAllocationProof(entries, index),
+    },
+  ) {
     await program.methods
       .setMonthlyCommitment(bn(100_000_000), true)
       .accountsStrict({ owner: payer.publicKey, project })
       .rpc();
-    const root = solanaAllocationRoot(entries),
-      total = solanaAllocationTotal(entries);
+    const { root, total } = tree;
     await program.methods
       .commitMonthly(n, [...Buffer.from(root, "hex")], bn(total), bn(frozenAt))
       .accountsStrict({
         payer: stranger.publicKey,
         project,
         vault,
-        month: month(),
+        month: monthAt(n),
         instructions: SYSVAR_INSTRUCTIONS_PUBKEY,
         systemProgram: SystemProgram.programId,
       })
@@ -2428,16 +2438,16 @@ test("monthly gate blocks direct commits; only a source consumed before the free
           solanaAwardId(project.toBase58(), entry.sourceDigest),
           "hex",
         ),
-        proof = solanaAllocationProof(entries, index).map((node) => ({
+        proof = tree.proof(index).map((node) => ({
           hash: [...Buffer.from(node.hash, "hex")],
           total: bn(node.total),
         })),
         shared = {
           payer: stranger.publicKey,
           project,
-          month: month(),
+          month: monthAt(n),
           origin: pda(seed("origin"), key(project), digest),
-          settled: pda(seed("settled"), key(month()), digest),
+          settled: pda(seed("settled"), key(monthAt(n)), digest),
           monthlySource: pda(seed("monthly-source"), key(project), digest),
           systemProgram: SystemProgram.programId,
         },
@@ -2461,7 +2471,18 @@ test("monthly gate blocks direct commits; only a source consumed before the free
         .rpc();
     };
     return { total, leaf };
-  }
+  };
+
+// An admitted month blocks the owner's direct commits while any of its gross is
+// outstanding. The attester signs when it froze the allocation: a leaf whose source the
+// owner consumed by hand before the freeze can never commit, so anyone releases its reserve
+// to free balance. A source consumed after the freeze never releases, so removing an award
+// never becomes a refund. Each leaf settles once.
+test("monthly gate blocks direct commits; only a source consumed before the freeze releases, once", async () => {
+  const { stranger, period, n } = await monthlyPeriod();
+  const ownerCommit = (name, gross = 1) => commit(name, 999, gross);
+  const month = () => monthAt(n);
+  const admit = monthlyAdmission(stranger, period, n);
   const expire = () => expireAt(project, n);
   const read = () => program.account.project.fetch(project);
 
@@ -2578,7 +2599,7 @@ test("monthly gate blocks direct commits; only a source consumed before the free
 });
 
 // No admitted month on the validator is 30 days past its window, so test-e2e.sh preloads
-// one (see expired-month.mjs): anyone expires it once, and only its unsettled gross leaves
+// one (see monthly-preload.mjs): anyone expires it once, and only its unsettled gross leaves
 // monthly_outstanding.
 test("expire_month ends an unsettled month once after its grace", async () => {
   const fetchMonth = () =>
@@ -2599,4 +2620,74 @@ test("expire_month ends an unsettled month once after its grace", async () => {
     expireAt(expiredProject, EXPIRED_PERIOD),
     /MonthExpired/,
   );
+});
+
+// A release needs no award when the leaf can never commit: an actor-0 leaf releases with
+// no origin or obligation. A source another month already committed releases only for
+// the same actor and at most that award's gross; anything else stays reserved. The
+// earlier month and its monthly-source markers are preloaded (see monthly-preload.mjs).
+test("an actor-0 leaf releases once; a source another month committed releases only for the same actor and gross", async () => {
+  const { stranger, period, n } = await monthlyPeriod();
+  await freshProject("monthly-cross", 50_000_000n);
+  assert.ok(project.equals(crossProject));
+  const earlier = await program.account.monthlyAllocation.fetch(
+    monthAt(EARLIER_PERIOD),
+  );
+  assert.equal(earlier.committed.toString(), earlier.total.toString());
+  // The owner's commits write each source's origin and obligation for actor 901 and
+  // 5 USDC, as the earlier month's commit_monthly_award did, after the attester froze.
+  const frozenAt = await chainTime();
+  await after(frozenAt);
+  for (const name of CROSS_SOURCES)
+    await commit(name, CROSS_ACTOR, CROSS_GROSS);
+  const leaves = [
+    [0, 10_000_000, sourceDigest("actor-zero")],
+    [CROSS_ACTOR, CROSS_GROSS, sourceDigest(CROSS_SOURCES[0])],
+    [CROSS_ACTOR, CROSS_GROSS + 1_000_000, sourceDigest(CROSS_SOURCES[1])],
+    [CROSS_ACTOR + 1, CROSS_GROSS, sourceDigest(CROSS_SOURCES[2])],
+  ];
+  const entries = leaves.map(([actor, gross, digest]) => ({
+    githubUserId: String(actor),
+    grossMicro: String(gross),
+    sourceDigest: digest,
+  }));
+  const { leaf } = await monthlyAdmission(stranger, period, n)(
+    entries,
+    frozenAt,
+    allocationTree(leaves),
+  );
+  const read = () => program.account.project.fetch(project);
+  let state = await read();
+  assert.equal(state.reserved.toString(), "41000000");
+  assert.equal(state.monthlyOutstanding.toString(), "26000000");
+  // An actor-0 leaf can never commit; anyone releases it, once, with no award.
+  await assert.rejects(leaf(0, "commit"), /InvalidAmount/);
+  await leaf(0, "release", null);
+  state = await read();
+  assert.equal(state.reserved.toString(), "31000000");
+  let recorded = await program.account.monthlyAllocation.fetch(monthAt(n));
+  assert.equal(recorded.released.toString(), "10000000");
+  await assert.rejects(leaf(0, "release", null), /already in use/);
+  // The same actor at the committed gross releases through the monthly-source marker.
+  // Vault totals read only finalized state.
+  await provider.connection.confirmTransaction(
+    await leaf(1, "release"),
+    "finalized",
+  );
+  // A larger gross or another actor stays reserved.
+  await assert.rejects(leaf(2, "release"), /AwardCommittable/);
+  await assert.rejects(leaf(3, "release"), /AwardCommittable/);
+  state = await read();
+  assert.equal(state.reserved.toString(), "26000000");
+  assert.equal(state.monthlyOutstanding.toString(), "11000000");
+  recorded = await program.account.monthlyAllocation.fetch(monthAt(n));
+  assert.equal(recorded.released.toString(), "15000000");
+  assert.equal(recorded.committed.toString(), "15000000");
+  const totals = await readVaultTotals({
+    rpcUrl: provider.connection.rpcEndpoint,
+    network: "solana:localnet",
+    projectPda: project.toBase58(),
+    programId: program.programId.toBase58(),
+  });
+  assert.equal(totals.freeBalance, "24000000");
 });

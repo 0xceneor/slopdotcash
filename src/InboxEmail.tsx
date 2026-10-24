@@ -162,7 +162,7 @@ export function InboxEmail() {
           ) : (
             <p>
               {state.value.availability === "unverified"
-                ? "No verified email destination is available for this account."
+                ? "No verified email destination is available for this account. Slop verifies destinations privately and does not use your GitHub profile email, so retrying will not add one. Your notices still appear in this inbox."
                 : "Activity email is temporarily unavailable."}
             </p>
           )}
@@ -183,7 +183,8 @@ export function InboxEmail() {
         </>
       ) : null}
       {state.status === "error" ||
-      (state.status === "ready" && state.value.availability !== "verified") ? (
+      (state.status === "ready" &&
+        state.value.availability === "unavailable") ? (
         <button
           className="button secondary-button"
           type="button"

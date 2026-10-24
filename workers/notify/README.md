@@ -234,7 +234,18 @@ these internal routes to a public client.
 
 Provider acceptance remains separate from delivery. Exceptions remain
 ambiguous. Independent negative evidence can authorize a retry, up to five
-attempts. The private outbox and append-only evidence table retain exhausted,
+attempts. An essential notice whose verified record is not yet in effect made
+no provider call; it retries on the security queue's one, two, four and eight
+minute schedule and exhausts on the fifth attempt. An essential notice with no
+verified record, and any optional notice without an effective consented
+destination, is suppressed.
+
+`GET /api/v1/notifications` reports each notice's email outcome from its
+outbox row as `emailDelivery`: `queued`, `sent` (provider-accepted),
+`delivered` (independent receipt), `failed` (bounced or exhausted) or
+`uncertain` (ambiguous). Suppressed and unmailed notices carry no value. The
+inbox never returns an address, destination digest, provider reference or
+attempt count, and read and acknowledgment remain separate fields. The private outbox and append-only evidence table retain exhausted,
 suppressed, bounced and ambiguous outcomes for operators. No mail result
 reverses a source notification, award or wallet change.
 

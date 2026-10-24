@@ -48,6 +48,33 @@ test("disabled payouts are visible from discovery through the project page", asy
     path: info.outputPath("project-payment-unavailable.png"),
     fullPage: true,
   });
+  await page.goto("/projects/eliza/funding", { waitUntil: "networkidle" });
+  const status = page.locator(".funding-status-grid");
+  const term = (name: string) =>
+    status
+      .locator("div")
+      .filter({ has: page.locator("dt", { hasText: new RegExp(`^${name}$`) }) })
+      .locator("dd");
+  await expect(term("Payments")).toHaveText("Disabled");
+  await expect(term("Project vault")).toHaveText("Not set up");
+  await page.screenshot({
+    path: info.outputPath("funding-payment-unavailable.png"),
+    fullPage: true,
+  });
+  await page.goto("/sponsors", { waitUntil: "networkidle" });
+  const pools = page.getByRole("table");
+  const paymentsColumn = await pools
+    .getByRole("columnheader")
+    .allTextContents()
+    .then((headers) => headers.indexOf("Payments"));
+  expect(paymentsColumn).toBeGreaterThan(0);
+  await expect(
+    pools
+      .getByRole("row")
+      .filter({ has: page.getByRole("link", { name: "Eliza", exact: true }) })
+      .getByRole("cell")
+      .nth(paymentsColumn - 1),
+  ).toHaveText("Disabled");
   expect(
     (
       await new AxeBuilder({ page })

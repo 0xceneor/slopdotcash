@@ -16,6 +16,7 @@ import { parseNotificationsResponse } from "../../src/lib/notifications";
 import { createProjectView } from "../../src/lib/project-view";
 import { findProject } from "../../src/lib/projects.mjs";
 import {
+  AFTER_NOVEMBER,
   GENERATED_AT,
   PENALIZED_AUTHOR,
   penaltyScoreInput,
@@ -43,6 +44,8 @@ const MAINTAINER = 43;
 const OUTSIDER = 44;
 const MODERATOR = 50;
 const BODY = "Buy cheap followers today at our shop.";
+/** When Slopbot closes the fixture pull request; GitHub's closedAt agrees. */
+const CLOSED_AT = "2026-11-10T00:00:00.000Z";
 
 type Run = {
   inbox(actor: number, moderators?: string, path?: string): Promise<Response>;
@@ -752,7 +755,9 @@ test("a recorded debit reaches the published score once and an upheld appeal res
       novemberPenalty: 0,
     });
 
+    setSystemTime(new Date(CLOSED_AT));
     expect(await run.review()).toBe("closed (spam)");
+    setSystemTime(new Date(GENERATED_AT));
     const debited = await publish();
     expect(
       debited.penalties?.map(({ id, category, debitThirds, occurredAt }) => ({
@@ -766,7 +771,7 @@ test("a recorded debit reaches the published score once and an upheld appeal res
         id: "PR_local:penalty",
         category: "spam",
         debitThirds: 3,
-        occurredAt: "2026-11-10T00:00:00.000Z",
+        occurredAt: CLOSED_AT,
       },
     ]);
     // The 3-third debit stops at November's 1 third; October is untouched.
@@ -802,6 +807,90 @@ test("a recorded debit reaches the published score once and an upheld appeal res
       novemberPenalty: 0,
     });
   });
+});
+
+// PRD section 7: a debit is recorded once and reduces only that UTC month.
+// The author reopens the closed pull request and it closes again in December;
+// GitHub's closedAt moves, but the published debit keeps Slopbot's recorded
+// November month.
+test("a reopen and later close keeps the debit in its recorded month", async () => {
+  setSystemTime(new Date(CLOSED_AT));
+  await closedItem(async (run) => {
+    expect(await run.review()).toBe("closed (spam)");
+    expect(
+      run.sql("SELECT period, recorded_at FROM slopbot_penalties"),
+    ).toEqual([{ period: "2026-11", recorded_at: CLOSED_AT }]);
+
+    const publishedAt = AFTER_NOVEMBER;
+    setSystemTime(new Date(publishedAt));
+    const input = penaltyScoreInput(
+      await fetchProjectPenalties("asi", run.feed),
+      publishedAt,
+    );
+    const [closed] = input.closedUnmergedPullRequests ?? [];
+    if (!closed) throw new Error("fixture closed pull request missing");
+    const reclosedAt = "2026-12-01T00:00:00.000Z";
+    input.closedUnmergedPullRequests = [
+      { ...closed, updatedAt: reclosedAt, closedAt: reclosedAt },
+    ];
+    const snapshot = createLeaderboardSnapshot(input);
+
+    expect(snapshot.penalties?.map((penalty) => penalty.occurredAt)).toEqual([
+      CLOSED_AT,
+    ]);
+    const month = (cycleId: string) =>
+      createProjectView(snapshot, "asi", cycleId).leaders.find(
+        (entry) => entry.actor.id === PENALIZED_AUTHOR.id,
+      );
+    // November's 1-third merge minimum absorbs the debit; December has none.
+    expect(month("2026-11")).toMatchObject({
+      scoreThirds: 0,
+      penaltyThirds: 1,
+    });
+    expect(month("2026-12")).toBeUndefined();
+  });
+});
+
+// The recorded month is authoritative: a feed row whose period disagrees with
+// its recorded time fails the snapshot, and a debit recorded before the
+// scoring window never lands on a later GitHub close inside it.
+test("a recorded debit outside its month or window is never applied", () => {
+  setSystemTime(new Date(AFTER_NOVEMBER));
+  const record = {
+    itemNodeId: "PR_local",
+    authorGithubId: "42",
+    category: "spam",
+    tableVersion: "slopbot-penalties-v1",
+    debitThirds: 3,
+    period: "2026-11",
+    recordedAt: CLOSED_AT,
+  };
+  expect(() =>
+    createLeaderboardSnapshot(
+      penaltyScoreInput([{ ...record, period: "2026-12" }], AFTER_NOVEMBER),
+    ),
+  ).toThrow("Penalty feed record is malformed");
+
+  // Recorded in September, before the 35-day window; GitHub's later close
+  // stays inside it.
+  const snapshot = createLeaderboardSnapshot(
+    penaltyScoreInput(
+      [
+        {
+          ...record,
+          period: "2026-09",
+          recordedAt: "2026-09-30T00:00:00.000Z",
+        },
+      ],
+      AFTER_NOVEMBER,
+    ),
+  );
+  expect(snapshot.penalties).toEqual([]);
+  expect(
+    createProjectView(snapshot, "asi", "2026-11").leaders.find(
+      (entry) => entry.actor.id === PENALIZED_AUTHOR.id,
+    ),
+  ).toMatchObject({ penaltyThirds: 0 });
 });
 
 // Exercise the actual worker event, Inbox route and existing email dispatcher.

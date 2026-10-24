@@ -39,6 +39,7 @@ function publishedSnapshot() {
           category: "spam",
           tableVersion: "slopbot-penalties-v1",
           debitThirds: PENALTY_TABLE.spam.debitThirds,
+          period: "2026-11",
           recordedAt: "2026-11-10T00:00:05.000Z",
         },
       ]),
@@ -80,13 +81,11 @@ test("How it works explains the current scoring policy once", async ({
   const errors = watch(page);
   await page.goto("/how-it-works", { waitUntil: "networkidle" });
   const score = page.locator(".score-contract");
-  await expect(score.getByRole("heading", { name: "Slop Score" })).toHaveCount(
-    1,
-  );
+  await expect(score.getByRole("heading", { name: "Points" })).toHaveCount(1);
   await expect(score).toContainText(
-    "Slopbot sizes each accepted pull request with the tiers in this table and gives it a standard score. Every accepted merge earns at least 1/3.",
+    "Slopbot sizes each accepted pull request with the tiers in this table and awards points. Every accepted merge earns at least 10 points.",
   );
-  await score.getByText("Scoring rules and evidence", { exact: true }).click();
+  await score.getByText("Points rules and evidence", { exact: true }).click();
   await expect(score).toContainText(
     "A useful review can find a correction or validate the change. A request for changes is not required.",
   );
@@ -94,7 +93,7 @@ test("How it works explains the current scoring policy once", async ({
     `The first ${MAX_CREDITED_REVIEWERS} distinct qualifying reviewers share one review pool per pull request`,
   );
   await expect(score).toContainText(
-    "penalty table: spam 1, scam or malicious 8, a clear violation of a quoted project rule 1/3.",
+    "penalty table: spam 30, scam or malicious 240, a clear violation of a quoted project rule 10.",
   );
   await expect(score).toContainText(
     "their weight leaves the pool, so it does not reduce other contributors' shares.",
@@ -119,7 +118,7 @@ test("How it works explains the current scoring policy once", async ({
   ])
     await expect(page.locator("main")).not.toContainText(retired);
   // The questions agree with the rules instead of repeating old ones.
-  await page.getByText("Do reviews score?", { exact: true }).click();
+  await page.getByText("Do reviews earn points?", { exact: true }).click();
   await expect(page.locator("main")).toContainText(
     "It can find a correction or validate the change; a request for changes is not required.",
   );
@@ -199,11 +198,11 @@ test("a published debit and a payout exclusion show on the profile and the cycle
   // October keeps 1 point; the November debit stops at November's 1/3.
   await expect(
     page.getByTitle("Closed cycles and ledger events outside those cycles"),
-  ).toHaveText("1");
+  ).toHaveCount(0);
   const penalties = page.getByRole("region", { name: "Penalties" });
   await expect(penalties).toContainText("1 recorded");
   await expect(penalties.getByRole("listitem")).toHaveText(
-    /ASI #5\s+Spam · November 2026 · −1 point debit · 0\.33 applied/u,
+    /ASI #5\s+Spam · November 2026 · −30 point debit · 10 applied/u,
   );
   await expect(
     penalties.getByRole("link", { name: /ASI #5/u }),
@@ -219,7 +218,7 @@ test("a published debit and a payout exclusion show on the profile and the cycle
   const row = (login: string) =>
     table.getByRole("row").filter({ hasText: login });
   await expect(row(PENALIZED_AUTHOR.login)).toContainText(
-    "After a 0.33 point Slopbot penalty",
+    "After a 10 point Slopbot penalty",
   );
   await expect(row(PROJECT_OWNER.login)).toContainText(
     "Excluded from payout (owner)",

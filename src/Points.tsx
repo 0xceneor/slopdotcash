@@ -21,10 +21,7 @@ import {
   readBoundedText,
 } from "./lib/browser-json";
 import { CONTACT_MAILTO } from "./lib/contact";
-import {
-  contributorStandings,
-  type StandingsSort,
-} from "./lib/contributor-standings";
+import { contributorStandings } from "./lib/contributor-standings";
 import type { CycleIndex } from "./lib/cycle-index";
 import { deploymentTier } from "./lib/deployment";
 import { GithubIcon } from "./lib/github-icon";
@@ -44,12 +41,7 @@ import { useProjectSession } from "./lib/project-api";
 import { findProject, PROJECTS } from "./lib/projects.mjs";
 import { useAllDirectTransfers } from "./lib/use-direct-transfers";
 import { type DataState, useSnapshot } from "./lib/use-snapshot";
-import {
-  DataNotice,
-  formatMicroUsdc,
-  formatScore,
-  NotFound,
-} from "./Presentation";
+import { DataNotice, formatMicroUsdc, NotFound } from "./Presentation";
 import { ProfileActivity, useProfiles } from "./Profiles";
 
 const productOrigin = () =>
@@ -585,6 +577,13 @@ export function ProfilePoints({
       <ProfileActivity
         work={work}
         awards={m?.awards}
+        pointsMissing={
+          state.status === "ready"
+            ? undefined
+            : state.status === "loading"
+              ? "Points loading…"
+              : "Points unavailable"
+        }
         revisions={
           state.status === "ready" && (resolvedActorId ?? m?.actor.id)
             ? state.journal.revisions.filter(
@@ -640,7 +639,7 @@ export function ProfilePoints({
                     ? "Loading…"
                     : "Unavailable"}
               </strong>
-              <span>points</span>
+              <span>total points</span>
             </div>
           </>
         }
@@ -1140,9 +1139,11 @@ export function PointsPage() {
         </ul>
         <p className="points-meta">
           Joining and connection bonuses do not count in earned-point standings.
-          Points never change Slop Score or Money received. Points persist
-          across months, and corrections stay in the history. Review coverage
-          before scoring records is limited.
+          Only accepted-work points count toward payouts; welcome, social, and
+          payment-recognition bonuses do not. Money received records verified
+          payments separately. Points persist across months, and corrections
+          stay in the history. Review coverage before scoring records is
+          limited.
         </p>
         <a href="/protocol/points-v1.md">Read the points rules</a> ·{" "}
         <a href="/#projects">Find a project</a> ·{" "}
@@ -1175,10 +1176,7 @@ export function ContributorStandings({
     const period = params.get("period");
     // `period=new` was an earlier link to recorded history.
     return {
-      sort:
-        sort === "points" || sort === "money"
-          ? sort
-          : ("score" as StandingsSort),
+      sort: sort === "money" ? ("money" as const) : ("points" as const),
       period: period === "lifetime" || period === "new" ? "lifetime" : "month",
       query: params.get("q") ?? "",
       project: projectId ?? findProject(params.get("project") ?? "")?.id ?? "",
@@ -1191,7 +1189,7 @@ export function ContributorStandings({
   const [filters, setFilters] = useState(readFilters);
   const { sort, period, query, page } = filters;
   const project = projectId ?? filters.project;
-  const setSort = (sort: StandingsSort) =>
+  const setSort = (sort: "points" | "money") =>
     setFilters((v) => ({ ...v, sort, page: 0 }));
   const setPeriod = (period: string) =>
     setFilters((v) => ({ ...v, period, page: 0 }));
@@ -1208,7 +1206,7 @@ export function ContributorStandings({
   useEffect(() => {
     const url = new URL(window.location.href);
     for (const [key, value] of Object.entries({
-      sort: sort === "score" ? "" : sort,
+      sort: sort === "points" ? "" : sort,
       period: period === "month" ? "" : period,
       q: query,
       project: projectId ? "" : project,
@@ -1230,7 +1228,7 @@ export function ContributorStandings({
   }, [state, project]);
   const metric = (
     m: ReturnType<typeof contributorStandings>["rows"][number],
-  ) => (sort === "score" ? m.score : sort === "points" ? m.points : m.money);
+  ) => (sort === "points" ? m.points : m.money);
   const [direct, retryDirect] = useAllDirectTransfers(
     PROJECTS.map((p) => p.id),
   );
@@ -1242,7 +1240,6 @@ export function ContributorStandings({
     direct.status === "ready" ? direct.transfers : null,
   );
   // Loading and failed sources stay distinct in each column.
-  const scoreMissing = scores.status === "loading" ? "Loading…" : "Unavailable";
   const pointsMissing = state.status === "loading" ? "Loading…" : "Unavailable";
   const moneyMissing =
     scores.status === "loading" || direct.status === "loading"
@@ -1268,7 +1265,7 @@ export function ContributorStandings({
   });
   const rows = ranked.filter(
     (m) =>
-      ((m.score ?? 0) !== 0 || (m.points ?? 0) > 0 || (m.money ?? 0n) > 0n) &&
+      ((m.points ?? 0) > 0 || (m.money ?? 0n) > 0n) &&
       m.actor.login.toLowerCase().includes(query.toLowerCase()),
   );
   const pageSize = compact ? 10 : 25;
@@ -1282,36 +1279,19 @@ export function ContributorStandings({
       aria-label={title ?? "Contributor standings"}
     >
       <h2>{title ?? "Contributor standings"}</h2>
-      {compact ? (
-        <p className="points-meta">
-          This month (UTC) · verified payments.{" "}
-          <Link
-            href={`/points?${new URLSearchParams({ project: projectId ?? project, period, sort })}`}
-          >
-            Full standings
-          </Link>
-        </p>
-      ) : null}
       {!scoreState ? (
         <DataNotice state={scores} retry={retryScore ?? retryLoadedScore} />
       ) : null}
       <Notice />
-      {direct.status === "error" ? (
+      {!compact && direct.status === "error" ? (
         <p role="status">
           <span>Payment records unavailable.</span>{" "}
           <button type="button" onClick={retryDirect}>
             Retry payment records
           </button>
         </p>
-      ) : direct.status === "loading" && sort === "money" ? (
+      ) : !compact && direct.status === "loading" && sort === "money" ? (
         <p role="status">Loading payment records…</p>
-      ) : null}
-      {scores.status === "ready" && !projection.scoreAvailable ? (
-        <p className="points-meta">
-          {compact
-            ? "No score records cover this month yet."
-            : "No score records cover this period. Select Recorded history."}
-        </p>
       ) : null}
       {!compact ? (
         <div className="points-controls">
@@ -1369,8 +1349,7 @@ export function ContributorStandings({
       {(
         sort === "points"
           ? state.status === "ready"
-          : scores.status === "ready" &&
-            (sort !== "score" || projection.scoreAvailable)
+          : scores.status === "ready"
       ) ? (
         <>
           <p className="standings-scroll-hint">
@@ -1389,7 +1368,6 @@ export function ContributorStandings({
                   <th scope="col">Contributor</th>
                   {(
                     [
-                      ["score", "Score"],
                       ["points", "Points"],
                       ["money", "Money received"],
                     ] as const
@@ -1436,9 +1414,6 @@ export function ContributorStandings({
                           />
                           {m.actor.login}
                         </a>
-                      </td>
-                      <td className="points-value">
-                        {m.score === null ? scoreMissing : formatScore(m.score)}
                       </td>
                       <td className="points-value">
                         {m.points === null
@@ -2023,7 +1998,7 @@ function People() {
       <h2 id="people-h">People</h2>
       <p>
         Public members and everyone with a recorded pull request, including
-        people without a score yet.
+        people without points yet.
       </p>
       <label>
         GitHub username{" "}

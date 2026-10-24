@@ -6,6 +6,7 @@
  */
 import { readBoundedJson } from "../../src/lib/browser-json";
 import {
+  type EmailDelivery,
   isNotificationEventKey,
   MAX_NOTIFICATION_MARK,
   type Notification,
@@ -53,6 +54,33 @@ interface Row {
   read_at: string | null;
   acknowledged_at: string | null;
   security_notice_id: string | null;
+  delivery_state: string | null;
+}
+
+/**
+ * Collapses one outbox state into what the recipient may see. No address,
+ * destination digest, provider reference or case detail leaves the outbox.
+ * A suppressed row (opt-out, revoked role or no destination) sent nothing and
+ * reports nothing, so it cannot reveal why a private notice was withheld.
+ */
+function emailDelivery(state: string | null): EmailDelivery | null {
+  switch (state) {
+    case "queued":
+    case "retrying":
+    case "sending":
+      return "queued";
+    case "provider-accepted":
+      return "sent";
+    case "delivered":
+      return "delivered";
+    case "bounced":
+    case "exhausted":
+      return "failed";
+    case "ambiguous":
+      return "uncertain";
+    default:
+      return null;
+  }
 }
 
 /** Returns null when the request is not for this route. */
@@ -144,7 +172,14 @@ export async function handleNotificationsApi(
                         AND s.template_version = 'security-inbox-v1') AS security_notice_id,
                     (SELECT acknowledged_at FROM security_notification_outbox s
                       WHERE s.event_key = notifications.event_key AND s.recipient_github_id = notifications.recipient_github_id
-                        AND s.template_version = 'security-inbox-v1') AS acknowledged_at
+                        AND s.template_version = 'security-inbox-v1') AS acknowledged_at,
+                    COALESCE(
+                      (SELECT state FROM security_notification_outbox s
+                        WHERE s.event_key = notifications.event_key AND s.recipient_github_id = notifications.recipient_github_id
+                          AND s.template_version IN ('security-inbox-v1','security-receipt-v1')),
+                      (SELECT state FROM activity_notification_outbox a
+                        WHERE a.event_key = notifications.event_key AND a.recipient_github_id = notifications.recipient_github_id
+                          AND a.template_version = 'activity-inbox-v1')) AS delivery_state
                FROM notifications WHERE recipient_github_id = ?
                 AND (kind <> 'slopbot_appeal_review' OR ? = 1)
                 ${cursor ? "AND (source_at < ? OR (source_at = ? AND event_key > ?))" : ""}
@@ -173,19 +208,23 @@ export async function handleNotificationsApi(
           rows.results.length > LIST_LIMIT && last
             ? JSON.stringify([last.source_at, last.event_key])
             : null,
-        notifications: page.map((row) => ({
-          eventKey: row.event_key,
-          kind: row.kind,
-          subject: row.subject,
-          detail: row.detail,
-          actionPath: row.action_path,
-          sourceAt: row.source_at,
-          createdAt: row.created_at,
-          readAt: row.read_at,
-          ...(row.kind === "security_case" && row.security_notice_id !== null
-            ? { acknowledgedAt: row.acknowledged_at }
-            : {}),
-        })),
+        notifications: page.map((row) => {
+          const delivery = emailDelivery(row.delivery_state);
+          return {
+            eventKey: row.event_key,
+            kind: row.kind,
+            subject: row.subject,
+            detail: row.detail,
+            actionPath: row.action_path,
+            sourceAt: row.source_at,
+            createdAt: row.created_at,
+            readAt: row.read_at,
+            ...(row.kind === "security_case" && row.security_notice_id !== null
+              ? { acknowledgedAt: row.acknowledged_at }
+              : {}),
+            ...(delivery ? { emailDelivery: delivery } : {}),
+          };
+        }),
         unread: unread.results[0]?.count ?? 0,
       };
       return json(200, body);

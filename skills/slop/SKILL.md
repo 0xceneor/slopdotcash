@@ -1,6 +1,6 @@
 ---
 name: slop
-description: "Safely bootstrap a Slop contribution skill for the current funded repository. Use when an agent is asked to start contributing through slop.cash, install or update a project skill, preview local usage access, or diagnose Slop setup without exposing prompts, source, transcripts, credentials, or wallet secrets."
+description: "Safely bootstrap a Slop contribution skill for the current repository's Slop project. Use when an agent is asked to start contributing through slop.cash, install or update a project skill, preview local usage access, or diagnose Slop setup without exposing prompts, source, transcripts, credentials, or wallet secrets."
 metadata:
   author: elizaOS
   version: "1"

@@ -2,8 +2,12 @@
 
 Slop Points record participation and accepted contributions. Points have no
 monetary value and cannot be transferred or redeemed. They confer no payment,
-ownership, governance, or access entitlement. Project payments follow their
-separate published rules. Points never enter reward or settlement calculations.
+ownership, governance, or access entitlement. Only accepted-work points for a project and payment period determine its reward
+shares under the published payment rules. Welcome, social and payout-recognition
+bonuses never affect payouts. Points this month and total points are views of
+the same history, not separate currencies. Historical score fields encode
+accepted-work points at 30 points per score (10 per third); they are not a
+second public metric. Preserve historical settlements and funded obligations.
 
 ## Earning and history
 

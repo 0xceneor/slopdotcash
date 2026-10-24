@@ -91,6 +91,38 @@ const TRACE_AUTHORITY = "https://api.slop.cash";
 const IDENTITY_AUTHORITY = "https://identity.slop.cash";
 const TRACE_PRIVACY_CONTRACT = "https://slop.cash/protocol/private-trace-v1.md";
 const PRIVATE_REQUEST_INTAKE_STATUS = `${TRACE_AUTHORITY}/api/v1/private-request-intake`;
+// The Slop repository is the one trust root for the generic skill template
+// (PRD section 4, SKL-04). elizaOS/army and elizaOS/slopdotcash are earlier
+// names of the same repository (protocol/identity-v1.json sourceRepository),
+// so a developer checkout whose remote still uses one is the same source.
+const SKILL_SOURCE_REPOSITORY = "SlopDotCash/slopdotcash";
+const SKILL_SOURCE_REPOSITORY_ALIASES = ["elizaOS/army", "elizaOS/slopdotcash"];
+const SKILL_SOURCE_REMOTES = new Set(
+  [SKILL_SOURCE_REPOSITORY, ...SKILL_SOURCE_REPOSITORY_ALIASES].map(
+    (repository) => `https://github.com/${repository.toLowerCase()}`,
+  ),
+);
+// Every project emits the Slop attribution markers. A target repository whose
+// own PR validator predates Slop identity v1 accepts only its legacy markers
+// (protocol/identity-v1.json contributionMarker.legacy); it keeps them here,
+// keyed by its lowercase repository ID, until that validator accepts Slop's.
+const SLOP_ATTRIBUTION_MARKERS = Object.freeze({
+  ordinary: "slop-contribution-attribution:v1",
+  signed: "slop-contribution-attribution:v1",
+});
+const LEGACY_TARGET_ATTRIBUTION_MARKERS = new Map([
+  [
+    "elizaos/eliza",
+    Object.freeze({
+      ordinary: "eliza-computer-attribution:v1",
+      signed: "elizaos-contribution-attribution:v2",
+    }),
+  ],
+]);
+const ATTRIBUTION_MARKERS =
+  LEGACY_TARGET_ATTRIBUTION_MARKERS.get(
+    String(PROJECT.repositoryId).toLowerCase(),
+  ) ?? SLOP_ATTRIBUTION_MARKERS;
 const LEGACY_V1_RECEIPT_IDENTITIES = new Map([
   [
     "delta-star",
@@ -859,7 +891,7 @@ function validateActiveRecord(value) {
     canonicalIso(value.startedAt) !== value.startedAt ||
     !/^[0-9a-f]{40}$/u.test(value.revision ?? "") ||
     value.skillRevision !==
-      `SlopDotCash/slopdotcash@${value.revision}:${PROJECT.skillSourcePath}` ||
+      `${SKILL_SOURCE_REPOSITORY}@${value.revision}:${PROJECT.skillSourcePath}` ||
     !SHA_PATTERN.test(value.skillSha256 ?? "")
   ) {
     fail("active run state has an invalid identity");
@@ -977,7 +1009,7 @@ function resolveSkillProvenance() {
     if (
       provenance?.schemaVersion !== "1" ||
       provenance?.name !== PROJECT.skillName ||
-      provenance?.repository !== "SlopDotCash/slopdotcash" ||
+      provenance?.repository !== SKILL_SOURCE_REPOSITORY ||
       provenance?.revisionStatus !== "committed" ||
       !/^[0-9a-f]{40}$/u.test(provenance?.revision) ||
       provenance?.source?.path !== `${PROJECT.skillSourcePath}/SKILL.md` ||
@@ -1031,7 +1063,7 @@ function resolveSkillProvenance() {
     }
     return {
       revision: provenance.revision,
-      skillRevision: `SlopDotCash/slopdotcash@${provenance.revision}:${PROJECT.skillSourcePath}`,
+      skillRevision: `${SKILL_SOURCE_REPOSITORY}@${provenance.revision}:${PROJECT.skillSourcePath}`,
       skillSha256: digest,
     };
   }
@@ -1041,13 +1073,7 @@ function resolveSkillProvenance() {
     .replace(/^ssh:\/\/git@github\.com\//u, "https://github.com/")
     .replace(/\.git$/u, "")
     .toLowerCase();
-  if (
-    ![
-      "https://github.com/elizaos/army",
-      "https://github.com/elizaos/slopdotcash",
-      "https://github.com/slopdotcash/slopdotcash",
-    ].includes(sourceRemote)
-  ) {
+  if (!SKILL_SOURCE_REMOTES.has(sourceRemote)) {
     fail("bundled skill source must come from the canonical Slop repository");
   }
   const relativeSkill = PROJECT.skillSourcePath;
@@ -1064,7 +1090,7 @@ function resolveSkillProvenance() {
   ]);
   return {
     revision,
-    skillRevision: `SlopDotCash/slopdotcash@${revision}:${relativeSkill}`,
+    skillRevision: `${SKILL_SOURCE_REPOSITORY}@${revision}:${relativeSkill}`,
     skillSha256: digest,
   };
 }
@@ -1192,7 +1218,7 @@ function validateAuthorizationReceipt(revision) {
   }
   if (
     receipt?.schemaVersion !== "1" ||
-    receipt?.repository !== "SlopDotCash/slopdotcash" ||
+    receipt?.repository !== SKILL_SOURCE_REPOSITORY ||
     receipt?.revision !== revision ||
     !receipt.authorization ||
     typeof receipt.authorization !== "object" ||
@@ -1220,7 +1246,7 @@ function validateAuthorizationReceipt(revision) {
   const expectedReceipt = expectedAuthorization
     ? {
         schemaVersion: "1",
-        repository: "SlopDotCash/slopdotcash",
+        repository: SKILL_SOURCE_REPOSITORY,
         revision,
         authorization: expectedAuthorization,
       }
@@ -2056,7 +2082,7 @@ function attributionRows(receipt, lane) {
     `Contribution skill revision: ${receipt.skillRevision}`,
     "Attribution status: self-reported",
     laneSignature(lane),
-    `<!-- ${PROJECT.projectId === "eliza" ? "elizaos-contribution-attribution:v2" : "slop-contribution-attribution:v1"} ${JSON.stringify(value)} -->`,
+    `<!-- ${ATTRIBUTION_MARKERS.signed} ${JSON.stringify(value)} -->`,
   ];
 }
 
@@ -2118,7 +2144,7 @@ function completedLane(value, receipt) {
 
 export function completedIdentityIsValid(receipt, wrapperIsLegacy) {
   const currentSkillRevision = new RegExp(
-    `^SlopDotCash/slopdotcash@[0-9a-f]{40}:${PROJECT.skillSourcePath.replaceAll("/", "\\/")}$`,
+    `^${SKILL_SOURCE_REPOSITORY}@[0-9a-f]{40}:${PROJECT.skillSourcePath.replaceAll("/", "\\/")}$`,
     "u",
   );
   if (
@@ -3017,7 +3043,7 @@ export async function main(args = process.argv.slice(2), testOptions) {
       `Contribution skill revision: ${value.skill_revision}`,
       "Attribution status: self-reported",
       laneSignature("contributor"),
-      `<!-- ${PROJECT.projectId === "eliza" ? "eliza-computer-attribution:v1" : "slop-contribution-attribution:v1"} ${JSON.stringify(value)} -->`,
+      `<!-- ${ATTRIBUTION_MARKERS.ordinary} ${JSON.stringify(value)} -->`,
     ].join("\n");
     renderResult({ footer: rendered, message: rendered }, options.json);
   } else if (options.action === "preview") previewRun(options);

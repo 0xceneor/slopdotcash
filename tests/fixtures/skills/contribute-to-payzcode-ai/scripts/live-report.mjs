@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Builds a stable, read-only inventory of open elizaOS issues and pull requests
- * for contribution selection. REST pagination stays behind one GET-only
+ * Builds a stable, read-only inventory of the skill project's open issues and
+ * pull requests for contribution selection. REST pagination stays behind one GET-only
  * adapter; GraphQL uses explicit read-only queries over GitHub's POST endpoint.
  * A user-private process lease serializes complete discovery across skill copies.
  */
@@ -2675,28 +2675,33 @@ function isUserAttachment(url) {
   );
 }
 
-function isAllowedRepositoryArtifact(url) {
+/** True when the path's first two segments name the inspected repository. */
+function namesRepository(segments, repository) {
+  const [owner, name] = repository.toLowerCase().split("/");
+  return (
+    segments[0]?.toLowerCase() === owner && segments[1]?.toLowerCase() === name
+  );
+}
+
+function isAllowedRepositoryArtifact(url, repository) {
   if (url.protocol !== "https:") return false;
   const host = url.hostname.toLowerCase();
   const segments = url.pathname.split("/").filter(Boolean);
   if (host === "raw.githubusercontent.com") {
     return (
       segments.length >= 4 &&
-      segments[0].toLowerCase() === "elizaos" &&
-      segments[1].toLowerCase() === "eliza" &&
+      namesRepository(segments, repository) &&
       FULL_COMMIT_RE.test(segments[2])
     );
   }
   if (host !== "github.com") return false;
   return (
     (segments.length >= 5 &&
-      segments[0].toLowerCase() === "elizaos" &&
-      segments[1].toLowerCase() === "eliza" &&
+      namesRepository(segments, repository) &&
       segments[2] === "blob" &&
       FULL_COMMIT_RE.test(segments[3])) ||
     (segments.length === 7 &&
-      segments[0].toLowerCase() === "elizaos" &&
-      segments[1].toLowerCase() === "eliza" &&
+      namesRepository(segments, repository) &&
       segments[2] === "actions" &&
       segments[3] === "runs" &&
       /^\d+$/.test(segments[4]) &&
@@ -2715,11 +2720,11 @@ function isAllowedDomainArtifact(url) {
   return /^\/(?:tx|transaction)\/0x[a-f0-9]{64}$/i.test(url.pathname);
 }
 
-function hasAllowedEvidenceUrl(rowId, row) {
+function hasAllowedEvidenceUrl(rowId, row, repository) {
   return extractUrls(row).some(
     (url) =>
       isUserAttachment(url) ||
-      isAllowedRepositoryArtifact(url) ||
+      isAllowedRepositoryArtifact(url, repository) ||
       (rowId === "domain-artifacts" && isAllowedDomainArtifact(url)),
   );
 }
@@ -2835,7 +2840,14 @@ function hasSpecificNotApplicableReason(row) {
   return (reason.match(/[A-Za-z][A-Za-z0-9'-]*/g) ?? []).length >= 3;
 }
 
-export function auditPrEvidence(body) {
+/**
+ * Audits a PR body's evidence rows. Repository artifacts count only when they
+ * are immutable files or workflow artifacts of the inspected repository.
+ */
+export function auditPrEvidence(body, repository) {
+  if (!REPOSITORY_RE.test(repository ?? "")) {
+    throw new TypeError("evidence repository must use the owner/name form");
+  }
   const rows = extractEvidenceRows(body);
   const findings = REQUIRED_EVIDENCE_ROWS.map((id) => {
     if (!rows.has(id)) return { id, status: "missing" };
@@ -2843,7 +2855,7 @@ export function auditPrEvidence(body) {
     return {
       id,
       status:
-        hasAllowedEvidenceUrl(id, row) ||
+        hasAllowedEvidenceUrl(id, row, repository) ||
         hasSubstantiveInlineLogs(id, row) ||
         hasSpecificNotApplicableReason(row)
           ? "ok"
@@ -3315,7 +3327,7 @@ export function collectLiveReport(
       missingModelDisclosures: openActivity?.skippedPulls?.has(summary.number)
         ? null
         : auditCommentDisclosures(allComments),
-      evidence: auditPrEvidence(body),
+      evidence: auditPrEvidence(body, repo),
     });
 
     const reasons = claimReasons(
@@ -3425,7 +3437,7 @@ export function renderMarkdown(report) {
     "report.selection.eligibleIssueLabels",
   );
   const lines = [
-    `# elizaOS contribution report: ${report.repository}`,
+    `# ${report.repository} contribution report`,
     "",
     `Open issues: ${report.totals.openIssues}; unclaimed candidates: ${report.totals.candidateIssues}.`,
     `Open PRs: ${report.totals.openPullRequests}; reviewable candidates: ${report.totals.reviewablePullRequests}.`,

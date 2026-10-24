@@ -4,8 +4,9 @@
  * priority and hints for the technical approvers, never severity, receipt,
  * award or disclosure, which stay human decisions.
  *
- * No private model path is approved (OPEN_QUESTION 5), so the only analyzer
- * is deterministic. It reads GitHub's structured severity and CVSS fields
+ * This routing analyzer is deterministic. The approved private model path
+ * (Surplus Intelligence, PRD section 8) runs separately in `./analysis.ts`
+ * and never feeds this routing step. It reads GitHub's structured severity and CVSS fields
  * and treats the free text as hostile data: it never parses instructions,
  * calls tools, chains prompts, logs or stores anything.
  */

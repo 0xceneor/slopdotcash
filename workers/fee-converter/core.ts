@@ -15,6 +15,8 @@ import { LOCK_MS } from "./store";
 
 export type ConversionState =
   | "quoted"
+  /** Below the dust threshold: the fee stays in the wallet until it grows. */
+  | "pending"
   | "skipped"
   | "no_route"
   | "submitted"
@@ -108,11 +110,25 @@ export interface ChainClient {
   broadcast(rawTx: string): Promise<void>;
   status(row: ConversionRow): Promise<SendStatus>;
   /**
-   * EVM only (issue #905): a vault keeps its 2% fees until someone calls the
-   * permissionless claimFees(). Its methods let a recovery run claim them for
-   * this fee wallet before it reads the wallet's balances.
+   * Issue #905: a vault keeps its 2% fees until someone calls the
+   * permissionless claim (EVM `claimFees()`, Solana `claim_fees`). Its
+   * methods let a recovery run claim them for this fee wallet before it reads
+   * the wallet's balances.
    */
   vaultFees?: VaultFeeClient;
+}
+
+/**
+ * One ordinary or private bounty vault named by a reviewed D1 project
+ * manifest. `deployment` is that manifest's deployment record, exactly as
+ * reviewed; Solana verifies the program, project and fee recipient against it
+ * before a claim.
+ */
+export interface FeeVault {
+  vault: string;
+  projectId: string;
+  payoutPolicy: "ordinary" | "security-bounty";
+  deployment: Readonly<Record<string, unknown>>;
 }
 
 /** Fees accrued in one vault whose fee recipient is this fee wallet. */
@@ -123,11 +139,14 @@ export interface AccruedFees {
 
 export interface VaultFeeClient {
   /** Null when nothing accrued or the vault pays another fee recipient. */
-  accrued(vault: string): Promise<AccruedFees | null>;
+  accrued(vault: FeeVault): Promise<AccruedFees | null>;
   /** Estimated network fee of the claim in USDC micro-units; null if unpriced. */
-  claimCostMicro(vault: string): Promise<bigint | null>;
-  /** Signs and sends claimFees(), and waits until it is included successfully. */
-  claim(vault: string): Promise<{ txId: string }>;
+  claimCostMicro(vault: FeeVault): Promise<bigint | null>;
+  /**
+   * Signs and sends the claim, waits until it is included successfully and
+   * verifies that the fee wallet received the fee.
+   */
+  claim(vault: FeeVault): Promise<{ txId: string }>;
 }
 
 export interface ConversionStore {
@@ -167,7 +186,7 @@ export interface RunDependencies {
   /** Candidate tokens named by D1 project manifests for this network. */
   projectTokens: (config: NetworkConfig) => Promise<string[]>;
   /** Escrow vaults named by D1 project manifests for this network. */
-  projectVaults?: (config: NetworkConfig) => Promise<string[]>;
+  projectVaults?: (config: NetworkConfig) => Promise<FeeVault[]>;
   client: (config: NetworkConfig) => ChainClient;
   log: (event: Record<string, unknown>) => void;
 }
@@ -308,6 +327,7 @@ async function reconcile(
 function emptyRecords(): Record<ConversionState, number> {
   return {
     quoted: 0,
+    pending: 0,
     skipped: 0,
     no_route: 0,
     submitted: 0,
@@ -465,7 +485,7 @@ export async function runNetwork(
  * counts against the conversion caps. Returns the number of vaults claimed.
  */
 async function claimVaultFees(
-  vaults: readonly string[],
+  vaults: readonly FeeVault[],
   usdc: string,
   config: NetworkConfig,
   client: ChainClient,
@@ -478,7 +498,12 @@ async function claimVaultFees(
   for (const vault of vaults) {
     if (!(await leased())) break;
     const report = (event: string, fields: Record<string, unknown>) =>
-      deps.log({ event, network: config.network, vault, ...fields });
+      deps.log({
+        event,
+        network: config.network,
+        vault: vault.vault,
+        ...fields,
+      });
     try {
       const accrued = await fees.accrued(vault);
       if (!accrued) continue;
@@ -573,7 +598,11 @@ async function convert(
   ): Promise<{ state: ConversionState; committedMicro: bigint }> => {
     // A token stuck below the minimum would otherwise add the same row every
     // run; repeat only when the amount or the reason changes.
-    if (row.state === "skipped" || row.state === "no_route") {
+    if (
+      row.state === "pending" ||
+      row.state === "skipped" ||
+      row.state === "no_route"
+    ) {
       const last = await deps.store.latest(config.network, token);
       if (
         last &&
@@ -639,6 +668,11 @@ async function convert(
     quote: JSON.stringify(quote.summary).slice(0, 8192),
   };
   const skip = (reason: string) => record({ ...row, state: "skipped", reason });
+  // The dust threshold (PRD section 11): the fee is not yet worth converting,
+  // so it waits in the wallet and shows as pending until a later receipt
+  // lifts it over.
+  const pending = (reason: string) =>
+    record({ ...row, state: "pending", reason });
 
   if (remaining <= 0n || amount === 0n)
     return skip(
@@ -649,9 +683,9 @@ async function convert(
   if (quote.amountOut > remaining)
     return skip("quote exceeds the remaining value cap");
   if (quote.amountOut < limits.minValueMicro)
-    return skip("below the minimum conversion value");
+    return pending("below the minimum conversion value");
   if (quote.amountOut < quote.gasCostMicro * limits.gasMultiple)
-    return skip("below the gas-cost multiple");
+    return pending("below the gas-cost multiple");
   if (!impactWithin(quote, limits))
     return skip(
       quote.priceImpactBps === null

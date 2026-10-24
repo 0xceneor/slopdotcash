@@ -311,6 +311,15 @@ test("depositor funds a real vault, recovers a submitted transaction and owner w
     route.fulfill({ json: { session: null } }),
   );
   await page.goto("/projects/eliza/funding", { waitUntil: "networkidle" });
+  await expect(
+    page
+      .locator(".funding-status-grid div")
+      .filter({ has: page.locator("dt", { hasText: /^Project vault$/ }) })
+      .locator("dd"),
+  ).toHaveText("Recorded · payments disabled");
+  await expect(page.getByRole("note")).toContainText(
+    "Payments are disabled for this project.",
+  );
   const actions = page.getByRole("region", {
     name: "Fund or withdraw · base-sepolia",
   });

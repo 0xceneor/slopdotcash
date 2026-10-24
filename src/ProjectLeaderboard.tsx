@@ -2,7 +2,6 @@ import { Link } from "./Link";
 import type { PayoutExclusionRelationship } from "./lib/payout-exclusions.mjs";
 import type { ProjectContributor, ProjectView } from "./lib/project-view";
 import {
-  formatThirds,
   type ReviewerLeader,
   selectReviewerLeaders,
 } from "./lib/reviewer-leaders";
@@ -91,7 +90,7 @@ export function CycleAllocation({ updatedAt, view }: CycleAllocationProps) {
                 <tr className="leader-row project-leader-head">
                   <th scope="col">Rank</th>
                   <th scope="col">Contributor</th>
-                  <th scope="col">Score</th>
+                  <th scope="col">Points</th>
                   <th scope="col">
                     {view.reward.kind === "monthly-pool" &&
                     monthlyPoolUnfunded(view.project.reward)
@@ -125,16 +124,16 @@ export function CycleAllocation({ updatedAt, view }: CycleAllocationProps) {
                       </Link>
                     </td>
                     <td>
-                      <strong title={`Exact score ${leader.scoreThirds}/3`}>
-                        {formatThirds(leader.scoreThirds)}
+                      <strong>
+                        {(leader.scoreThirds * 10).toLocaleString()}
                       </strong>
                       <ReviewContribution
                         reviewer={reviewers.get(leader.actor.id)}
                       />
                       {leader.penaltyThirds > 0 ? (
                         <small>
-                          After a {formatThirds(leader.penaltyThirds)} point
-                          Slopbot penalty
+                          After a {(leader.penaltyThirds * 10).toLocaleString()}{" "}
+                          point Slopbot penalty
                         </small>
                       ) : null}
                       {leader.computeBonusBasisPoints > 0 ? (
@@ -207,9 +206,8 @@ function ReviewContribution({ reviewer }: { reviewer?: ReviewerLeader }) {
   if (!reviewer) return null;
   return (
     <small className="review-score-detail">
-      Includes {formatThirds(reviewer.reviewThirds)} review point
-      {reviewer.reviewThirds === 3 ? "" : "s"} · {reviewer.reviewEventCount}{" "}
-      scored review
+      Includes {(reviewer.reviewThirds * 10).toLocaleString()} review points ·{" "}
+      {reviewer.reviewEventCount} scored review
       {reviewer.reviewEventCount === 1 ? "" : "s"}
     </small>
   );

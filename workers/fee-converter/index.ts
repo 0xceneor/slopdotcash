@@ -1,9 +1,10 @@
 /**
  * slop-fee-converter: a cron Worker that converts project-token fees received
  * in each network fee wallet to that network's Circle USDC, inside the same
- * wallet (PRD section 6, TOK-07, MVP-07c). It has no HTTP route. On EVM it
- * calls only the permissionless claimFees() of reviewed vaults, which moves
- * accrued fees to their fixed fee recipient (issue #905). It never touches
+ * wallet (PRD section 6, TOK-07, MVP-07c). It has no HTTP route. On a vault
+ * it calls only the permissionless fee claim of reviewed vaults (EVM
+ * claimFees(), Solana claim_fees), which moves accrued fees to their fee
+ * recipient (issue #905; owner decision of 24 October 2026). It never touches
  * obligations or payments, and no payout waits on it.
  *
  * The cron fires every minute. Most runs are `receipts` runs that convert
@@ -137,11 +138,12 @@ export async function runOnce(
               .filter((token) => isTokenAddress(n.network, token))
               .map((token) => normalizeToken(n.network, token)),
           projectVaults: async (n) =>
-            n.definition.family === "evm"
-              ? (await projectVaults(env.FEE_DB, n.definition.escrowNetworks))
-                  .filter((vault) => isTokenAddress(n.network, vault))
-                  .map((vault) => normalizeToken(n.network, vault))
-              : [],
+            (await projectVaults(env.FEE_DB, n.definition.escrowNetworks))
+              .filter((entry) => isTokenAddress(n.network, entry.vault))
+              .map((entry) => ({
+                ...entry,
+                vault: normalizeToken(n.network, entry.vault),
+              })),
           client: (n) => chainClient(env, config, n, overrides),
           log: (event) => console.log(JSON.stringify(event)),
         }),

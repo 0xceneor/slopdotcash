@@ -1,7 +1,11 @@
 /** NOT-01 optional activity delivery; essential wallet notices do not use the activity preference. */
 import type { SecurityD1Database } from "../../backend/security/handler";
 import { encodeQuotedPrintable } from "./handler";
-import { destinationDigest, recordDelivery } from "./security";
+import {
+  destinationDigest,
+  recordDelivery,
+  retryWithoutProviderCall,
+} from "./security";
 
 type VerifiedDestination = {
   email: string;
@@ -147,6 +151,17 @@ export async function dispatchActivityMail(
       )
       .bind(row.recipient_github_id)
       .first<{ enabled: number; destination_version: string | null }>();
+    // An essential notice whose operator-verified record is not yet in effect
+    // made no provider call: retry it on the bounded schedule. Optional mail
+    // never retries here, because its consent names one effective destination.
+    if (
+      !destination.available &&
+      row.essential &&
+      deps.config.recipients[row.recipient_github_id]
+    ) {
+      await retryWithoutProviderCall(deps, row, "activity");
+      continue;
+    }
     if (
       !destination.available ||
       (!row.essential &&
@@ -184,6 +199,9 @@ export async function dispatchActivityMail(
     try {
       await deps.sendEmail(deps.fromAddress, destination.email, mime);
     } catch {
+      // The binding gives no definite non-acceptance receipt. The outcome stays
+      // uncertain until independent evidence reconciles it; only `not-accepted`
+      // evidence permits the next bounded attempt.
       await recordDelivery(deps, row, "ambiguous", null, "activity");
       continue;
     }

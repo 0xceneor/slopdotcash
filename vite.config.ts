@@ -45,6 +45,28 @@ export default defineConfig({
       },
     },
   ],
+  // Local UI development reads the public staging registry, independently of
+  // build outputs. The legacy file URL is also supported for existing sessions.
+  server: {
+    proxy: {
+      "^/(?:api/v1/projects|data/project-registry\\.json)(?:\\?.*)?$": {
+        target: "https://staging.slop.cash",
+        changeOrigin: true,
+        rewrite: (path) =>
+          path.replace(/^\/data\/project-registry\.json/, "/api/v1/projects"),
+        bypass: (request) =>
+          request.method === "GET" || request.method === "HEAD"
+            ? undefined
+            : false,
+        configure: (proxy) => {
+          proxy.on("proxyReq", (request) => {
+            request.removeHeader("cookie");
+            request.removeHeader("authorization");
+          });
+        },
+      },
+    },
+  },
   build: {
     target: "es2022",
     // The production CSP sets font-src 'self', which blocks data: URIs, so

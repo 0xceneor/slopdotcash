@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { InboxEmail } from "./InboxEmail";
 import { fetchWithDeadline, readBoundedJson } from "./lib/browser-json";
 import {
+  emailDeliveryLabel,
   MAX_NOTIFICATION_MARK,
   type Notification,
   type NotificationsResponse,
@@ -157,7 +158,6 @@ export function InboxPage() {
           </button>
         </div>
       ) : null}
-      {state.status === "ready" ? <InboxEmail /> : null}
       {state.status === "ready" ? (
         <InboxList
           busy={busy}
@@ -206,6 +206,8 @@ export function InboxPage() {
           {actionError}
         </p>
       ) : null}
+      {/* Optional settings follow the notices and their actions (PRD section 7). */}
+      {state.status === "ready" ? <InboxEmail /> : null}
     </main>
   );
 }
@@ -283,6 +285,14 @@ function InboxItem({
       {n.detail ? <p className="inbox-detail">{n.detail}</p> : null}
       <p className="inbox-meta">
         <time dateTime={n.sourceAt}>{formatDateTime(n.sourceAt)}</time>
+        {n.emailDelivery ? (
+          <>
+            {" · "}
+            <span className="inbox-delivery">
+              {emailDeliveryLabel(n.emailDelivery)}
+            </span>
+          </>
+        ) : null}
       </p>
       <div className="inbox-actions">
         <a href={n.actionPath}>{notificationAction(n)}</a>
