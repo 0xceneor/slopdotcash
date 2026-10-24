@@ -206,7 +206,9 @@ AGENTS.md (owner decision of 18 October 2026) approves one fee-wallet hot key
 per network that signs only this conversion. The owner decision of 24 October
 2026 (PRD sections 6 and 11) confirms that model for launch: one dedicated
 conversion-only key per network, held as a Worker secret, bounded by the
-per-run and daily caps, with owners sweeping USDC proceeds to cold storage. A
+per-run and daily caps, with owners manually sweeping USDC proceeds to separate
+owner-controlled software wallets. The owner chose local `.env` custody for
+the sweep keys; those wallets are not cold storage. A
 remote signer may replace it later. Signing stays narrow: only `live` mode on a
 network with a verified USDC target loads a key; the key signs only an exact
 approval to the pinned router and the checked swap; errors and logs never
@@ -252,9 +254,11 @@ before the daily converted value is material.
 ## Sweep to treasury
 
 The Worker never sends funds out of the fee wallet. Proceeds accumulate as
-USDC. A human should sweep them to a cold treasury (for example
-a Squads or Safe multisig) on a fixed schedule, such as weekly or above a
-threshold. Keep only a small gas balance (ETH, or SOL) in the hot wallet. A
+USDC. The owner selected separate EVM and Solana software wallets for manual
+sweeps. Their keys stay in the owner's local `.env`, outside this Worker; do
+not describe them as cold storage. See the [owner decision](https://github.com/SlopDotCash/slopdotcash/issues/905#issuecomment-6379777455).
+Sweep on a fixed schedule, such as weekly or above a threshold. Keep only
+a small gas balance (ETH, or SOL) in the fee wallet. A
 sweep is a human-signed transfer outside this Worker.
 
 ## Turn on live mode
