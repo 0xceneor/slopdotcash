@@ -737,7 +737,9 @@ test("private retained bytes remain inspectable without granting clean clearance
     reason: "Inspect recorded collector evidence",
   });
   expect(grantResponse.status).toBe(201);
-  const grant = (await grantResponse.json()).grant;
+  const grantedAccess = await grantResponse.json();
+  expect(grantedAccess.expiresInSeconds).toBe(900);
+  const grant = grantedAccess.grant;
   const reads = await Promise.all([
     operator(`${base}/body`, undefined, undefined, grant),
     operator(`${base}/body`, undefined, undefined, grant),
@@ -746,6 +748,33 @@ test("private retained bytes remain inspectable without granting clean clearance
   const read = reads.find((r) => r.ok)!;
   expect(await read.text()).toBe(VETTING_TRACE_BODY);
   expect(read.headers.get("cache-control")).toBe("private, no-store");
+  // Read grants expire independently of the stored run's access window.
+  const timedGrant = async () =>
+    (
+      await (
+        await operator(`${base}/grant`, undefined, {
+          reason: "Inspect the approved read access window",
+        })
+      ).json()
+    ).grant;
+  const beforeExpiry = await timedGrant();
+  const atExpiry = await timedGrant();
+  retained.evidence.deps.now = () => new Date(NOW.getTime() + 899_000);
+  expect(
+    await (
+      await operator(`${base}/body`, undefined, undefined, beforeExpiry)
+    ).text(),
+  ).toBe(VETTING_TRACE_BODY);
+  retained.evidence.deps.now = () => new Date(NOW.getTime() + 900_000);
+  expect(
+    (await operator(`${base}/body`, undefined, undefined, atExpiry)).status,
+  ).toBe(403);
+  const renewedGrant = await timedGrant();
+  expect(
+    await (
+      await operator(`${base}/body`, undefined, undefined, renewedGrant)
+    ).text(),
+  ).toBe(VETTING_TRACE_BODY);
   const policy = retained.evidence.deps.policy!;
   const revokeGrant = (
     await (
@@ -1053,6 +1082,7 @@ test("large retained evidence uses bounded chunks, immutable completion and acto
   expect(await granted.text()).not.toContain("grant");
   const cookie = granted.headers.get("set-cookie")!;
   expect(cookie).toContain("HttpOnly; SameSite=Strict");
+  expect(cookie).toContain("Max-Age=900;");
   expect(cookie).toContain(`Path=${base}/download;`);
   const token = cookie.split(";")[0];
   expect((await request(token, "900000001")).status).toBe(403);

@@ -49,7 +49,8 @@ export type EvidencePolicy = {
   version: string;
   policyAuthorityGithubId: string;
   operatorGithubIds: string[];
-  accessDurationSeconds: number;
+  evidenceAccessDurationSeconds: number;
+  readGrantDurationSeconds: number;
   maxObjectBytes: number;
   maxRunBytes: number;
   maxObjects: number;
@@ -83,7 +84,8 @@ export function evidencePolicy(
       "version",
       "policyAuthorityGithubId",
       "operatorGithubIds",
-      "accessDurationSeconds",
+      "evidenceAccessDurationSeconds",
+      "readGrantDurationSeconds",
       "maxObjectBytes",
       "maxRunBytes",
       "maxObjects",
@@ -113,13 +115,15 @@ export function evidencePolicy(
     )
       return null;
     for (const key of [
-      "accessDurationSeconds",
+      "evidenceAccessDurationSeconds",
+      "readGrantDurationSeconds",
       "maxObjectBytes",
       "maxRunBytes",
       "maxObjects",
     ])
       if (!Number.isSafeInteger(p[key]) || Number(p[key]) < 1) return null;
     if (
+      Number(p.readGrantDurationSeconds) > 900 ||
       Number(p.maxObjectBytes) > MAX_EVIDENCE_OBJECT_BYTES ||
       Number(p.maxRunBytes) > 64 * 1024 * 1024 ||
       Number(p.maxObjects) > 1024 ||
@@ -149,7 +153,7 @@ export function evidencePolicy(
     if (
       !Number.isFinite(
         new Date(
-          now.getTime() + Number(p.accessDurationSeconds) * 1000,
+          now.getTime() + Number(p.evidenceAccessDurationSeconds) * 1000,
         ).getTime(),
       )
     )
@@ -984,7 +988,7 @@ export class VettingEvidence {
           JSON.stringify(policy),
           at.toISOString(),
           new Date(
-            at.getTime() + policy.accessDurationSeconds * 1000,
+            at.getTime() + policy.evidenceAccessDurationSeconds * 1000,
           ).toISOString(),
           input.assemblySha256 ?? null,
         ),
@@ -1297,6 +1301,7 @@ export class VettingEvidence {
       );
     // Do not grant access to absent, expired, oversized or changed evidence.
     await this.verify(object, run);
+    const { readGrantDurationSeconds } = this.configuration().policy;
     const token = crypto.randomUUID() + crypto.randomUUID(),
       hash = await sha256Hex(new TextEncoder().encode(token));
     await this.deps.db.batch([
@@ -1311,7 +1316,9 @@ export class VettingEvidence {
           sha,
           actor.githubId,
           reason,
-          new Date(this.deps.now().getTime() + 60_000).toISOString(),
+          new Date(
+            this.deps.now().getTime() + readGrantDurationSeconds * 1000,
+          ).toISOString(),
         ),
       this.deps.db
         .prepare(
@@ -1329,14 +1336,25 @@ export class VettingEvidence {
         ),
     ]);
     if (download) {
-      const response = json(201, { expiresInSeconds: 60 });
+      const response = json(201, {
+        expiresInSeconds: readGrantDurationSeconds,
+      });
       response.headers.set(
         "set-cookie",
-        this.downloadCookie(assessment, runId, sha, token),
+        this.downloadCookie(
+          assessment,
+          runId,
+          sha,
+          token,
+          readGrantDurationSeconds,
+        ),
       );
       return response;
     }
-    return json(201, { grant: token, expiresInSeconds: 60 });
+    return json(201, {
+      grant: token,
+      expiresInSeconds: readGrantDurationSeconds,
+    });
   }
   private async consume(
     request: Request,
@@ -1398,9 +1416,10 @@ export class VettingEvidence {
     runId: string,
     sha: string,
     token = "",
+    maxAge = 0,
   ) {
     const path = `/api/v1/operator/vetting-evidence/${assessment}/${runId}/${sha}/download`;
-    return `__Secure-vetting-read-grant=${token}; Path=${path}; Max-Age=${token ? 60 : 0}; Secure; HttpOnly; SameSite=Strict`;
+    return `__Secure-vetting-read-grant=${token}; Path=${path}; Max-Age=${token ? maxAge : 0}; Secure; HttpOnly; SameSite=Strict`;
   }
   async download(
     request: Request,
