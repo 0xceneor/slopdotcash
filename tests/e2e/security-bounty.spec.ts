@@ -560,7 +560,9 @@ test("owners publish and control bounty programs with verified funding @registry
     await page.getByLabel("Status", { exact: true }).selectOption("closed");
     await page.getByRole("button", { name: "Publish bounty terms" }).click();
     await expect(
-      page.getByRole("status").filter({ hasText: "Published revision" }),
+      page
+        .getByRole("status")
+        .filter({ hasText: `Published revision ${stored.revision + 1}.` }),
     ).toBeVisible();
     expect(
       (await adminProject(request, id)).manifest.securityBounty,
